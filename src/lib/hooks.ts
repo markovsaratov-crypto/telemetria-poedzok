@@ -95,6 +95,21 @@ export function useDeviceStats() {
   });
 }
 
+// ===== Tags cloud =====
+export interface TagStat {
+  name: string;
+  count: number;
+}
+
+export function useTagsStats() {
+  return useQuery({
+    queryKey: ["tags-stats"],
+    queryFn: () =>
+      api.get<{ tags: TagStat[]; total: number; totalSessions: number }>("/api/stats/tags"),
+    staleTime: 60_000,
+  });
+}
+
 // ===== Sessions list =====
 export interface SessionsQuery {
   limit?: number;
@@ -204,6 +219,22 @@ export function useUpdateSessionNotes() {
       qc.invalidateQueries({ queryKey: ["session", vars.id] });
       qc.invalidateQueries({ queryKey: ["sessions"] });
       qc.invalidateQueries({ queryKey: ["audit"] });
+    },
+  });
+}
+
+// ===== Bulk delete =====
+export function useBulkDeleteSessions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (ids: string[]) =>
+      api.post<{ deleted: number; errors: string[] }>("/api/sessions/bulk-delete", { ids }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      qc.invalidateQueries({ queryKey: ["stats"] });
+      qc.invalidateQueries({ queryKey: ["audit"] });
+      qc.invalidateQueries({ queryKey: ["device-stats"] });
+      qc.invalidateQueries({ queryKey: ["tags-stats"] });
     },
   });
 }

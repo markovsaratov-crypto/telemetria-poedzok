@@ -11,6 +11,7 @@ import {
   XCircle,
   Loader2,
   FileUp,
+  Download,
 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api-client";
@@ -92,14 +93,27 @@ export function CsvImport() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <FileUp className="h-4 w-4 text-primary" />
-          Импорт GPS-сессий из CSV
-        </CardTitle>
-        <CardDescription className="text-xs">
-          Поддерживаются колонки: <code>lat, lon, speed, altitude, accuracy, timestamp, bearing, device_id, client_id, device_name</code>.
-          Разделитель <code>,</code> или <code>;</code>. Timestamp: epoch ms/ns или ISO8601.
-        </CardDescription>
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FileUp className="h-4 w-4 text-primary" />
+              Импорт GPS-сессий из CSV
+            </CardTitle>
+            <CardDescription className="text-xs mt-1">
+              Поддерживаются колонки: <code>lat, lon, speed, altitude, accuracy, timestamp, bearing, device_id, client_id, device_name</code>.
+              Разделитель <code>,</code> или <code>;</code>. Timestamp: epoch ms/ns или ISO8601.
+            </CardDescription>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={downloadSampleCSV}
+            className="shrink-0 text-xs gap-1.5"
+            title="Скачать пример CSV-файла"
+          >
+            <Download className="h-3 w-3" /> Шаблон
+          </Button>
+        </div>
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Drop zone */}
@@ -269,4 +283,25 @@ export function CsvImport() {
       </CardContent>
     </Card>
   );
+}
+
+// Скачать пример CSV-файла с правильным форматом
+function downloadSampleCSV() {
+  const rows = [
+    "device_id,client_id,device_name,lat,lon,speed,altitude,accuracy,timestamp,bearing",
+    "demo-phone-01,,Demo Phone,55.7558,37.6173,12.5,160,5.0,1723680000000000000,45",
+    "demo-phone-01,,Demo Phone,55.7560,37.6180,13.0,162,4.8,1723680003000000000,48",
+    "demo-phone-01,,Demo Phone,55.7565,37.6190,14.0,165,4.5,1723680006000000000,50",
+    "demo-phone-02,,Demo Phone 2,59.9343,30.3351,10.0,10,8.0,1723680000000000000,90",
+    "demo-phone-02,,Demo Phone 2,59.9350,30.3360,11.0,12,7.5,1723680003000000000,95",
+  ];
+  const csv = rows.join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "telemetria-sample.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+  toast.success("Шаблон CSV скачан", { description: "telemetria-sample.csv" });
 }

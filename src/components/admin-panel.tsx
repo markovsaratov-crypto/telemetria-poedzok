@@ -15,12 +15,19 @@ import {
   Hash,
   CheckCircle2,
   AlertCircle,
+  Server,
+  Cpu,
+  Zap,
+  Activity,
+  GitBranch,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
   useBackups,
   useCreateBackup,
   useRequeueJob,
+  useHealth,
+  useStats,
 } from "@/lib/hooks";
 import {
   Card,
@@ -34,15 +41,115 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { fmtDate, fmtBytes } from "@/lib/format";
+import { fmtDate, fmtBytes, fmtNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 export function AdminPanel() {
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <BackupsCard />
-      <RequeueCard />
+    <div className="space-y-4">
+      <SystemInfoCard />
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <BackupsCard />
+        <RequeueCard />
+      </div>
     </div>
+  );
+}
+
+function SystemInfoCard() {
+  const { data: health } = useHealth();
+  const { data: stats } = useStats();
+
+  const items = [
+    {
+      icon: <Activity className="h-3.5 w-3.5" />,
+      label: "Статус системы",
+      value: health?.status === "ok" ? "OK" : health?.status || "—",
+      color: health?.status === "ok" ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400",
+    },
+    {
+      icon: <Cpu className="h-3.5 w-3.5" />,
+      label: "БД",
+      value: health?.db === "ok" ? "OK" : health?.db || "—",
+      color: health?.db === "ok" ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400",
+    },
+    {
+      icon: <Server className="h-3.5 w-3.5" />,
+      label: "Worker",
+      value: health?.worker === "ok" ? "OK" : health?.worker || "—",
+      color: health?.worker === "ok" ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400",
+    },
+    {
+      icon: <Activity className="h-3.5 w-3.5" />,
+      label: "Uptime",
+      value: health ? `${Math.round(health.uptime / 60)} мин` : "—",
+    },
+    {
+      icon: <GitBranch className="h-3.5 w-3.5" />,
+      label: "Версия",
+      value: health?.version || "—",
+    },
+    {
+      icon: <Database className="h-3.5 w-3.5" />,
+      label: "Сессий (всего)",
+      value: stats ? fmtNumber(stats.totalSessions) : "—",
+    },
+    {
+      icon: <HardDrive className="h-3.5 w-3.5" />,
+      label: "GPS-точек (всего)",
+      value: stats ? fmtNumber(stats.totalPoints) : "—",
+    },
+    {
+      icon: <Hash className="h-3.5 w-3.5" />,
+      label: "TrafficJob dead",
+      value: stats ? String(stats.deadJobs) : "—",
+      color: (stats?.deadJobs ?? 0) > 0 ? "text-red-600 dark:text-red-400" : "",
+    },
+    {
+      icon: <Zap className="h-3.5 w-3.5" />,
+      label: "Rate limit (ingest)",
+      value: stats ? `${stats.capacity.rateLimitMaxIngest}/мин` : "—",
+    },
+    {
+      icon: <Zap className="h-3.5 w-3.5" />,
+      label: "Target load",
+      value: stats ? `${stats.capacity.targetLoadRpm} сесс/мин` : "—",
+    },
+  ];
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Server className="h-4 w-4 text-primary" />
+          Системная информация
+        </CardTitle>
+        <CardDescription className="text-xs">
+          Текущее состояние серверов и базы данных
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          {items.map((it, i) => (
+            <motion.div
+              key={i}
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: i * 0.03 }}
+              className="rounded-lg border bg-card/50 p-2.5 space-y-1"
+            >
+              <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                {it.icon}
+                <span className="truncate">{it.label}</span>
+              </div>
+              <div className={cn("text-sm font-semibold tabular-nums truncate", it.color || "")}>
+                {it.value}
+              </div>
+            </motion.div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

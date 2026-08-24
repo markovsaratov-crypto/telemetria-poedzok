@@ -1,9 +1,9 @@
 "use client";
 
-// src/components/sessions-list.tsx — список сессий с курсорной пагинацией и фильтрами.
+// src/components/sessions-list.tsx — список сессий с курсорной пагинацией, фильтрами, сортировкой, view modes.
 
 import * as React from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   Search,
   Loader2,
@@ -13,6 +13,12 @@ import {
   MapPin,
   Clock,
   Activity,
+  ArrowDownUp,
+  LayoutList,
+  Rows3,
+  HardDrive,
+  Calendar,
+  RefreshCw,
 } from "lucide-react";
 import { useSessions, useRoutes } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
@@ -35,6 +41,9 @@ interface SessionsListProps {
   onSelect: (id: string) => void;
 }
 
+type SortKey = "date_desc" | "date_asc" | "points_desc" | "size_desc";
+type ViewMode = "detailed" | "compact";
+
 const STATUS_LABEL: Record<string, string> = {
   active: "Активна",
   completed: "Завершена",
@@ -49,6 +58,13 @@ const STATUS_BADGE: Record<string, string> = {
   deleted: "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30",
 };
 
+const SORT_LABELS: Record<SortKey, string> = {
+  date_desc: "Сначала новые",
+  date_asc: "Сначала старые",
+  points_desc: "Больше точек",
+  size_desc: "Больше объём",
+};
+
 export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
   const [deviceId, setDeviceId] = React.useState("");
   const [status, setStatus] = React.useState<string>("");
@@ -56,8 +72,10 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
   const [cursor, setCursor] = React.useState<string | undefined>(undefined);
   const [allSessions, setAllSessions] = React.useState<SessionListItem[]>([]);
   const [hasMore, setHasMore] = React.useState(false);
+  const [sort, setSort] = React.useState<SortKey>("date_desc");
+  const [viewMode, setViewMode] = React.useState<ViewMode>("detailed");
 
-  // Применённые фильтры (после нажатия "Применить")
+  // Применённые фильтры
   const [applied, setApplied] = React.useState<{
     deviceId?: string;
     status?: string;
@@ -74,7 +92,6 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
 
   const { data: routesData } = useRoutes();
 
-  // Сброс при смене фильтров
   React.useEffect(() => {
     setAllSessions([]);
     setCursor(undefined);
@@ -91,6 +108,56 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
     }
   }, [data, cursor]);
 
+  // Сортировка на клиенте (после загрузки)
+  const sortedSessions = React.useMemo(() => {
+    const arr = [...allSessions];
+    arr.sort((a, b) => {
+      switch (sort) {
+        case "date_asc":
+          return new Date(a.startTime).getTime() - new Date(b.startTime).getTime();
+        case "points_desc":
+          return b.pointCount - a.pointCount;
+        case "size_desc":
+          return b.payloadBytes - a.payloadBytes;
+        default:
+          return new Date(b.startTime).getTime() - new Date(a.startTime).getTime();
+      }
+    });
+    return arr;
+  }, [allSessions, sort]);
+
+  // Группировка по дате (только для detailed view)
+  const grouped = React.useMemo(() => {
+    if (viewMode !== "detailed") return null;
+    const groups: { label: string; items: SessionListItem[] }[] = [];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+
+    for (const s of sortedSessions) {
+      const d = new Date(s.startTime);
+      d.setHours(0, 0, 0, 0);
+      let label: string;
+      if (d.getTime() === today.getTime()) label = "Сегодня";
+      else if (d.getTime() === yesterday.getTime()) label = "Вчера";
+      else
+        label = d.toLocaleDateString("ru-RU", {
+          day: "numeric",
+          month: "long",
+          year: d.getFullYear() === today.getFullYear() ? undefined : "numeric",
+        });
+
+      let g = groups.find((g) => g.label === label);
+      if (!g) {
+        g = { label, items: [] };
+        groups.push(g);
+      }
+      g.items.push(s);
+    }
+    return groups;
+  }, [sortedSessions, viewMode]);
+
   function applyFilters() {
     setApplied({
       deviceId: deviceId.trim() || undefined,
@@ -106,12 +173,81 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
     setApplied({});
   }
 
+  const activeFiltersCount =
+    (applied.deviceId ? 1 : 0) + (applied.status ? 1 : 0) + (applied.routeId ? 1 : 0);
+
   return (
     <div className="flex flex-col h-full">
+      {/* Header с count и view toggle */}
+      <div className="border-b px-3 py-2 flex items-center justify-between bg-muted/30 gap-2">
+        <div className="flex items-center gap-2 text-xs">
+          <span className="font-medium">
+            {allSessions.length > 0 ? `${allSessions.length} сессий` : "Сессии"}
+          </span>
+          {isFetching && (
+            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+          )}
+        </div>
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0"
+            onClick={() => refetch()}
+            title="Обновить"
+          >
+            <RefreshCw className="h-3 w-3" />
+          </Button>
+          <div className="flex items-center rounded-md border bg-background/50 p-0.5">
+            <button
+              onClick={() => setViewMode("detailed")}
+              className={cn(
+                "p-1 rounded transition-colors",
+                viewMode === "detailed" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
+              )}
+              title="Детальный вид"
+            >
+              <Rows3 className="h-3 w-3" />
+            </button>
+            <button
+              onClick={() => setViewMode("compact")}
+              className={cn(
+                "p-1 rounded transition-colors",
+                viewMode === "compact" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
+              )}
+              title="Компактный вид"
+            >
+              <LayoutList className="h-3 w-3" />
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Фильтры */}
-      <div className="space-y-2 border-b p-3 bg-muted/30">
-        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-          <Filter className="h-3.5 w-3.5" /> Фильтры
+      <div className="space-y-2 border-b p-3 bg-muted/20">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <Filter className="h-3.5 w-3.5" /> Фильтры
+            {activeFiltersCount > 0 && (
+              <Badge className="text-[9px] h-4 px-1 bg-primary text-primary-foreground">
+                {activeFiltersCount}
+              </Badge>
+            )}
+          </div>
+          {/* Sort */}
+          <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
+            <SelectTrigger className="h-7 w-[140px] text-[10px] gap-1">
+              <ArrowDownUp className="h-2.5 w-2.5" />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
+                <SelectItem key={k} value={k} className="text-xs">
+                  {SORT_LABELS[k]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
           <div className="sm:col-span-5 relative">
@@ -162,14 +298,12 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
             </Button>
           </div>
         </div>
-        {(applied.deviceId || applied.status || applied.routeId) && (
-          <div className="flex flex-wrap gap-1.5 pt-1">
+        {activeFiltersCount > 0 && (
+          <div className="flex flex-wrap gap-1.5 pt-1 items-center">
             {applied.deviceId && (
               <Badge variant="outline" className="text-[10px] gap-1">
                 device: {applied.deviceId}
-                <button
-                  onClick={() => setApplied((a) => ({ ...a, deviceId: undefined }))}
-                >
+                <button onClick={() => setApplied((a) => ({ ...a, deviceId: undefined }))}>
                   <X className="h-2.5 w-2.5" />
                 </button>
               </Badge>
@@ -177,9 +311,7 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
             {applied.status && (
               <Badge variant="outline" className="text-[10px] gap-1">
                 {STATUS_LABEL[applied.status] || applied.status}
-                <button
-                  onClick={() => setApplied((a) => ({ ...a, status: undefined }))}
-                >
+                <button onClick={() => setApplied((a) => ({ ...a, status: undefined }))}>
                   <X className="h-2.5 w-2.5" />
                 </button>
               </Badge>
@@ -187,16 +319,14 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
             {applied.routeId && (
               <Badge variant="outline" className="text-[10px] gap-1">
                 Маршрут
-                <button
-                  onClick={() => setApplied((a) => ({ ...a, routeId: undefined }))}
-                >
+                <button onClick={() => setApplied((a) => ({ ...a, routeId: undefined }))}>
                   <X className="h-2.5 w-2.5" />
                 </button>
               </Badge>
             )}
             <button
               onClick={resetFilters}
-              className="text-[10px] text-muted-foreground hover:text-foreground underline"
+              className="text-[10px] text-muted-foreground hover:text-foreground underline ml-1"
             >
               сбросить всё
             </button>
@@ -209,7 +339,7 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
         {isLoading && !allSessions.length ? (
           <div className="p-3 space-y-2">
             {Array.from({ length: 6 }).map((_, i) => (
-              <Skeleton key={i} className="h-16 w-full" />
+              <Skeleton key={i} className="h-16 w-full shimmer" />
             ))}
           </div>
         ) : allSessions.length === 0 ? (
@@ -222,9 +352,55 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
               </Button>
             </div>
           </div>
+        ) : viewMode === "compact" ? (
+          <CompactList sessions={sortedSessions} selectedId={selectedId} onSelect={onSelect} />
         ) : (
+          <DetailedList groups={grouped || [{ label: "", items: sortedSessions }]} selectedId={selectedId} onSelect={onSelect} />
+        )}
+        {hasMore && (
+          <div className="p-3 border-t">
+            <Button
+              variant="outline"
+              className="w-full"
+              size="sm"
+              disabled={isFetching}
+              onClick={() => data?.nextCursor && setCursor(data.nextCursor)}
+            >
+              {isFetching ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Загрузка…
+                </>
+              ) : (
+                "Загрузить ещё"
+              )}
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DetailedList({
+  groups,
+  selectedId,
+  onSelect,
+}: {
+  groups: { label: string; items: SessionListItem[] }[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <>
+      {groups.map((group, gi) => (
+        <div key={gi}>
+          {group.label && (
+            <div className="sticky top-0 z-10 bg-muted/60 backdrop-blur-sm px-3 py-1 text-[10px] uppercase tracking-wider text-muted-foreground font-medium border-b">
+              {group.label} · {group.items.length}
+            </div>
+          )}
           <ul className="divide-y">
-            {allSessions.map((s, idx) => (
+            {group.items.map((s, idx) => (
               <motion.li
                 key={s.id}
                 initial={{ opacity: 0 }}
@@ -259,7 +435,9 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
                       <span className="inline-flex items-center gap-1">
                         <Activity className="h-3 w-3" /> {fmtNumber(s.pointCount)} тчк
                       </span>
-                      <span>{fmtBytes(s.payloadBytes)}</span>
+                      <span className="inline-flex items-center gap-1">
+                        <HardDrive className="h-3 w-3" /> {fmtBytes(s.payloadBytes)}
+                      </span>
                     </div>
                     {s.route && (
                       <div className="text-[11px] text-muted-foreground inline-flex items-center gap-1">
@@ -272,27 +450,63 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
               </motion.li>
             ))}
           </ul>
-        )}
-        {hasMore && (
-          <div className="p-3 border-t">
-            <Button
-              variant="outline"
-              className="w-full"
-              size="sm"
-              disabled={isFetching}
-              onClick={() => data?.nextCursor && setCursor(data.nextCursor)}
-            >
-              {isFetching ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Загрузка…
-                </>
-              ) : (
-                "Загрузить ещё"
+        </div>
+      ))}
+    </>
+  );
+}
+
+function CompactList({
+  sessions,
+  selectedId,
+  onSelect,
+}: {
+  sessions: SessionListItem[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <ul className="divide-y">
+      <AnimatePresence>
+        {sessions.map((s, idx) => (
+          <motion.li
+            key={s.id}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: Math.min(idx * 0.01, 0.2) }}
+          >
+            <button
+              onClick={() => onSelect(s.id)}
+              className={cn(
+                "w-full text-left px-3 py-1.5 hover:bg-accent/50 transition-colors flex items-center gap-2 border-l-2",
+                selectedId === s.id
+                  ? "bg-primary/10 border-primary"
+                  : "border-transparent"
               )}
-            </Button>
-          </div>
-        )}
-      </div>
-    </div>
+            >
+              <div
+                className={cn(
+                  "w-1.5 h-1.5 rounded-full shrink-0",
+                  s.status === "active"
+                    ? "bg-emerald-500"
+                    : s.status === "completed"
+                    ? "bg-teal-500"
+                    : "bg-muted-foreground/40"
+                )}
+              />
+              <span className="text-xs font-medium truncate flex-1">
+                {s.deviceName || s.deviceId}
+              </span>
+              <span className="text-[10px] text-muted-foreground font-mono shrink-0">
+                {fmtNumber(s.pointCount)}т
+              </span>
+              <span className="text-[10px] text-muted-foreground shrink-0">
+                {new Date(s.startTime).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" })}
+              </span>
+            </button>
+          </motion.li>
+        ))}
+      </AnimatePresence>
+    </ul>
   );
 }

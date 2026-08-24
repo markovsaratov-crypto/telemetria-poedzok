@@ -162,6 +162,29 @@ export function RoutePlanner() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* Preset маршруты */}
+        <div className="flex flex-wrap gap-1.5">
+          <span className="text-[10px] text-muted-foreground self-center mr-1">Пресеты:</span>
+          {PRESETS.map((p) => (
+            <button
+              key={p.name}
+              onClick={() => {
+                setStart(p.start);
+                setEnd(p.end);
+                setResult(null);
+                setMode("start");
+                toast.info(`Загружен: ${p.name}`);
+              }}
+              className="px-2 py-1 rounded-md border bg-background/50 hover:bg-accent hover:border-primary/50 text-[10px] transition-all flex items-center gap-1"
+              title={p.description}
+            >
+              <span className="text-emerald-500">●</span>
+              <span className="text-amber-500">●</span>
+              {p.name}
+            </button>
+          ))}
+        </div>
+
         <MapTrack
           points={routePolyline}
           markers={markers}
@@ -340,3 +363,43 @@ export function RoutePlanner() {
     </Card>
   );
 }
+
+// Популярные пресеты маршрутов (координаты реальных городов РФ)
+const PRESETS: { name: string; description: string; start: LatLng; end: LatLng }[] = [
+  {
+    name: "Москва → СПб",
+    description: "МКАД → КАД (~700км)",
+    start: { lat: 55.7558, lon: 37.6173 },
+    end: { lat: 59.9343, lon: 30.3351 },
+  },
+  {
+    name: "Москва центр",
+    description: "Красная площадь → Воробьёвы горы",
+    start: { lat: 55.7539, lon: 37.6208 },
+    end: { lat: 55.7101, lon: 37.5411 },
+  },
+  {
+    name: "СПб центр",
+    description: "Дворцовая → Летний сад",
+    start: { lat: 59.9398, lon: 30.3146 },
+    end: { lat: 59.9500, lon: 30.3358 },
+  },
+  {
+    name: "Казань → аэропорт",
+    description: "Центр → Казань Intl",
+    start: { lat: 55.7963, lon: 49.1088 },
+    end: { lat: 55.6062, lon: 49.2787 },
+  },
+  {
+    name: "Сочи → Адлер",
+    description: "Центр → аэропорт",
+    start: { lat: 43.5855, lon: 39.7231 },
+    end: { lat: 43.5051, lon: 39.9088 },
+  },
+  {
+    name: "Екатеринбург",
+    description: "Центр → Ельцин-центр",
+    start: { lat: 56.8389, lon: 60.6057 },
+    end: { lat: 56.8410, lon: 60.6140 },
+  },
+];

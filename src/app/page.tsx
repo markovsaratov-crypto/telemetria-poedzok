@@ -33,6 +33,7 @@ import { CsvImport } from "@/components/csv-import";
 import { AdminPanel } from "@/components/admin-panel";
 import { AuditLog } from "@/components/audit-log";
 import { MetricsViewer } from "@/components/metrics-viewer";
+import { TrafficJobsCard } from "@/components/traffic-jobs-card";
 import { CommandPalette } from "@/components/command-palette";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -243,6 +244,7 @@ export default function Home() {
 
               <TabsContent value="admin" className="mt-0 space-y-4">
                 <AdminPanel />
+                <TrafficJobsCard />
                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                   <AuditLog />
                   <MetricsViewer />

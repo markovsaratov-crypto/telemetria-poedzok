@@ -33,6 +33,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { fmtDate, fmtBytes, fmtNumber, avgSpeed, trackDistance } from "@/lib/format";
 import { ActivityHeatmap } from "./activity-heatmap";
+import { WeeklyStatsChart } from "./weekly-stats-chart";
 
 const MapTrack = dynamic(() => import("@/components/map-track"), {
   ssr: false,
@@ -259,8 +260,35 @@ export function DashboardOverview({
         </Card>
       </div>
 
-      {/* Activity heatmap */}
-      {stats?.heatmapSessions && (
+      {/* Weekly chart + Activity heatmap */}
+      {stats?.perDay && stats.perDay.length > 0 && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <TrendingUp className="h-4 w-4 text-primary" /> Динамика за 7 дней
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <WeeklyStatsChart perDay={stats.perDay} />
+            </CardContent>
+          </Card>
+          {stats.heatmapSessions && stats.heatmapSessions.length > 0 && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base flex items-center gap-2">
+                  <TrendingUp className="h-4 w-4 text-primary" /> Активность
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <ActivityHeatmap sessions={stats.heatmapSessions} weeks={12} />
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
+
+      {stats?.heatmapSessions && stats.heatmapSessions.length > 0 && !stats?.perDay?.length && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">

@@ -103,21 +103,63 @@ export function AuditLog() {
     }
   }, [data, cursor]);
 
+  function exportCSV() {
+    const headers = ["time", "action", "targetId", "targetType", "actorType", "actorId", "sessionId", "metadata"];
+    const rows = logs.map((l) => [
+      new Date(l.createdAt).toISOString(),
+      l.action,
+      l.targetId,
+      l.targetType,
+      l.actorType,
+      l.actorId || "",
+      l.sessionId || "",
+      (l.metadata || "").replace(/"/g, '""'),
+    ]);
+    const csv = [headers, ...rows]
+      .map((r) => r.map((c) => `"${c}"`).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <ScrollText className="h-4 w-4 text-primary" />
           <h3 className="text-sm font-semibold">Журнал аудита</h3>
+          {logs.length > 0 && (
+            <Badge variant="outline" className="text-[10px]">
+              {logs.length}
+            </Badge>
+          )}
         </div>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => refetch()}
-          disabled={isFetching}
-        >
-          <RefreshCw className={cn("h-3.5 w-3.5", isFetching && "animate-spin")} />
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={exportCSV}
+            disabled={logs.length === 0}
+            title="Экспорт в CSV"
+            className="h-7"
+          >
+            <Download className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            className="h-7"
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", isFetching && "animate-spin")} />
+          </Button>
+        </div>
       </div>
 
       {/* Фильтры */}

@@ -19,8 +19,12 @@ import {
   HardDrive,
   Calendar,
   RefreshCw,
+  Trash2,
+  CheckSquare,
+  Square,
 } from "lucide-react";
-import { useSessions, useRoutes } from "@/lib/hooks";
+import { toast } from "sonner";
+import { useSessions, useRoutes, useBulkDeleteSessions } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -74,6 +78,10 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
   const [hasMore, setHasMore] = React.useState(false);
   const [sort, setSort] = React.useState<SortKey>("date_desc");
   const [viewMode, setViewMode] = React.useState<ViewMode>("detailed");
+  const [bulkMode, setBulkMode] = React.useState(false);
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
+
+  const bulkDeleteMut = useBulkDeleteSessions();
 
   // Применённые фильтры
   const [applied, setApplied] = React.useState<{
@@ -173,6 +181,40 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
     setApplied({});
   }
 
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function selectAll() {
+    setSelectedIds(new Set(allSessions.map((s) => s.id)));
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+  }
+
+  async function handleBulkDelete() {
+    if (selectedIds.size === 0) return;
+    if (!confirm(`Удалить ${selectedIds.size} сессий? Это soft-delete с grace period 30 дней.`)) {
+      return;
+    }
+    try {
+      const result = await bulkDeleteMut.mutateAsync(Array.from(selectedIds));
+      toast.success(`Удалено: ${result.deleted}`, {
+        description: result.errors.length > 0 ? `${result.errors.length} не найдено` : undefined,
+      });
+      clearSelection();
+      setBulkMode(false);
+    } catch (e) {
+      toast.error("Ошибка массового удаления", { description: (e as Error).message });
+    }
+  }
+
   const activeFiltersCount =
     (applied.deviceId ? 1 : 0) + (applied.status ? 1 : 0) + (applied.routeId ? 1 : 0);
 
@@ -220,8 +262,64 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
               <LayoutList className="h-3 w-3" />
             </button>
           </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1 text-xs"
+            onClick={() => {
+              setBulkMode((v) => !v);
+              if (bulkMode) clearSelection();
+            }}
+            title={bulkMode ? "Выйти из режима выбора" : "Массовое удаление"}
+          >
+            {bulkMode ? (
+              <>
+                <X className="h-3 w-3" /> Отмена
+              </>
+            ) : (
+              <>
+                <CheckSquare className="h-3 w-3" /> Выбрать
+              </>
+            )}
+          </Button>
         </div>
       </div>
+
+      {/* Bulk actions bar */}
+      {bulkMode && (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: "auto" }}
+          exit={{ opacity: 0, height: 0 }}
+          className="border-b bg-amber-500/5 px-3 py-2 flex items-center justify-between gap-2"
+        >
+          <div className="flex items-center gap-2 text-xs">
+            <span className="font-medium text-amber-700 dark:text-amber-400">
+              Выбрано: {selectedIds.size}
+            </span>
+            <button onClick={selectAll} className="text-[10px] underline text-muted-foreground hover:text-foreground">
+              все
+            </button>
+            <button onClick={clearSelection} className="text-[10px] underline text-muted-foreground hover:text-foreground">
+              очистить
+            </button>
+          </div>
+          <Button
+            size="sm"
+            variant="destructive"
+            className="h-7 gap-1 text-xs"
+            disabled={selectedIds.size === 0 || bulkDeleteMut.isPending}
+            onClick={handleBulkDelete}
+          >
+            {bulkDeleteMut.isPending ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Trash2 className="h-3 w-3" />
+            )}
+            Удалить ({selectedIds.size})
+          </Button>
+        </motion.div>
+      )}
 
       {/* Фильтры */}
       <div className="space-y-2 border-b p-3 bg-muted/20">
@@ -353,9 +451,23 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
             </div>
           </div>
         ) : viewMode === "compact" ? (
-          <CompactList sessions={sortedSessions} selectedId={selectedId} onSelect={onSelect} />
+          <CompactList
+            sessions={sortedSessions}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            bulkMode={bulkMode}
+            selectedIds={selectedIds}
+            onToggleSelect={toggleSelect}
+          />
         ) : (
-          <DetailedList groups={grouped || [{ label: "", items: sortedSessions }]} selectedId={selectedId} onSelect={onSelect} />
+          <DetailedList
+            groups={grouped || [{ label: "", items: sortedSessions }]}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            bulkMode={bulkMode}
+            selectedIds={selectedIds}
+            onToggleSelect={toggleSelect}
+          />
         )}
         {hasMore && (
           <div className="p-3 border-t">
@@ -385,10 +497,16 @@ function DetailedList({
   groups,
   selectedId,
   onSelect,
+  bulkMode,
+  selectedIds,
+  onToggleSelect,
 }: {
   groups: { label: string; items: SessionListItem[] }[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  bulkMode?: boolean;
+  selectedIds?: Set<string>;
+  onToggleSelect?: (id: string) => void;
 }) {
   return (
     <>
@@ -408,7 +526,7 @@ function DetailedList({
                 transition={{ delay: Math.min(idx * 0.015, 0.3) }}
               >
                 <button
-                  onClick={() => onSelect(s.id)}
+                  onClick={() => bulkMode ? (onToggleSelect?.(s.id) ?? onSelect(s.id)) : onSelect(s.id)}
                   className={cn(
                     "w-full text-left p-3 hover:bg-accent/50 transition-colors flex items-start gap-3 border-l-2",
                     selectedId === s.id
@@ -416,6 +534,20 @@ function DetailedList({
                       : "border-transparent"
                   )}
                 >
+                  {bulkMode && (
+                    <span
+                      className={cn(
+                        "shrink-0 mt-0.5",
+                        selectedIds?.has(s.id) ? "text-primary" : "text-muted-foreground"
+                      )}
+                    >
+                      {selectedIds?.has(s.id) ? (
+                        <CheckSquare className="h-4 w-4" />
+                      ) : (
+                        <Square className="h-4 w-4" />
+                      )}
+                    </span>
+                  )}
                   <div className="flex-1 min-w-0 space-y-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm font-medium truncate">

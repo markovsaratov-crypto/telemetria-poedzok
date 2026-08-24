@@ -884,3 +884,84 @@ Stage Summary:
 - Header содержит 6 элементов: Search (Cmd+Shift+F), CommandPalette (Cmd+K), "?", HealthIndicator, ThemeToggle, Logout.
 - Пользователь может искать сессии по deviceId, заметкам и тегам через глобальный поиск.
 - Пользователь может воспроизвести GPS-трек с контролем скорости и позиции.
+
+---
+Task ID: 14 (webDevReview cron run #8)
+Agent: orchestrator (main) — webDevReview
+Task: QA + tags cloud + bulk delete operations.
+
+Work Log:
+- Прочитал worklog.md — система стабильна после Task 13.
+- Перезапустил dev server (Next :3000 + Worker :3001).
+- E2E: 7/7 endpoints PASS, включая новые TAGS и BULK_DELETE endpoints.
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Lint: 0 ошибок, 0 warnings.
+
+New features (mandatory):
+1. GET /api/stats/tags endpoint — агрегация тегов:
+   • Парсинг tags из всех сессий (tags хранятся как "tag1,tag2,tag3")
+   • Возвращает tags[] с count, total (уникальных тегов), totalSessions
+   • Сортировка по count desc, затем alphabetically
+   • Cookie или Bearer API_KEY auth
+
+2. POST /api/sessions/bulk-delete endpoint — массовое soft-delete:
+   • Body: { ids: string[] } (max 50)
+   • Zod валидация
+   • updateMany для эффективности
+   • Audit log для каждой сессии (action="session.delete", reason="bulk-delete")
+   • Возвращает { deleted: number, errors: string[] }
+   • Grace period 30 дней (soft-delete)
+   • Cookie или Bearer API_KEY auth
+
+3. TagsCloud component (новый, 135 строк):
+   • Облако тегов с размером шрифта по частоте (logarithmic scale)
+   • 4 размера: text-xs → text-lg
+   • Цветовые ранги: emerald (top-1), teal (top-2), amber (top-3), muted (rest)
+   • Opacity scale (0.6-1.0) по count
+   • Кликабельные теги с selection state
+   • motion.button с hover scale, tap scale
+   • Footer с выбранным тегом и кнопкой сброса
+   • Empty state: скрыт если нет тегов
+   • AnimatePresence для анимации
+
+4. Bulk delete в SessionsList:
+   • Toggle "Выбрать" режим (bulkMode)
+   • Bulk actions bar (amber): выбранный count, "все"/"очистить", Delete button
+   • Checkbox (CheckSquare/Square) в каждом item в bulk mode
+   • Confirm dialog перед удалением
+   • Loading state при удалении
+   • Toast уведомления с результатом
+   • Инвалидирует queries: sessions, stats, audit, device-stats, tags-stats
+
+5. useTagsStats hook:
+   • React Query с staleTime 60с
+   • Возвращает TagStat[] + total + totalSessions
+
+6. useBulkDeleteSessions hook:
+   • React Query mutation
+   • Инвалидирует 5 query keys
+
+Styling improvements (mandatory):
+- Dashboard: TagsCloud добавлен внизу (после DeviceLeaderboard)
+- SessionsList: bulk mode с amber accent, checkbox icons, animated bulk bar
+- Color-coded tags: emerald/teal/amber для топ-3, muted для остальных
+- Gradient sizes: text-xs (min) → text-lg (max) с font-weight scale
+
+Файлы созданы/изменены:
+- src/app/api/stats/tags/route.ts (новый endpoint, 50 строк)
+- src/app/api/sessions/bulk-delete/route.ts (новый endpoint, 65 строк)
+- src/components/tags-cloud.tsx (новый, 135 строк)
+- src/lib/hooks.ts (+30 строк: useTagsStats, useBulkDeleteSessions hooks)
+- src/components/sessions-list.tsx (+80 строк: bulk mode UI, checkboxes, bulk actions bar)
+- src/components/dashboard-overview.tsx (+2 строки: TagsCloud import + render)
+
+Stage Summary:
+- Lint: 0 ошибок, 0 warnings.
+- E2E: 7/7 endpoints PASS (curl), включая TAGS (2 tags) и BULK_DELETE (deleted=0, errors=2 — корректное поведение для nonexistent IDs).
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Worker: стабилен на :3001.
+- Новых багов не обнаружено.
+- 30 API endpoints (добавлены /api/stats/tags и /api/sessions/bulk-delete).
+- Dashboard теперь содержит: stat cards + capacity strip + last sessions + mini map + weekly chart + heatmap + device leaderboard + tags cloud.
+- SessionsList поддерживает bulk mode с массовым удалением (до 50 сессий за раз).
+- Пользователь может визуализировать теги как облако и фильтровать по ним.

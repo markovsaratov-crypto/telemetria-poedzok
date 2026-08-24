@@ -36,6 +36,7 @@ import { ActivityHeatmap } from "./activity-heatmap";
 import { WeeklyStatsChart } from "./weekly-stats-chart";
 import { LastUpdated } from "./last-updated";
 import { DeviceLeaderboard } from "./device-leaderboard";
+import { TagsCloud } from "./tags-cloud";
 
 const MapTrack = dynamic(() => import("@/components/map-track"), {
   ssr: false,
@@ -306,6 +307,9 @@ export function DashboardOverview({
 
       {/* Device leaderboard */}
       <DeviceLeaderboard />
+
+      {/* Tags cloud */}
+      <TagsCloud />
     </div>
   );
 }

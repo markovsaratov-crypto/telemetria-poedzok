@@ -40,6 +40,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { ExportDialog } from "@/components/export-dialog";
+import { ShareDialog } from "@/components/share-dialog";
 import { SpeedChart, ElevationChart } from "@/components/speed-chart";
 import { SpeedHistogram } from "@/components/speed-histogram";
 import { SessionNotes } from "@/components/session-notes";
@@ -159,6 +160,7 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
                 <Download className="h-3.5 w-3.5" /> Экспорт
               </Button>
             </ExportDialog>
+            <ShareDialog sessionId={session.id} />
             <AlertDialog>
               <AlertDialogTrigger asChild>
                 <Button size="sm" variant="outline" className="text-destructive hover:bg-destructive/10">

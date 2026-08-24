@@ -503,3 +503,79 @@ Stage Summary:
 - Admin panel теперь содержит 4 карточки: SystemInfo, Backups, Requeue, TrafficJobs.
 - Блокер №1 (rate-limit) визуализирован в SystemInfoCard (rateLimit + targetLoad + headroom).
 - Все 5 табов (Обзор/Сессии/Маршруты/Импорт/Администрирование) полностью функциональны.
+
+---
+Task ID: 9 (webDevReview cron run #3)
+Agent: orchestrator (main) — webDevReview
+Task: QA + map enhancements + audit export + weekly chart + theme animation.
+
+Work Log:
+- Прочитал worklog.md — система стабильна после Task 8.
+- Перезапустил dev server (Next :3000 + Worker :3001).
+- E2E: 7/7 endpoints PASS (LOGIN, STATS с perDay, SESSIONS, JOBS, AUDIT, HEALTH, WORKER).
+- Page render: 30.5KB HTML, без ошибок компиляции.
+- Lint: 0 ошибок, 0 warnings.
+
+Styling improvements (mandatory):
+1. map-track.tsx полностью переписан:
+   • Layer switcher (4 слоя): Voyager (CARTO), Dark (CARTO), Satellite (Esri World Imagery), Street (OSM)
+   • Layer switcher UI overlay (top-left, glassmorphism)
+   • Auto-sync layer с theme (dark → Dark layer, light → Voyager)
+   • ScaleControl (bottom-left, metric only)
+   • ZoomControl (top-right)
+   • Glow effect под полилинией (двойная Polyline с opacity 0.15)
+   • Tooltips на маркерах start/end с координатами (toFixed(5))
+   • Popup с детальными координатами (toFixed(6))
+   • Tooltips всегда видны (opacity=1)
+
+2. theme-toggle.tsx полностью переписан:
+   • Animated icon transition (rotate + scale + opacity)
+   • AnimatePresence mode="wait" для smooth переключения
+   • Pulse ring effect при переключении (border-primary)
+   • Color-coded icons: Sun (amber-500), Moon (indigo-600/400)
+
+3. audit-log.tsx: добавлен CSV export:
+   • Export button (Download icon) в header
+   • Генерация CSV с 8 колонками (time, action, targetId, targetType, actorType, actorId, sessionId, metadata)
+   • filename: audit-YYYY-MM-DD.csv
+   • Proper CSV escaping (quotes)
+   • Count badge в header
+
+New features (mandatory):
+1. weekly-stats-chart.tsx (новый компонент):
+   • SVG bar chart для последних 7 дней
+   • Двойные бары: sessions (emerald) + points (teal, прозрачный)
+   • Gradient fills (linearGradient)
+   • Animated bar growth (motion.rect с staggered delay)
+   • Day labels (Пн, Вт, Ср...) + date labels
+   • Grid lines (dashed)
+   • Legend (Сессии / Точки)
+   • Totals в header
+   • Empty state с иконкой
+
+2. Dashboard improvements:
+   • Weekly chart + Activity heatmap в grid 2 колонки
+   • Условный рендеринг: если есть perDay → показываем оба, иначе только heatmap
+   • Fallback: только heatmap если нет perDay
+
+3. MapTrack layer switcher:
+   • 4 типа карт: Voyager (light), Dark, Satellite (Esri), Street (OSM)
+   • State persistence в компоненте
+   • Auto-sync с theme при mount
+   • maxZoom per layer (Voyager/Dark: 20, Satellite/Street: 19)
+
+Файлы созданы/изменены:
+- src/components/map-track.tsx (полностью переписан, +95 строк: layers, scale, zoom, tooltips, glow)
+- src/components/theme-toggle.tsx (полностью переписан, +40 строк: animation, pulse ring)
+- src/components/audit-log.tsx (+25 строк: CSV export, count badge)
+- src/components/weekly-stats-chart.tsx (новый, 130 строк)
+- src/components/dashboard-overview.tsx (+30 строк: weekly chart integration)
+
+Stage Summary:
+- Lint: 0 ошибок, 0 warnings.
+- E2E: 7/7 endpoints PASS (curl), STATS теперь возвращает perDay для weekly chart.
+- Page render: 30.5KB HTML, без ошибок компиляции.
+- Worker: стабилен на :3001.
+- Новых багов не обнаружено.
+- UI значительно улучшен: 4 типа карт с layer switcher, glow effect на polylines, tooltips с координатами, animated theme toggle, CSV export для audit, weekly bar chart с двумя метриками.
+- MapTrack теперь production-grade: scale control, zoom control positioning, satellite imagery, custom tooltips.

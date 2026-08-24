@@ -1,0 +1,2 @@
+version,device name,recording epoch time,recording time,recording timezone,platform,appVersion,device id,sensors,sampleRateMs,standardisation,platform version
+3,iPhone 15 Pro,1786280281820,2026-08-09_12-58-01,Europe/Saratov,ios,1.62,56ace75e-f33c-4d4d-8c68-acce81a2fe2a,Accelerometer|Location|Wrist Motion|Watch Location|Annotation|AccelerometerUncalibrated,10|0|10|10||10,true,26.6

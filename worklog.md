@@ -291,3 +291,117 @@ Stage Summary:
 - Frontend: полный dashboard с картой Leaflet, 5 табов, русский UI, dark mode.
 - Lint: 0 ошибок.
 - Известная проблема: dev server падает при быстром переключении табов (memory pressure Turbopack). В production build (next build) этой проблемы не будет. Для dev — precompile страниц через curl.
+
+---
+Task ID: 7 (webDevReview cron run #1)
+Agent: orchestrator (main) — webDevReview
+Task: QA + styling improvements + new features.
+
+Work Log:
+- Прочитал worklog.md — система в стабильном состоянии (Task 6 закрыл все блокеры, E2E зелёный).
+- Перезапустил dev server (Next :3000 + Worker :3001 через setsid, NODE_OPTIONS=--max-old-space-size=4096).
+- E2E через curl: 6/6 endpoints PASS (LOGIN, STATS, SESSIONS, ROUTES, HEALTH, METRICS). Worker health: ok, 0 pending jobs.
+- agent-browser QA не удалось (Chrome убивает Next.js при компиляции больших страниц — OOM contention). QA переведён на curl/python E2E.
+
+Styling improvements (mandatory):
+- globals.css полностью переписан:
+  • Animated gradient mesh background (.mesh-bg) для login + dashboard
+  • Glassmorphism (.glass) для cards
+  • Shimmer loading (.shimmer) вместо pulse
+  • Glow effect (.glow-primary) для primary buttons
+  • Pulse dot (.pulse-dot) для live indicators
+  • Slide-in entrance animation
+  • KBD styling для keyboard shortcuts
+  • Selection styling (emerald accent)
+  • Reduced motion support (prefers-reduced-motion)
+  • Dark mode для Leaflet controls (zoom, attribution)
+- Login form полностью переписан:
+  • Animated gradient mesh background
+  • Spring-animated logo entry (scale + rotate)
+  • Caps Lock indicator (amber, анимированный)
+  • Password strength meter (4 уровня: red→amber→teal→emerald)
+  • Shake animation при ошибке
+  • Glassmorphism card с backdrop-blur
+  • KeyRound иконка слева в input
+  • Micro-interactions на всех элементах
+
+New features (mandatory):
+1. /api/stats endpoint — агрегированная статистика:
+   • totalSessions, totalPoints, totalRoutes, totalTrafficJobs, deadJobs, pendingJobs
+   • todaySessions (сессии за сегодня)
+   • perDay (7 дней для sparkline)
+   • heatmapSessions (12 недель для activity heatmap)
+   • capacity (targetLoadRpm, rateLimitMaxIngest, headroom) — отображение блокера №1 в UI
+   • totalPayloadBytes
+
+2. CommandPalette (Cmd+K / Ctrl+K):
+   • Поиск по командам и навигации
+   • Группировка: Навигация / Действия
+   • Arrow keys + Enter навигация
+   • Mouse hover selection
+   • Быстрый переход на любой таб
+   • Toggle theme
+   • Refresh data (invalidateQueries)
+   • Logout
+
+3. Keyboard shortcuts:
+   • Cmd+K / Ctrl+K — открыть command palette
+   • Alt+1..5 — быстрый переход по табам
+   • Отображение в footer и tab triggers
+
+4. ActivityHeatmap component:
+   • 12 недель активности (как GitHub contributions)
+   • 5 уровней интенсивности (emerald)
+   • Month labels + day labels (Пн, Ср, Пт, Вс)
+   • Tooltip с детализацией по дню
+   • Legend (Меньше → Больше)
+   • Staggered animation появления ячеек
+
+5. SpeedChart + ElevationChart (SVG, без recharts):
+   • SpeedChart: график скорости по точкам трека
+     - Gradient area + line
+     - Max speed marker (animated)
+     - Avg/max значения
+     - Grid lines
+   • ElevationChart: профиль высоты
+     - Ascent/descent расчёт
+     - Amber gradient
+
+6. Dashboard improvements:
+   • StatCard с sparkline (7-дневный тренд)
+   • Capacity strip (блокер №1 визуализация)
+   • Pending jobs alert (amber) + dead jobs alert (red)
+   • LastSessionMap: 3 метрики (speed, distance, duration) + "Подробнее" button
+   • Empty state с CTA
+   • Hover effects (ArrowUpRight, y:-2)
+
+7. SessionDetail improvements:
+   • SpeedChart + ElevationChart после карты
+   • Анимации entrance
+
+Файлы созданы/изменены:
+- src/app/globals.css (полностью переписан, +180 строк)
+- src/components/login-form.tsx (полностью переписан, +90 строк)
+- src/components/dashboard-overview.tsx (полностью переписан, +120 строк)
+- src/components/session-detail.tsx (+20 строк: charts)
+- src/components/speed-chart.tsx (новый, 220 строк)
+- src/components/command-palette.tsx (новый, 230 строк)
+- src/components/activity-heatmap.tsx (новый, 150 строк)
+- src/app/page.tsx (+60 строк: Cmd+K, keyboard shortcuts)
+- src/app/api/stats/route.ts (новый endpoint)
+- src/lib/hooks.ts (+30 строк: useStats hook)
+
+Bug fixes during QA:
+- CalendarHeatmap не существует в lucide-react → заменён на CalendarDays
+- CapsLock не существует в lucide-react → заменён на Keyboard
+- react-hooks/preserve-manual-memoization lint error → вынес perDay в отдельную переменную
+
+Stage Summary:
+- Lint: 0 ошибок, 0 warnings.
+- E2E: 6/6 endpoints PASS (curl).
+- Page render: 30KB HTML, без ошибок компиляции.
+- Worker: стабильно работает на :3001.
+- Новых багов не обнаружено.
+- UI значительно улучшен: animated mesh background, glassmorphism, shimmer loading, sparklines, activity heatmap, speed/elevation charts, command palette, keyboard shortcuts, password strength meter, caps lock indicator.
+- Добавлен /api/stats endpoint для агрегированной статистики dashboard.
+- Блокер №1 (rate-limit vs TARGET_LOAD_RPM) теперь визуализирован в UI (capacity strip с headroom).

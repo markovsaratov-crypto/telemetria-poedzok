@@ -1033,3 +1033,73 @@ Stage Summary:
 - 31 API endpoints (добавлен GET /api/sessions/[id]/stats).
 - Session detail теперь содержит: header + map + speed chart + elevation chart + speed histogram + session replay + metrics (8) + session stats card (10) + session notes + points table.
 - Пользователь видит детальную статистику: дистанция, длительность, время в движении/на стоянках, ср/макс скорость, набор/снижение высоты, bounding box.
+
+---
+Task ID: 16 (webDevReview cron run #10)
+Agent: orchestrator (main) — webDevReview
+Task: QA + shareable session links feature.
+
+Work Log:
+- Прочитал worklog.md — система стабильна после Task 15.
+- Перезапустил dev server (Next :3000 + Worker :3001).
+- E2E: 6/6 endpoints PASS, включая новые SHARE_CREATE и SHARE_GET.
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Lint: 0 ошибок, 0 warnings.
+
+New features (mandatory):
+1. POST /api/sessions/[id]/share — создать shareable token:
+   • Генерация token через SHA-256(sessionId:timestamp:SESSION_SECRET)
+   • In-memory store (Map) для tokens (в прод — БД таблица)
+   • Срок действия: 7 дней
+   • Reuse существующего активного token
+   • Audit log: action="session.share", metadata: token (первые 8 символов), expiresAt
+   • Cookie или Bearer API_KEY auth
+
+2. GET /api/sessions/[id]/share?token=xxx — публичный доступ к сессии:
+   • Без авторизации (публичный endpoint)
+   • Проверка token валидности и срока действия
+   • Возвращает сессию с gpsPoints (Number(timestamp) для BigInt)
+   • Поле shared=true в ответе
+   • 403 при невалидном/истёкшем token
+
+3. ShareDialog component (новый, 195 строк):
+   • Диалог создания shareable ссылки
+   • Информационный блок: публичная ссылка, срок 7 дней, доступ без авторизации
+   • Create button с loading state
+   • Input с полной URL (origin + /shared/token)
+   • Copy button с checkmark feedback (2с)
+   • Open button (открыть в новой вкладке)
+   • Refresh button (создать новый token)
+   • Expiry date display (ru-RU locale)
+   • Badge "Публичный доступ — не требует входа"
+   • AnimatePresence для transition между create/result
+   • Toast уведомления
+
+4. useCreateShareLink hook:
+   • React Query mutation
+   • POST /api/sessions/[id]/share
+   • Возвращает ShareResult (token, url, expiresAt, sessionId)
+
+Styling improvements (mandatory):
+- session-detail: ShareDialog добавлен рядом с ExportDialog
+  • 3 кнопки в header: Экспорт, Поделиться, Удалить
+  • Share2 иконка для share
+  • Amber accent для public access badge
+  • Motion animation при появлении ссылки
+
+Файлы созданы/изменены:
+- src/app/api/sessions/[id]/share/route.ts (новый endpoint, 110 строк)
+- src/components/share-dialog.tsx (новый, 195 строк)
+- src/lib/hooks.ts (+15 строк: useCreateShareLink hook + ShareResult type)
+- src/components/session-detail.tsx (+3 строки: ShareDialog import + render)
+
+Stage Summary:
+- Lint: 0 ошибок, 0 warnings.
+- E2E: 6/6 endpoints PASS (curl), включая SHARE_CREATE (token=a9621462…) и SHARE_GET (shared=True, points=3).
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Worker: стабилен на :3001.
+- Новых багов не обнаружено.
+- 33 API endpoints (добавлены POST + GET /api/sessions/[id]/share).
+- Session detail header: Экспорт + Поделиться + Удалить.
+- Пользователь может создавать публичные ссылки на сессии (7 дней, без авторизации) и делиться ими.
+- Share tokens генерируются через SHA-256 с SESSION_SECRET, хранятся in-memory.

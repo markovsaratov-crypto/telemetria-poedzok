@@ -269,6 +269,21 @@ export function useBulkDeleteSessions() {
   });
 }
 
+// ===== Session share =====
+export interface ShareResult {
+  token: string;
+  url: string;
+  expiresAt: string;
+  sessionId: string;
+}
+
+export function useCreateShareLink() {
+  return useMutation({
+    mutationFn: (sessionId: string) =>
+      api.post<ShareResult>(`/api/sessions/${sessionId}/share`),
+  });
+}
+
 // ===== Routes =====
 export function useRoutes() {
   return useQuery({

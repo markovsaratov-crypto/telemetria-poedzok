@@ -1,0 +1,28 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "bun run build",
+  "devCommand": "bun run dev",
+  "installCommand": "bun install",
+  "crons": [
+    {
+      "path": "/api/worker/poll",
+      "schedule": "*/1 * * * *"
+    }
+  ],
+  "functions": {
+    "src/app/api/worker/poll/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/worker/complete/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/sessions/[id]/export/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/admin/backup/route.ts": {
+      "maxDuration": 60
+    }
+  },
+  "regions": ["fra1"]
+}

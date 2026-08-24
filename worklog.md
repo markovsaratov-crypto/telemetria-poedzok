@@ -801,3 +801,86 @@ Stage Summary:
 - 27 API endpoints (добавлен PATCH /api/sessions/[id]/notes).
 - Session detail теперь содержит: header + map + speed chart + elevation chart + speed histogram + metrics (8) + session notes + points table.
 - Пользователь может добавлять заметки и теги к любой сессии, они сохраняются в БД.
+
+---
+Task ID: 13 (webDevReview cron run #7)
+Agent: orchestrator (main) — webDevReview
+Task: QA + global search + session replay animation.
+
+Work Log:
+- Прочитал worklog.md — система стабильна после Task 12.
+- Перезапустил dev server (Next :3000 + Worker :3001).
+- E2E: 6/6 endpoints PASS, включая новый SEARCH endpoint (4 results for "test").
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Lint: 0 ошибок, 0 warnings.
+
+New features (mandatory):
+1. GET /api/sessions/search?q=text endpoint — глобальный поиск:
+   • Поиск по deviceId, deviceName, notes, tags (case-insensitive contains)
+   • Возвращает sessions[] с matchFields[] (подсветка совпавших полей)
+   • Limit до 100, default 20
+   • Empty query → пустой результат
+   • Cookie или Bearer API_KEY auth
+
+2. GlobalSearch component (новый, 175 строк):
+   • Модалка с мгновенным поиском (debounce 300ms)
+   • Подсветка совпавших полей (badges: deviceId, deviceName, notes, tags)
+   • Arrow keys + Enter навигация
+   • Mouse hover selection
+   • Preview заметок (обрезка до 60 символов)
+   • Empty states (no query, no results)
+   • Results count в footer
+   • Открытие: кнопка "Поиск" в header или Cmd+Shift+F
+
+3. SessionReplay component (новый, 180 строк):
+   • Анимация прохождения GPS-трека с play/pause
+   • Speed control: 1x, 2x, 4x, 8x
+   • Slider для scrubbing по точкам
+   • SkipBack (в начало) + SkipForward (в конец)
+   • Progressive reveal: карта показывает только точки до текущей позиции
+   • Current position marker (pin variant)
+   • Info chips: Точка N/total, Скорость (km/h), Прошло времени, Координаты
+   • AnimatePresence для info chips
+   • Progress bar (gradient emerald→teal)
+   • Auto-stop при достижении конца
+   • Reset при смене сессии
+
+4. Keyboard shortcut Cmd+Shift+F — открыть/закрыть глобальный поиск
+   • Guard от конфликтов с другими shortcut'ами
+
+5. useSessionSearch hook:
+   • React Query с debounce 300ms
+   • enabled: query.trim().length > 0
+   • staleTime 10с
+
+6. ShortcutsHelp обновлён:
+   • Добавлен Cmd+Shift+F → "Глобальный поиск сессий"
+   • Добавлен Space → "Воспроизвести/пауза (в replay)"
+
+Styling improvements (mandatory):
+- Header: 6 элементов (Search, CommandPalette, "?", HealthIndicator, ThemeToggle, Logout)
+- Footer: обновлён hint ("⌘K команды · ⌘⇧F поиск · ? справка · Alt+1..5 табы")
+- session-detail: SessionReplay добавлен после SpeedHistogram
+  • Полная визуализация: карта + графики + replay анимация
+  • Интерактивный просмотр трека с контролем скорости
+
+Файлы созданы/изменены:
+- src/app/api/sessions/search/route.ts (новый endpoint, 50 строк)
+- src/components/global-search.tsx (новый, 175 строк)
+- src/components/session-replay.tsx (новый, 180 строк)
+- src/lib/hooks.ts (+25 строк: useSessionSearch hook + SearchResultItem type)
+- src/app/page.tsx (+30 строк: GlobalSearch, Cmd+Shift+F shortcut, Search button в header)
+- src/components/session-detail.tsx (+5 строк: SessionReplay integration)
+- src/components/shortcuts-help.tsx (+2 shortcut'а в список)
+
+Stage Summary:
+- Lint: 0 ошибок, 0 warnings.
+- E2E: 6/6 endpoints PASS (curl), включая SEARCH (4 results).
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Worker: стабилен на :3001.
+- Новых багов не обнаружено.
+- 28 API endpoints (добавлен GET /api/sessions/search).
+- Session detail теперь содержит: header + map + speed chart + elevation chart + speed histogram + session replay + metrics (8) + session notes + points table.
+- Header содержит 6 элементов: Search (Cmd+Shift+F), CommandPalette (Cmd+K), "?", HealthIndicator, ThemeToggle, Logout.
+- Пользователь может искать сессии по deviceId, заметкам и тегам через глобальный поиск.
+- Пользователь может воспроизвести GPS-трек с контролем скорости и позиции.

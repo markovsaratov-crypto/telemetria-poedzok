@@ -153,6 +153,33 @@ export function useBatchSessions(ids: string[]) {
   });
 }
 
+// ===== Session search =====
+export interface SearchResultItem {
+  id: string;
+  deviceId: string;
+  deviceName: string | null;
+  startTime: string;
+  endTime: string | null;
+  pointCount: number;
+  payloadBytes: number;
+  status: string;
+  notes: string | null;
+  tags: string | null;
+  matchFields: string[];
+}
+
+export function useSessionSearch(query: string) {
+  return useQuery({
+    queryKey: ["session-search", query],
+    queryFn: () =>
+      api.get<{ sessions: SearchResultItem[]; query: string; total: number }>(
+        `/api/sessions/search?q=${encodeURIComponent(query)}`
+      ),
+    enabled: query.trim().length > 0,
+    staleTime: 10_000,
+  });
+}
+
 export function useDeleteSession() {
   const qc = useQueryClient();
   return useMutation({

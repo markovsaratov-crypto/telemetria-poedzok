@@ -24,3 +24,24 @@ Stage Summary:
   • Stateless HMAC-signed cookie { sub:"owner", iat, exp } подписан SESSION_SECRET (env, ≥32 chars), timing-safe compare пароля против LOGIN_PASSWORD (env, ≥32 chars). Никакой Session-таблицы в single-user модели (premature optimization, §6.1).
 - Важные вопросы пользователю (9 шт., см. ниже в чате) — ждём ответов перед стартом кодирования.
 - Состояние проекта: чистый scaffold, spec-код отсутствует.
+
+---
+Task ID: 1
+Agent: orchestrator (main)
+Task: Финализация решений по блокерам, старт backend-инфраструктуры.
+
+Work Log:
+- Получены ответы пользователя. Финальные решения:
+  • Блокер №1: ПОДНЯТЬ RATE_LIMIT_MAX_INGEST до 120 (env), ключ остаётся `IP + INGEST_TOKEN` (упрощённый вариант). Глобальный потолок = 120/мин на токен+IP. Целевая нагрузка 100 сессий/мин достижима (headroom 20%).
+  • Блокер №3: LOGIN_PASSWORD env (≥32 chars, timing-safe compare via crypto.timingSafeEqual). Stateless HMAC cookie {sub:"owner", iat, exp} подпись HMAC-SHA256(SESSION_SECRET). Companion endpoints /api/auth/logout + /api/auth/me добавлены. Cookie: __Host-telem_session, HttpOnly, Secure, SameSite=Strict, Path=/, Max-Age=86400 (24h). Sliding renewal при exp-now<1h.
+  • Скоуп: Faithful MVP — все 8 Prisma-моделей, middleware, /api/ingest, /api/sessions (+[id]), /api/plan (+[sessionId]), /api/routes CRUD, /api/sessions/[id]/export, /api/exports/[jobId], /health, /api/admin/{backup,restore}, /api/audit, /api/worker/{requeue,health}, /api/auth/*, /api/import/csv, /api/metrics. Worker как mini-service порт 3001. In-memory rate-limit (no Redis in sandbox). SQLite (no Turso). 2ГИС→OSRM→haversine chain (2ГИС key via env TWO_GIS_API_KEY).
+  • UI: русский.
+  • Demo-data: НЕТ. CSV-импорт endpoint /api/import/csv (auto-detect columns).
+- Установлены пакеты: p-limit, react-leaflet, leaflet, @types/leaflet.
+- Worker mini-service будет на порту 3001 (mini-services/worker/), доступ через ?XTransformPort=3001.
+- Стартует backend-инфра (env, prisma, lib/*), затем middleware + API routes, параллельно — subagent'ы на Worker + Frontend.
+
+Stage Summary:
+- Решения по блокерам зафиксированы. Спека v2.6 + патчи: RATE_LIMIT_MAX_INGEST=120, /api/auth/login contract (login+logout+me, HMAC cookie).
+- План: backend делаю сам (консистентность критична), Worker + Frontend делегирую 2 subagent'ам параллельно после завершения contracts/routing libs.
+- API контракты для subagent'ов будут в этом worklog (см. ниже секцию "API CONTRACTS").

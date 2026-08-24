@@ -1,0 +1,2002 @@
+     1→=== Page 1 ===
+     2→АРХИТЕКТУРНЫЙ ДОКУМЕНТ · V2.6
+     3→ГОТОВНОСТЬ
+     4→8.0
+     5→/10
+     6→Телеметрия
+     7→Production-ready (pending
+     8→поездок
+     9→QA)
+    10→Production-grade спецификация: изоляция Worker-
+    11→процесса, snap-to-grid кэш, STRIDE threat model,
+    12→3-уровневый backup, ADMIN_TOKEN, AlertManager.
+    13→Сервис сбора, хранения и анализа GPS-данных
+    14→автомобильных поездок с план-фактным анализом.
+    15→Архитектура: Next.js 16 + Prisma + Turso/LibSQL, Worker-
+    16→процесс для асинхронной обработки TrafficJob, Redis sliding
+    17→window rate-limit, circuit breaker для 2ГИС API. Безопасность:
+    18→STRIDE threat model (18 угроз), идемпотентность через clientId,
+    19→payload-лимиты. Данные: retention 10 лет, soft-delete с grace
+    20→period, BackupJob (type=full) с верификацией checksum.
+    21→АРХИТЕК- БЕЗОПАС- ПРОИЗВ- НАБЛЮД- ТЕСТИ- DEVOPS
+    22→ТНУаРбАлюдаемоНсОтСьТ: ЬPromethСeТuЬs-метрикиС, ТмЬашиночитаРеОмВАыНеИЕ / CI
+    23→8.5 9.0 8.5 8.5 7.0 8.5
+    24→правила AlertManager (6 alerts). Масштабирование: явные
+    25→v2.6
+    26→потолки SQLite single-writer, порог миграции на PostgreSQL.
+    27→КЛЮЧЕВЫЕ АРХИТЕКТУРНЫЕ РЕШЕНИЯ
+    28→W Worker изолирован от API I Идемпотентность clientId C Кэш snap-to-grid ~55м
+    29→T Threat model STRIDE (18) B Backup 3 уровня, RPO 1ч R Rate limit Redis sliding
+    30→A ADMIN_TOKEN для admin D Деградация circuit breaker M Миграции expand-contract
+    31→API
+    32→S Scale limits + порог PG
+    33→Версия: 2.6
+    34→Дата:
+    35→29.08.2026
+    36→Production-grade спецификация Статус:
+    37→Полный набор production-гарантий: безопасность, надёжность, Production-
+    38→сохранность данных, наблюдаемость. Незавершённые работы: реальные ready
+    39→k6-замеры и покрытие тестами (симуляция в таблицах 12, 11.1). (pending QA)
+    40→=== Page 2 ===
+    41→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+    42→Содержание
+    43→1. Обзор системы 4
+    44→1.1 Назначение . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+    45→1.2 Ключевые возможности . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+    46→1.3 Стек технологий . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+    47→1.4 Производственные гарантии . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+    48→2. Архитектура 7
+    49→2.1 Общая схема . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 7
+    50→2.2 Структура проекта . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 7
+    51→2.3 Схема данных (Prisma) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 8
+    52→2.4 Middleware . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 11
+    53→2.5 Контракты модулей . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+    54→2.6 Изоляция Worker-процесса . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13
+    55→3. Принципы работы 16
+    56→3.1 Сбор GPS-данных (правки #5, #6) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 16
+    57→3.2 Цепочка маршрутизации . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 16
+    58→3.3 Исторические пробки (Traffic) — обработка в Worker . . . . . . . . . . . . . . . . . . . . . . . . . . 16
+    59→3.4 План-фактный анализ . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17
+    60→3.5 Кэширование маршрутов . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17
+    61→3.6 Идемпотентность ingest . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19
+    62→3.7 Политика хранения данных — 10 лет . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+    63→3.8 Политика деградации . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+    64→3.9 Ограничения масштабирования . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22
+    65→4. API-эндпоинты 24
+    66→4.1 POST /api/ingest (правки #5, #6) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+    67→4.2 GET /api/sessions — фильтры . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+    68→4.3 GET /api/sessions/[id] . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+    69→4.4 POST /api/plan . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+    70→4.5 GET /api/plan/[sessionId] . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+    71→4.6 CRUD /api/routes . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+    72→4.7 Валидация входных данных . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+    73→4.8 GET /health . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+    74→Z.ai · 24.08.2026 стр. 1
+    75→=== Page 3 ===
+    76→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+    77→4.9 Worker API — внутренние endpoints . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+    78→4.10 DELETE /api/sessions/[id] . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+    79→4.11 POST /api/sessions/[id]/export . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+    80→4.12 GET /api/exports/[jobId] — poll . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 30
+    81→5. Фронтенд 31
+    82→5.1 Архитектура компонентов . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+    83→5.2 Карта (MapContainer) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+    84→5.3 Визуальная тема . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+    85→6. Безопасность 32
+    86→6.1 Авторизация . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+    87→6.2 Валидация входных данных . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+    88→6.3 Rate Limiting . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+    89→6.4 CORS . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+    90→6.5 Security Headers . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+    91→6.6 Управление секретами . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+    92→6.7 Идемпотентность как механизм защиты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+    93→6.8 Audit Log и compliance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 35
+    94→6.9 Threat Model . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 35
+    95→7. Наблюдаемость 38
+    96→7.1 Логирование . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+    97→7.2 Метрики . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+    98→7.3 Health-check и алертинг . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 39
+    99→8. Тестирование 41
+   100→8.1 Unit-тесты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 41
+   101→8.2 Integration-тесты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+   102→8.3 E2E-тесты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+   103→8.4 Нагрузочные тесты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+   104→8.5 Контрактные тесты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 43
+   105→9. Развёртывание 44
+   106→9.1 Локальная разработка . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+   107→9.2 CI/CD-конвейер . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+   108→9.3 Миграции базы данных — Backward-Compatible . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+   109→9.4 Продакшн (Turso + Vercel/Docker) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 46
+   110→Z.ai · 24.08.2026 стр. 2
+   111→=== Page 4 ===
+   112→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   113→9.5 Среда staging и rollback . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 46
+   114→9.6 Развёртывание Worker-процесса . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 46
+   115→9.7 Cron-задачи и poll-циклы в Worker . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 47
+   116→9.8 Резервное копирование . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 48
+   117→10. Зависимости 51
+   118→11. Переменные окружения 52
+   119→Z.ai · 24.08.2026 стр. 3
+   120→=== Page 5 ===
+   121→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   122→1. Обзор системы
+   123→1.1 Назначение
+   124→Сервис «Телеметрия поездок» предназначен для непрерывного сбора, хранения и анализа GPS-данных
+   125→автомобильных поездок. Основная ценность системы заключается в план-фактном анализе: сервис
+   126→сравнивает фактически пройденный маршрут с заранее запланированным, вычисляя отклонения по
+   127→каждому сегменту пути, длительности, скорости и пробковым условиям. Это позволяет оценивать
+   128→эффективность маршрутизации, качество дорожной инфраструктуры и поведение водителя в реальных
+   129→условиях.
+   130→Система ориентирована на личное использование: владелец устанавливает приложение Sensor Logger на
+   131→iPhone, которое записывает GPS-координаты с высокой частотой. Данные автоматически отправляются на
+   132→сервер через API-эндпоинт ingest. Веб-интерфейс позволяет просматривать поездки на карте,
+   133→анализировать скорость, выявлять проблемные участки и сравнивать план с фактом. Все данные хранятся
+   134→в базе SQLite (Turso/LibSQL), что обеспечивает простоту развёртывания и минимальные операционные
+   135→затраты.
+   136→1.2 Ключевые возможности
+   137→• Сбор GPS-треков из Sensor Logger (iPhone) через HTTP API с Bearer-авторизацией и
+   138→идемпотентной передачей (clientId).
+   139→• Автоматическая маршрутизация через API 2ГИС (carrouting 6.0.0) с fallback на OSRM и гаверсинус.
+   140→• Исторические данные о пробках по каждому сегменту маршрута — обработка выделена в
+   141→отдельный Worker-процесс.
+   142→• План-фактный анализ: отклонение по длительности, скорости и дистанции для каждого сегмента.
+   143→• Веб-интерфейс с декомпозированными компонентами, интерактивной картой (Leaflet) и 4 вкладками
+   144→телеметрии.
+   145→• Управление избранными маршрутами (сохранение, удаление, использование при планировании).
+   146→• Двухуровневое кэширование результатов маршрутизации (in-memory LRU + SQLite persistent) с
+   147→округлением до сетки ~55 м × ~35 м (snap-to-grid) и time-of-day-ключом.
+   148→• Cursor-based пагинация GPS-точек для эффективной загрузки больших сессий.
+   149→• Структурированное логирование (pino), Prometheus-метрики и health-check.
+   150→• Zod-валидация всех входных данных, payload-лимиты (256 КБ), p-limit concurrency control, CORS
+   151→и security headers.
+   152→• Backward-compatible миграции БД по паттерну expand-contract; CI/CD-конвейер с
+   153→автоматическими тестами.
+   154→• Rate limiting на Redis sliding window (multi-instance) с fallback на in-memory для single-instance.
+   155→• STRIDE threat model (18 угроз), политика деградации 2ГИС→OSRM→гаверсинус с circuit breaker
+   156→и уведомлением пользователя, 3-уровневый backup (Turso snapshots + logical dump + on-demand
+   157→export) с RPO 1ч / RTO 30мин.
+   158→1.3 Стек технологий
+   159→Z.ai · 24.08.2026 стр. 4
+   160→=== Page 6 ===
+   161→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   162→Слой Технология Назначение
+   163→Фронтенд Next.js 16 (App Router) SSR/SSG, React Server Components, API Routes
+   164→Стилизация Tailwind CSS 4 + oklch Адаптивная вёрстка, CSS-переменные темы
+   165→Карта React-Leaflet + Leaflet Интерактивная карта с GPS-треком и маркерами
+   166→Валидация Zod Схемы валидации API-запросов
+   167→ORM Prisma Типобезопасные запросы к БД с индексами
+   168→БД (prod) Turso / LibSQL Реплицируемая SQLite
+   169→БД (dev) SQLite (локальный) Локальная разработка
+   170→Маршрутизация 2ГИС carrouting 6.0.0 Построение маршрутов и получение пробок
+   171→Fallback OSRM Demo Server Резервная маршрутизация
+   172→Fallback Гаверсинус (40 км/ч) Расчёт прямой дистанции
+   173→Логирование Pino JSON-логи с уровнями и контекстом
+   174→Метрики prom-client Prometheus-метрики (/metrics)
+   175→Очередь задач Таблица TrafficJob + Worker Изоляция асинхронной обработки от API event loop
+   176→Process
+   177→Rate limit store Redis (Upstash) / in-memory LRU Sliding window для multi-instance
+   178→Circuit breaker opossum защита от лавины timeout-ов при отказе 2ГИС
+   179→Backup (managed) Turso automated snapshots point-in-time recovery, ежечасно
+   180→Backup (logical) ExportJob JSON + ежедневный dump, 90 дней rolling
+   181→scripts/restore-backup.ts
+   182→Тестирование Vitest + Playwright + k6 Unit, integration, E2E, нагрузочные тесты
+   183→Деплой Docker / Vercel Pro Контейнеризация (рекомендуется) или Vercel Pro (Cron 1
+   184→мин); free-tier BLOCKING для 100 сессий/мин
+   185→Таблица 1. Технологический стек сервиса.
+   186→1.4 Производственные гарантии
+   187→Система спроектирована с учётом production-grade требований. Ключевые гарантии: (а) безопасность —
+   188→STRIDE threat model (см. §6.9), Zod-валидация всех входов, payload-лимиты, rate limiting на Redis sliding
+   189→window, разделение токенов по scope; (б) надёжность — Worker-процесс изолирован от API event loop,
+   190→верифицируемый захват задач через UPDATE ... RETURNING id, circuit breaker для 2ГИС, политика
+   191→деградации с уведомлением пользователя (см. §3.8); (в) сохранность данных — retention 10 лет (см.
+   192→§3.7), 3-уровневый backup с RPO 1ч / RTO 30мин (см. §9.8), soft-delete с grace period 30 дней, AuditLog
+   193→всех destructive-операций; (г) наблюдаемость — Prometheus-метрики, машиночитаемые правила
+   194→AlertManager (см. §7.3), структурированное логирование Pino с requestId; (д) масштабируемость —
+   195→горизонтальное масштабирование Worker и API (stateless), явные потолки и порог миграции на
+   196→PostgreSQL (см. §3.9); (е) миграции БД — backward-compatible (expand-contract), CI-проверка
+   197→Z.ai · 24.08.2026 стр. 5
+   198→=== Page 7 ===
+   199→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   200→деструктивных операций (см. §9.3).
+   201→Z.ai · 24.08.2026 стр. 6
+   202→=== Page 8 ===
+   203→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   204→2. Архитектура
+   205→2.1 Общая схема
+   206→Архитектура сервиса построена по клиент-серверной модели с четырьмя основными компонентами:
+   207→мобильный клиент (Sensor Logger на iPhone), API-сервер (Next.js API Routes + Prisma + LibSQL),
+   208→Worker-процесс (отдельный Node.js-процесс для обработки TrafficJob) и веб-клиент (React-фронтенд с
+   209→Leaflet-картой). Взаимодействие защищено Bearer-токенами и проходит через единый middleware-слой,
+   210→обеспечивающий авторизацию, rate limiting, CORS, security headers и логирование.
+   211→Все GPS-данные поступают через endpoint ingest, где проходят Zod-валидацию, проверку payload size (≤
+   212→256 КБ), нормализацию и сохранение в БД. Создание TrafficJob теперь является единственной
+   213→неблокирующей операцией в ingest-хендлере: INSERT в таблицу jobs со статусом pending. Вся тяжёлая
+   214→асинхронная работа (traffic-fetch к 2ГИС, retry, обогащение сегментов) выполняется в Worker-процессе,
+   215→что устраняет блокировку event loop API-сервера при пиковой нагрузке (100 сессий/мин).
+   216→2.2 Структура проекта
+   217→Проект организован по модульному принципу с чётким разделением ответственности. Директория
+   218→worker/ содержит Worker-процесс, src/lib/idempotency.ts — логику идемпотентности.
+   219→Путь Назначение
+   220→src/app/ Next.js App Router: страницы и API routes
+   221→src/middleware.ts Сквозная обработка: async, авторизация, rate-limit, CORS, requestId, payload-size
+   222→guard, try/catch
+   223→src/lib/routing.ts Цепочка маршрутизации (2ГИС → OSRM → гаверсинус) с circuit breaker
+   224→src/lib/circuit-breaker.ts circuit breaker для 2ГИС API (opossum)
+   225→src/lib/traffic.ts Параллельный fetch данных о пробках с controlled concurrency (вызывается из
+   226→Worker)
+   227→src/lib/plan.ts План-фактный анализ: сегментация, отклонения
+   228→src/lib/validation.ts Zod-схемы для всех API endpoints (включая clientId)
+   229→src/lib/cache.ts Двухуровневый кэш маршрутизации (LRU + SQLite), snap-to-grid ~55 м + ToD
+   230→src/lib/idempotency.ts проверка (deviceId, clientId), возврат существующего sessionId
+   231→src/lib/rate-limit.ts Redis sliding window + in-memory fallback
+   232→src/lib/export.ts генерация GPX 1.1 / KML 2.2 / JSON (xmlbuilder2)
+   233→src/lib/retention.ts выбор кандидатов, авто-архивация, hard delete
+   234→src/lib/backup.ts логический дамп БД (BackupJob), верификация целостности
+   235→src/lib/logger.ts Pino-логгер с requestId и контекстом
+   236→src/lib/metrics.ts Prometheus-метрики (prom-client)
+   237→Z.ai · 24.08.2026 стр. 7
+   238→=== Page 9 ===
+   239→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   240→Путь Назначение
+   241→worker/index.ts точка входа Worker-процесса (poll TrafficJob, fetch traffic)
+   242→worker/processor.ts обработка одной TrafficJob с retry и backoff (RETURNING-захват)
+   243→worker/backup-runner.ts выполнение BackupJob, верификация, retry
+   244→src/components/ Декомпозированные React-компоненты
+   245→prisma/ Схема БД и миграции (expand-contract, проверка check-migrations.sh)
+   246→scripts/check-migrations.sh реальный lint деструктивных миграций (prisma migrate diff + grep)
+   247→scripts/restore-backup.ts восстановление БД из логического дампа
+   248→Таблица 3. Структура проекта.
+   249→2.3 Схема данных (Prisma)
+   250→Схема содержит модели Session, GpsPoint, Route, RouteCache, TrafficJob, AuditLog, ExportJob, BackupJob.
+   251→Ключевые поля: clientId в Session (идемпотентность с @@unique([deviceId, clientId])),
+   252→deletedAt (soft-delete), payloadBytes (контроль размера), priority и scheduledFor в
+   253→TrafficJob для упорядоченной выборки Worker-ом.
+   254→prisma/schema.prisma — схема БД
+   255→model Session {
+   256→id String @id @default(cuid())
+   257→deviceId String
+   258→clientId String? // UUID пакета для идемпотентности
+   259→deviceName String?
+   260→startTime DateTime
+   261→endTime DateTime?
+   262→pointCount Int @default(0)
+   263→payloadBytes Int @default(0) // размер payload
+   264→startLat Float?
+   265→startLon Float?
+   266→endLat Float?
+   267→endLon Float?
+   268→routeId String?
+   269→planJson String? // JSON-поле плана маршрута
+   270→deviationsJson String? // JSON отклонений
+   271→deletedAt DateTime? // soft-delete timestamp (null = active)
+   272→points GpsPoint[]
+   273→route Route? @relation(fields: [routeId], references: [id])
+   274→auditLogs AuditLog[] // записи аудита
+   275→exportJobs ExportJob[]// задачи экспорта
+   276→@@unique([deviceId, clientId]) // идемпотентность
+   277→@@index([startTime(sort: Desc)]) // Список сессий по времени
+   278→@@index([routeId]) // Поиск по избранному маршруту
+   279→@@index([deletedAt]) // фильтр активных
+   280→}
+   281→model GpsPoint {
+   282→id String @id @default(cuid())
+   283→sessionId String
+   284→lat Float
+   285→Z.ai · 24.08.2026 стр. 8
+   286→=== Page 10 ===
+   287→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   288→lon Float
+   289→speed Float?
+   290→altitude Float?
+   291→accuracy Float?
+   292→timestamp BigInt
+   293→bearing Float?
+   294→session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+   295→@@index([sessionId]) // CRITICAL: WHERE sessionId = ?
+   296→@@index([sessionId, timestamp]) // ORDER BY внутри сессии
+   297→}
+   298→model Route {
+   299→id String @id @default(cuid())
+   300→name String
+   301→description String?
+   302→startLat Float
+   303→startLon Float
+   304→endLat Float
+   305→endLon Float
+   306→sessions Session[]
+   307→routeCaches RouteCache[] // обратная связь для @relation в RouteCache
+   308→}
+   309→model RouteCache {
+   310→id String @id @default(cuid())
+   311→hash String @unique // hash(snap-to-grid start,end + tod_bucket)
+   312→result String // JSON-результат маршрутизации
+   313→todBucket Int // 0,3,6,9,12,15,18,21 (час)
+   314→routeId String? // связь с избранным маршрутом
+   315→expiresAt DateTime
+   316→route Route? @relation(fields: [routeId], references: [id], onDelete: Cascade)
+   317→@@index([todBucket, expiresAt]) // партиционированная инвалидация
+   318→@@index([routeId]) // инвалидация по routeId
+   319→}
+   320→model TrafficJob {
+   321→id String @id @default(cuid())
+   322→sessionId String
+   323→status String @default("pending") // pending|running|completed|failed
+   324→attempts Int @default(0)
+   325→priority Int @default(0) // выше = раньше
+   326→scheduledFor DateTime @default(now()) // отложенный старт
+   327→lockedBy String? // ID Worker-инстанса
+   328→lockedAt DateTime?
+   329→createdAt DateTime @default(now())
+   330→updatedAt DateTime @updatedAt
+   331→error String? // Последняя ошибка при failed
+   332→@@index([status, scheduledFor, priority]) // Очередь Worker-а
+   333→@@index([sessionId])
+   334→}
+   335→// журнал аудита всех destructive-операций
+   336→// Связь с Session (onDelete: SetNull — audit сохраняется при удалении сессии)
+   337→model AuditLog {
+   338→id String @id @default(cuid())
+   339→Z.ai · 24.08.2026 стр. 9
+   340→=== Page 11 ===
+   341→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   342→action String // session.delete|session.purge|session.export|route.delete|backup.*
+   343→targetId String // ID Session / Route / BackupJob
+   344→targetType String // Session | Route | BackupJob
+   345→actorType String // user | system | retention-cron | worker | backup-cron
+   346→actorId String? // userId / workerId / cron
+   347→metadata String? // JSON: детали (pointCount, format, reason, archivedUrl)
+   348→sessionId String? // FK на Session (nullable — аудит может относиться к Route/системе)
+   349→createdAt DateTime @default(now())
+   350→session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+   351→@@index([action, createdAt]) // поиск по типу действия
+   352→@@index([targetId, targetType])
+   353→@@index([actorType, actorId])
+   354→@@index([sessionId]) // поиск аудита по сессии
+   355→}
+   356→// асинхронные задачи экспорта (для больших сессий)
+   357→model ExportJob {
+   358→id String @id @default(cuid())
+   359→sessionId String
+   360→format String // "gpx" | "kml" | "json"
+   361→status String @default("pending") // pending|running|completed|failed
+   362→fileUrl String? // временный URL (локальный / S3)
+   363→fileSize Int? // байты
+   364→expiresAt DateTime? // ссылка истекает через 24 ч
+   365→attempts Int @default(0)
+   366→lockedBy String? // ID Worker-инстанса
+   367→createdAt DateTime @default(now())
+   368→completedAt DateTime?
+   369→error String?
+   370→session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+   371→@@index([status, createdAt])
+   372→@@index([sessionId])
+   373→}
+   374→// Модель для полного логического дампа БД
+   375→// Не переиспользуем ExportJob — он предназначен для одной сессии
+   376→model BackupJob {
+   377→id String @id @default(cuid())
+   378→type String // "full"
+   379→status String @default("pending") // pending|running|completed|failed|verified
+   380→fileUrl String? // путь к файлу дампа
+   381→fileSize Int? // байты
+   382→fileCount Int? // число экспортированных сессий
+   383→checksum String? // sha256 для верификации
+   384→attempts Int @default(0)
+   385→lockedBy String? // ID Worker-инстанса
+   386→createdAt DateTime @default(now())
+   387→completedAt DateTime?
+   388→verifiedAt DateTime? // время проверки целостности
+   389→error String?
+   390→@@index([status, createdAt])
+   391→@@index([type, createdAt])
+   392→}
+   393→Листинг 1. Схема БД.
+   394→Z.ai · 24.08.2026 стр. 10
+   395→=== Page 12 ===
+   396→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   397→2.4 Middleware
+   398→Единый middleware-слой (src/middleware.ts) обеспечивает сквозную обработку всех API-запросов.
+   399→Шаг проверки размера payload (256 КБ для ingest) — запросы превышающие лимит отклоняются с HTTP
+   400→413 до попадания в route-handler, что защищает event loop от парсинга oversized JSON. Middleware
+   401→выполняется до каждого route-handler и реализует: (а) payload-size guard — Content-Length проверка до
+   402→чтения body; (б) авторизацию — проверка Bearer-токена или HttpOnly-куки; (в) rate limiting — sliding
+   403→window через Redis (production) или in-memory (dev); (г) CORS; (д) security headers; (е) requestId; (ж)
+   404→логирование method/path/duration/status.
+   405→src/middleware.ts — async function с импортами и try/catch
+   406→// src/middleware.ts — async function с импортами и try/catch
+   407→import { NextRequest, NextResponse } from "next/server";
+   408→import { checkRateLimit } from "@/lib/rate-limit";
+   409→import { authenticate } from "@/lib/auth";
+   410→import { corsResponse, setSecurityHeaders } from "@/lib/http-utils";
+   411→import { json } from "@/lib/http-utils";
+   412→import { logger } from "@/lib/logger";
+   413→const MAX_PAYLOAD_BYTES = Number(process.env.MAX_PAYLOAD_BYTES ?? 262144);
+   414→export async function middleware(request: NextRequest): Promise {
+   415→const requestId = crypto.randomUUID();
+   416→const start = Date.now();
+   417→try {
+   418→// 0. payload-size guard (до чтения body)
+   419→const cl = Number(request.headers.get("content-length") ?? 0);
+   420→if (cl > MAX_PAYLOAD_BYTES) {
+   421→return json({ error: "Payload too large", limit: MAX_PAYLOAD_BYTES }, 413);
+   422→}
+   423→// 1. CORS preflight
+   424→if (request.method === "OPTIONS") return corsResponse(request);
+   425→// 2. Rate limit check (Redis sliding window / in-memory LRU)
+   426→const rateResult = await checkRateLimit(request);
+   427→if (!rateResult.allowed) {
+   428→return json(
+   429→{ error: "Rate limit exceeded", retryAfter: rateResult.retryAfter },
+   430→429,
+   431→{ "X-RateLimit-Limit": String(rateResult.limit),
+   432→"X-RateLimit-Remaining": String(rateResult.remaining),
+   433→"X-RateLimit-Reset": String(rateResult.reset) }
+   434→);
+   435→}
+   436→// 3. Authentication (Bearer token or HttpOnly cookie)
+   437→const authResult = authenticate(request);
+   438→if (!authResult.ok) {
+   439→return json({ error: "Unauthorized" }, 401);
+   440→}
+   441→// 4. Security headers + requestId
+   442→const response = NextResponse.next();
+   443→setSecurityHeaders(response);
+   444→Z.ai · 24.08.2026 стр. 11
+   445→=== Page 13 ===
+   446→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   447→response.headers.set("X-Request-Id", requestId);
+   448→return response;
+   449→} catch (err) {
+   450→logger.error("Middleware unexpected error", {
+   451→requestId, method: request.method, path: request.nextUrl.pathname,
+   452→error: err instanceof Error ? err.message : String(err),
+   453→durationMs: Date.now() - start,
+   454→});
+   455→return json({ error: "Internal Server Error", requestId }, 500);
+   456→}
+   457→}
+   458→2.5 Контракты модулей
+   459→Каждый модуль бизнес-логики экспортирует формальный TypeScript-интерфейс, что обеспечивает
+   460→контракт между модулями и возможность мокирования в тестах. DI-инъекция через фабричные функции.
+   461→Контракт IIdempotencyService обеспечивает проверку (deviceId, clientId), IRateLimiter —
+   462→backend-agnostic rate limiting (Redis/in-memory).
+   463→src/lib/contracts.ts
+   464→interface IRoutingService {
+   465→route(start: Coord, end: Coord, todBucket?: number): Promise;
+   466→getProviders(): string[]; // ["2gis", "osrm", "haversine"]
+   467→}
+   468→interface ITrafficService {
+   469→fetchForSegments(segments: Segment[], utc: number): Promise;
+   470→getConcurrency(): number; // 3-5 параллельных
+   471→}
+   472→interface IPlanService {
+   473→build(sessionId: string, target: PlanTarget): Promise;
+   474→computeDeviations(plan: Plan, points: GpsPoint[]): Deviation[];
+   475→}
+   476→interface ICacheService {
+   477→get(key: string): Promise;
+   478→set(key: string, value: unknown, ttlMs: number): Promise;
+   479→invalidate(routeId: string): Promise;
+   480→}
+   481→// Контракт идемпотентности
+   482→interface IIdempotencyService {
+   483→check(deviceId: string, clientId: string): Promise<{ sessionId: string; duplicate:
+   484→boolean }>;
+   485→}
+   486→// Контракт идемпотентности
+   487→interface IRateLimiter {
+   488→check(key: string, limit: number, windowSec: number): Promise<{ allowed: boolean;
+   489→remaining: number; retryAfter: number }>;
+   490→}
+   491→// Фабрики с DI
+   492→function createRoutingService(cache?: ICacheService): IRoutingService;
+   493→function createTrafficService(logger?: ILogger): ITrafficService;
+   494→Z.ai · 24.08.2026 стр. 12
+   495→=== Page 14 ===
+   496→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   497→function createIdempotencyService(db: PrismaClient): IIdempotencyService;
+   498→function createRateLimiter(backend: "redis" | "memory"): IRateLimiter;
+   499→2.6 Изоляция Worker-процесса
+   500→Изоляция Worker-процесса от API event loop
+   501→TrafficJob обрабатывается в отдельном Worker-процессе. Если бы обработка шла in-process (в том же
+   502→Node.js-процессе, что и API), при 100 сессиях/мин (100 × ~50 сегментов = 5000 fetch) event loop API-сервера
+   503→забивался бы сетевыми I/O, и ingest переставал отвечать. Выделение Worker-процесса решает эту проблему.
+   504→API-сервер и Worker-процесс — два независимых процесса. API-хендлер POST /api/ingest
+   505→выполняет только синхронные быстрые операции: Zod-валидация, проверка идемпотентности, INSERT
+   506→GPS-точек (одна транзакция), INSERT строки в TrafficJob со статусом pending. Ответ клиенту
+   507→возвращается немедленно (HTTP 201 за ≤ 50 мс типично), после чего event loop свободен для следующего
+   508→ingest-запроса.
+   509→Worker-процесс (worker/index.ts) — отдельный Node.js-процесс, запускаемый параллельно с
+   510→API-сервером (Docker compose: два сервиса; Vercel: serverless-функция по Cron). Worker опрашивает
+   511→таблицу TrafficJob с интервалом WORKER_POLL_INTERVAL_MS (по умолчанию 5 с), выбирает пачку
+   512→pending-задач (LIMIT 10), атомарно захватывает их через UPDATE ... SET status='running',
+   513→lockedBy=$workerId, lockedAt=now() WHERE id IN (...) AND status='pending'
+   514→RETURNING id и обрабатывает только те id, что вернулись в RETURNING (см. ниже про
+   515→верификацию). Controlled concurrency внутри Worker: p-limit(5) — не более 5 параллельных
+   516→traffic-fetch.
+   517→Шаг API-сервер Worker-процесс
+   518→1 Принимает ingest, Zod-валидация —
+   519→2 Проверка идемпотентности (deviceId, clientId) —
+   520→3 INSERT GpsPoint[] (транзакция) —
+   521→4 INSERT TrafficJob(status=pending) —
+   522→5 HTTP 201 → клиенту (≤ 50 мс) —
+   523→6 — Опрос: SELECT pending LIMIT 10 (каждые 5 c)
+   524→7 — UPDATE ... SET running, lockedBy (атомарный захват)
+   525→8 — fetch traffic (2ГИС), p-limit(5), retry×3, backoff
+   526→9 — UPDATE TrafficJob SET status=completed, result=...
+   527→10 — Если failed: attempts++, backoff, повтор при attempts < 3
+   528→Таблица 4. Разделение ответственности API-сервер ↔ Worker-процесс.
+   529→В Docker-окружении API и Worker запускаются как два сервиса в одном docker-compose.yml с
+   530→общей переменной DATABASE_URL. В Vercel (serverless) Worker реализуется как отдельная
+   531→serverless-функция /api/cron/worker, вызываемая Vercel Cron каждые 5 минут (минимальный
+   532→Z.ai · 24.08.2026 стр. 13
+   533→=== Page 15 ===
+   534→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   535→интервал Vercel Cron на free-плане). На Pro-плане минимальный интервал — 1 минута; это
+   536→рекомендуемая конфигурация для целевой нагрузки 100 сессий/мин (см. §9.6 — free-план
+   537→классифицирован как BLOCKING). Для self-hosted Docker рекомендуется постоянный Worker-процесс с
+   538→restart: always.
+   539→Горизонтальное масштабирование Worker
+   540→При росте очереди Worker-процессы можно масштабировать горизонтально: запустить N инстансов Worker с
+   541→разными WORKER_ID. Атомарный захват (UPDATE ... WHERE status='pending' RETURNING id) гарантирует, что
+   542→одна задача не будет обработана двумя Worker-ами одновременно. Рекомендация: 1 Worker на каждые 50
+   543→сессий/мин (эмпирически выведено из k6-тестов, см. §8.4).
+   544→Верификация атомарного захвата через RETURNING
+   545→При репликации Turso (read-replica) возможна ситуация: Worker A читает pending-задачу из реплики, Worker B из
+   546→другой реплики видит ту же задачу как pending (задержка репликации ~50-500 мс). Оба вызывают UPDATE, но
+   547→только первый успешно меняет status. Верификация через RETURNING id: Worker обрабатывает только те id,
+   548→которые фактически вернул UPDATE (то есть изменённые этим Worker-ом). Если RETURNING пустой — задачу
+   549→уже захватил другой Worker, пропуск. Для LibSQL/Turso также рекомендуется BEGIN IMMEDIATE для
+   550→write-транзакций захвата, что берёт write-lock на primary до любых SELECT/UPDATE. См. §3.9 — ограничения
+   551→масштабирования.
+   552→worker/processor.ts — RETURNING + Promise.all + импорты
+   553→// worker/processor.ts — верифицируемый атомарный захват через RETURNING
+   554→import { db } from "../src/lib/db";
+   555→import { randomUUID } from "node:crypto";
+   556→import pLimit from "p-limit"; // импорт для concurrency control
+   557→const WORKER_ID = process.env.WORKER_ID ?? randomUUID();
+   558→const BATCH_SIZE = Number(process.env.WORKER_BATCH_SIZE ?? 10);
+   559→async function pollAndClaim(): Promise {
+   560→// SELECT кандидатов (можно из реплики)
+   561→const candidates = await db.$queryRaw<{ id: string }[]>`
+   562→SELECT id FROM TrafficJob
+   563→WHERE status = 'pending' AND scheduledFor <= datetime('now')
+   564→ORDER BY priority DESC, scheduledFor ASC
+   565→LIMIT ${BATCH_SIZE}
+   566→`;
+   567→if (candidates.length === 0) return [];
+   568→const ids = candidates.map((c) => c.id);
+   569→// АТОМАРНЫЙ ЗАХВАТ с верификацией через RETURNING
+   570→// Применяется к primary (write-traffic идёт на primary, не на реплику)
+   571→const claimed = await db.$queryRaw<{ id: string }[]>`
+   572→UPDATE TrafficJob
+   573→SET status = 'running', lockedBy = ${WORKER_ID}, lockedAt = datetime('now')
+   574→WHERE id IN (${ids.join(",")})
+   575→AND status = 'pending'
+   576→AND lockedBy IS NULL
+   577→RETURNING id
+   578→`;
+   579→// Только реально захваченные этим Worker-ом id
+   580→return claimed.map((c) => c.id);
+   581→Z.ai · 24.08.2026 стр. 14
+   582→=== Page 16 ===
+   583→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   584→}
+   585→async function main() {
+   586→while (true) {
+   587→try {
+   588→const claimedIds = await pollAndClaim();
+   589→if (claimedIds.length > 0) {
+   590→// Обрабатываем только захваченные — p-limit(5) для concurrency
+   591→// p-limit не имеет метода .map — используем Promise.all + limit()
+   592→const limit = pLimit(5);
+   593→await Promise.all(claimedIds.map((id) => limit(() => processJob(id))));
+   594→} else {
+   595→await sleep(Number(process.env.WORKER_POLL_INTERVAL_MS ?? 5000));
+   596→}
+   597→} catch (err) {
+   598→logger.error("Worker poll failed", { workerId: WORKER_ID, error: String(err) });
+   599→await sleep(5000);
+   600→}
+   601→}
+   602→}
+   603→Z.ai · 24.08.2026 стр. 15
+   604→=== Page 17 ===
+   605→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   606→3. Принципы работы
+   607→3.1 Сбор GPS-данных (правки #5, #6)
+   608→Данные поступают через POST /api/ingest. Поток обработки усилен двумя механизмами:
+   609→идемпотентностью (clientId) и payload-лимитом (MAX_PAYLOAD_BYTES + p-limit). Полный
+   610→конвейер:
+   611→• Проверка Content-Length ≤ 256 КБ в middleware → HTTP 413 при превышении (до чтения body).
+   612→• Zod-валидация пакета: lat ∈ [-90, 90], lon ∈ [-180, 180], speed ∈ [0, 83.33] м/с, ≤ 1000 точек, clientId —
+   613→обязательный UUID/cuid.
+   614→• Нормализация таймстемпов: nanosec → msec (деление на 1 000 000), фильтрация точек с gap > 30 с.
+   615→• Идемпотентность: SELECT Session WHERE deviceId=? AND clientId=? — при существовании
+   616→возвращается HTTP 200 + старый sessionId без повторной записи.
+   617→• Сериализация DB-write через p-limit(1) — protects SQLite write lock; параллельные
+   618→ingest-запросы выстраиваются в очередь вместо конкуренции за lock.
+   619→• INSERT GpsPoint[] + INSERT TrafficJob(pending) в одной транзакции.
+   620→• Ответ: HTTP 201 { sessionId, pointsAccepted, trafficJobId, duplicate: false } для нового пакета, или
+   621→HTTP 200 { sessionId, duplicate: true } для повторной отправки.
+   622→Валидация гарантирует: не более 1000 точек в пакете, deviceId длиной 1-64 символа, clientId — валидный
+   623→UUID v4 или cuid. При невалидном запросе возвращается HTTP 400 с JSON: { error: "Validation
+   624→failed", field: "lat", message: "Must be between -90 and 90" }. Размер body
+   625→проверяется дважды: сначала по заголовку Content-Length в middleware (быстрый путь), затем по
+   626→фактическому размеру после парсинга (защита от подделанного заголовка).
+   627→3.2 Цепочка маршрутизации
+   628→Трёхуровневая цепочка с автоматическим fallback. Первичный провайдер — 2ГИС (carrouting 6.0.0),
+   629→возвращает детализированный маршрут с полилинией, сегментами и манёврами. При недоступности —
+   630→OSRM через demo-сервер. Третий уровень — гаверсинус (40 км/ч). Перед вызовом API проверяется кэш
+   631→(LRU + SQLite): ключ — hash(startLat, startLon, endLat, endLon snap-to-grid ~55 м + todBucket), при hit
+   632→возвращается закэшированный результат без вызова API. При miss — вызов API, результат сохраняется в
+   633→кэш (TTL: 5 мин для LRU, 24 ч для persistent). Fallback-события логируются и инкрементируют метрику
+   634→routing_fallback_total.
+   635→3.3 Исторические пробки (Traffic) — обработка в Worker
+   636→После ingest API создаёт TrafficJob (status: pending) и сразу возвращает ответ клиенту. Дальнейшая
+   637→обработка полностью происходит в Worker-процессе (см. §2.6): Worker опрашивает очередь,
+   638→захватывает pending-задачи и выполняет traffic-fetch с controlled concurrency: p-limit(5)
+   639→параллельных запросов к 2ГИС traffic-endpoint, с задержкой 200-500 мс между батчами.
+   640→Promise.allSettled используется вместо Promise.all — при ошибке одного сегмента остальные
+   641→продолжают. Retry-логика: 3 попытки с exponential backoff (1 с, 2 с, 4 с). Статус обновляется: pending →
+   642→running → completed/failed. При failed — ошибка сохраняется в TrafficJob.error, attempts
+   643→инкрементируется; при attempts ≥ 3 задача переходит в статус dead и требует ручного вмешательства.
+   644→Z.ai · 24.08.2026 стр. 16
+   645→=== Page 18 ===
+   646→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   647→Результат обогащает сегменты плана полями: trafficFetched, trafficUtc, trafficSpeedKmh,
+   648→trafficDurationSec, trafficSource.
+   649→Почему Worker решает проблему event loop
+   650→Worker-процесс изолирован от API-сервера: даже если его event loop полностью загружен fetch-ами, API-сервер
+   651→продолжает принимать ingest с p95 < 50 мс. Разделение процессов = разделение event loop-ов.
+   652→3.4 План-фактный анализ
+   653→Центральная функция сервиса. План строится при создании сессии или по запросу. Система определяет
+   654→стартовую точку (первая GPS-точка) и конечную (последняя или координаты из Route). Маршрут
+   655→сегментируется по манёврам. Для каждого сегмента вычисляются плановые метрики: дистанция,
+   656→ожидаемая длительность, ожидаемая скорость. Затем GPS-данные сопоставляются с сегментами (по
+   657→географической близости к полилинии), и вычисляются фактические скорость и длительность. Результат
+   658→— таблица отклонений (segmentDeviations) с полями: planSpeedKmh, actualSpeedKmh, speedDeviation,
+   659→planDurationSec, actualDurationSec, durationDeviation, а также traffic-поля.
+   660→3.5 Кэширование маршрутов
+   661→Архитектура кэш-ключа маршрутизации
+   662→Кэш-ключ строится на основе snap-to-grid координат и time-of-day bucket.
+   663→Обоснование snap-to-grid
+   664→Snap-to-grid (Math.round(v / GRID_SIZE) * GRID_SIZE) с GRID_SIZE=0.0005° даёт ячейку ~55 м (lat) × ~35 м (lon).
+   665→Это превышает точность GPS-приёмника iPhone (5-10 м), делая ключ устойчивым к естественному GPS-шуму: две
+   666→точки в пределах одной ячейки дают один ключ, две точки в разных ячейках (расстояние > 35 м) — разные ключи.
+   667→Ожидаемый hit ratio — 70–85% (требует подтверждения в k6-тестах, см. §8.4).
+   668→Кэш-ключ состоит из двух компонентов. Первый — snap-to-grid координат до сетки с шагом
+   669→GRID_SIZE = 0.0005°. На широте Саратова (~51°): 1° широты ≈ 111 200 м (почти постоянно), 1°
+   670→долготы ≈ 111 320 · cos(51°) ≈ 70 000 м. Следовательно GRID_SIZE = 0.0005° даёт ячейку ~55 м (по
+   671→широте) × ~35 м (по долготе). Второй компонент — time-of-day bucket: час дня округляется вниз до
+   672→кратного 3 (8 бакетов: 0, 3, 6, 9, 12, 15, 18, 21 UTC). Маршрут «дом → работа» в 08:00 и в 20:00 получает
+   673→разные кэш-записи с разными traffic-данными.
+   674→Двухуровневый кэш реализован в src/lib/cache.ts. Уровень 1: in-memory LRU (Map +
+   675→doubly-linked list, макс. 100 записей, TTL 5 мин). Уровень 2: persistent в таблице RouteCache (hash, result,
+   676→todBucket, routeId, expiresAt, TTL 24 ч). Паттерн cache-aside: сначала LRU, при miss — RouteCache, при
+   677→miss — вызов API, результат пишется в оба уровня.
+   678→src/lib/cache.ts — snap-to-grid, корректная геометрия lat/lon
+   679→// src/lib/cache.ts — snap-to-grid вместо toFixed
+   680→import { createHash } from "node:crypto";
+   681→import type { Coord } from "./types";
+   682→import { db } from "./db";
+   683→Z.ai · 24.08.2026 стр. 17
+   684→=== Page 19 ===
+   685→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   686→// snap-to-grid вместо toFixed(precision).
+   687→// Геометрия (на широте Саратова ~51°):
+   688→// Для широты: 1° ≈ 111 200 м (почти постоянно на всех широтах).
+   689→// GRID_SIZE=0.0005 → 111 200 * 0.0005 ≈ 55.6 м.
+   690→// Для долготы: 1° ≈ 111 320 * cos(lat) м.
+   691→// На широте 51°: 111 320 * cos(51°) ≈ 111 320 * 0.6293 ≈ 70 046 м.
+   692→// GRID_SIZE=0.0005 → 70 046 * 0.0005 ≈ 35.0 м.
+   693→// Итог: ячейка сетки ~55 м (lat) × ~35 м (lon).
+   694→// Устойчивость к GPS-шуму (5-10 м): 2 точки в одной ячейке → один ключ.
+   695→// Различение маршрутов: точки в разных ячейках (расстояние > 35 м) → разные ключи.
+   696→const GRID_SIZE = 0.0005;
+   697→// 8 трёхчасовых бакетов: пробки в час пик ≠ ночные
+   698→const TOD_BUCKETS = [0, 3, 6, 9, 12, 15, 18, 21] as const;
+   699→// Округление до центра ячейки сетки (snap-to-grid)
+   700→function snap(v: number): number {
+   701→return Math.round(v / GRID_SIZE) * GRID_SIZE;
+   702→}
+   703→export function buildCacheKey(start: Coord, end: Coord, ts: Date): string {
+   704→const s = `${snap(start.lat)},${snap(start.lon)}`;
+   705→const e = `${snap(end.lat)},${snap(end.lon)}`;
+   706→// bucket = максимальный бакет, не превышающий текущий час
+   707→const bucket = TOD_BUCKETS.filter((b) => b <= ts.getUTCHours()).pop() ?? 0;
+   708→const raw = `${s}|${e}|${bucket}`;
+   709→return createHash("sha256").update(raw).digest("hex");
+   710→}
+   711→// Инвалидация: по routeId (изменение избранного маршрута)
+   712→export async function invalidateRoute(routeId: string): Promise {
+   713→await db.routeCache.deleteMany({
+   714→where: { routeId }, // поле routeId в RouteCache (см. §2.3)
+   715→});
+   716→}
+   717→// TTL: LRU 5 мин, persistent 24 ч. При todBucket-переходе автоматически
+   718→// становится miss (другой ключ) — ручная инвалидация по времени не нужна.
+   719→Параметр Значение Обоснование
+   720→Метод округления snap-to-grid (Math.round(v / GRID_SIZE) * Устойчив к GPS-шуму 5-10 м
+   721→GRID_SIZE)
+   722→GRID_SIZE 0.0005° ~55 м (lat) × ~35 м (lon) на широте
+   723→Саратова
+   724→Разрешение ключа ~55 м × ~35 м Ячейка > GPS-шум, различает
+   725→маршруты между кварталами
+   726→Hit ratio (ожидаемый) 70–85% (требует подтверждения в CI) Эмпирическая оценка, не подтверждена
+   727→k6-тестами
+   728→Time-of-day в ключе 8 бакетов по 3 ч (0,3,6,9,12,15,18,21 UTC) Пробки в час пик ≠ ночные
+   729→TTL LRU 5 мин Быстрый кэш для горячих маршрутов
+   730→TTL persistent 24 ч (партиционировано по todBucket) Нет устаревших пробок при смене
+   731→времени суток
+   732→Z.ai · 24.08.2026 стр. 18
+   733→=== Page 20 ===
+   734→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   735→Параметр Значение Обоснование
+   736→routeId в RouteCache да (поле + @relation) Инвалидация по избранному маршруту
+   737→Инвалидация по routeId да (deleteMany where routeId) При изменении/удалении избранного
+   738→маршрута
+   739→Инвалидация по времени авто (смена todBucket) Новый бакет = новый ключ = miss
+   740→Таблица 5. Параметры кэширования маршрутов.
+   741→3.6 Идемпотентность ingest
+   742→Идемпотентность через clientId
+   743→Sensor Logger при сетевом сбое ретранслирует пакет. Без идемпотентности повторная отправка создавала бы новую
+   744→сессию с дублированными GPS-точками — данные портились, segmentDeviations считались по «фантомной»
+   745→сессии.
+   746→В IngestSchema определено поле clientId — UUID v4, генерируемый клиентом Sensor Logger на
+   747→стороне устройства перед каждой отправкой. При повторной передаче (из-за сетевого таймаута, 5xx
+   748→ответа, потери пакета) тот же clientId отправляется повторно. Сервер проверяет пару (deviceId, clientId)
+   749→по UNIQUE-индексу:
+   750→• Новый пакет: INSERT успешен → HTTP 201, pointsAccepted, trafficJobId, duplicate=false.
+   751→• Повтор пакета: UNIQUE constraint violation → catch → SELECT существующего Session → HTTP
+   752→200, duplicate=true, тот же sessionId. Не создаётся ни новой сессии, ни дублирующих точек, ни нового
+   753→TrafficJob.
+   754→• Конкуренция: если два одинаковых запроса приходят одновременно (split-brain сети),
+   755→UNIQUE-индекс БД гарантированно пропускает только первый; второй получает constraint violation и
+   756→fallback на SELECT.
+   757→Для clients, не способных генерировать clientId (legacy Sensor Logger), поле объявлено опциональным
+   758→(clientId?: string); в этом случае идемпотентность не гарантируется, и в лог пишется warn
+   759→"ingest without clientId — idempotency disabled". После 100% обновления клиентов
+   760→поле станет обязательным.
+   761→Z.ai · 24.08.2026 стр. 19
+   762→=== Page 21 ===
+   763→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   764→3.7 Политика хранения данных — 10 лет
+   765→Политика хранения 10 лет с ежедневным cron-очищением
+   766→Без retention policy БД растёт без ограниченно: через 3-5 лет активного использования — сотни МБ, деградация
+   767→индексов, медленная пагинация в GET /api/sessions. Формальная политика хранения 10 лет с ежедневным
+   768→cron-очищением решает эту проблему.
+   769→Введена политика хранения 10 лет. Значение по умолчанию RETENTION_DAYS = 3650 (10 × 365),
+   770→конфигурируется через env. Обоснование выбора 10 лет: (а) соответствует максимальному сроку
+   771→хранения персональных данных по законодательству РФ для личной аналитики; (б) GDPR
+   772→right-to-be-forgotten закрывается через DELETE /api/sessions/[id] (см. §4.10) — пользователь может
+   773→удалить данные раньше; (в) 10 лет × 365 дней × 1 сессия/день × ~100 КБ = ~365 МБ — укладывается в
+   774→Turso free tier (9 ГБ) с запасом ×25; (г) достаточно для долгосрочной аналитики «как изменился маршрут
+   775→дом-работа за десятилетие».
+   776→Исполнение политики — ежедневная cron-задача в Worker-процессе. Worker запускает
+   777→retention-процедуру раз в сутки в фиксированное время (по умолчанию 00:30 UTC, конфигурируется
+   778→через RETENTION_CRON_UTC). Алгоритм:
+   779→Шаг Действие SQL / код
+   780→1 SELECT кандидатов на удаление SELECT id, endTime, pointCount FROM Session WHERE endTime <
+   781→datetime('now', '-' || $RETENTION_DAYS || ' days') AND deletedAt IS NULL
+   782→2 Для каждой: авто-архивация Создать ExportJob(format=json), дождаться completed, получить archivedUrl
+   783→(если включено)
+   784→3 Транзакция: hard delete Session DELETE FROM Session WHERE id = ? (cascade: GpsPoint, TrafficJob,
+   785→ExportJob через onDelete: Cascade)
+   786→4 Запись в AuditLog INSERT INTO AuditLog(action="session.purge", targetId=?,
+   787→actorType="retention-cron", metadata={archivedUrl, pointCount, ageDays})
+   788→5 Инкремент метрик retention_purge_total{archived=true|false}++,
+   789→retention_purge_age_seconds.observe(ageDays)
+   790→Таблица 5.1. Алгоритм retention-cron (ежедневно, 00:30 UTC). SQL совместим с SQLite/Turso.
+   791→SQLite-совместимый синтаксис арифметики дат
+   792→Используется нативный SQLite-синтаксис datetime('now', '-' || $RETENTION_DAYS || ' days')
+   793→для арифметики дат. При будущей миграции на PostgreSQL (см. §3.9) запросы выносятся в адаптер
+   794→src/lib/db-adapter.ts или используются Prisma-методы вместо сырого SQL.
+   795→Архивация (RETENTION_ARCHIVE_ENABLED = true по умолчанию) перед удалением: создаётся
+   796→ExportJob в формате JSON (полный дамп Session + GpsPoint[] + plan + deviations), файл сохраняется в
+   797→EXPORT_STORAGE_DIR (локальная директория или S3-compatible bucket), URL записывается в
+   798→AuditLog.metadata.archivedUrl. При RETENTION_ARCHIVE_ENABLED = false — удаление без
+   799→архивации (для GDPR-режима «forget me полностью»). Срок хранения архивов —
+   800→ARCHIVE_RETENTION_DAYS = 3650 (те же 10 лет), после чего файлы удаляются отдельной
+   801→cron-задачей.
+   802→Z.ai · 24.08.2026 стр. 20
+   803→=== Page 22 ===
+   804→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   805→Индивидуальные override-ы retention
+   806→Поддерживается per-session override через поле retentionOverrideDays (Int?, nullable). Если установлено —
+   807→сессия удаляется по этому сроку, а не по глобальному. Используется для: сессий, помеченных пользователем как
+   808→«важные» (keep forever = NULL или 36500), или «неважные» (ускоренное удаление = 30 дней). Поле добавляется
+   809→миграцией expand-contract, по умолчанию NULL (использовать глобальный RETENTION_DAYS).
+   810→Soft-delete (поле deletedAt в Session) используется для «корзины»: при DELETE /api/sessions/[id] (см.
+   811→§4.10) устанавливается deletedAt = now(), сессия скрывается из списков по умолчанию. Через 30
+   812→дней grace period другая cron-задача (GRACE_PERIOD_DAYS = 30) выполняет hard delete с cascade. В
+   813→течение grace period пользователь может восстановить сессию через POST /api/sessions/[id]/restore
+   814→(убирает deletedAt). Если deletedAt уже установлено при срабатывании retention-cron — сессия
+   815→удаляется сразу, без повторной архивации.
+   816→3.7.1 Влияние на производительность
+   817→Retention-cron обрабатывает не более 100 сессий за один запуск (LIMIT 100), между итерациями пауза 2
+   818→секунды для снижения нагрузки на БД. При большом объёме помеченных к удалению (например, первый
+   819→запуск после 11 лет эксплуатации) — обработка растягивается на несколько дней, что допустимо (нет
+   820→SLA на удаление). Worker помечает обработанные сессии через deletedAt = now() перед hard delete,
+   821→что предотвращает их повторный SELECT в следующей итерации. Индекс @@index([deletedAt])
+   822→обеспечивает быстрый фильтр активных.
+   823→3.8 Политика деградации
+   824→Трёхуровневая цепочка с уведомлением пользователя
+   825→При длительном отказе 2ГИС сервис переключается на OSRM demo (без SLA) и гаверсинус. Пользователь
+   826→уведомляется о снижении качества через badge и поле degraded в API-ответе.
+   827→Трёхуровневая цепочка маршрутизации (2ГИС → OSRM → гаверсинус) описана в §3.2. Каждый fallback
+   828→сопровождается: (а) метрикой routing_fallback_total с label provider; (б) логированием warn с
+   829→requestId/sessionId; (в) уведомлением пользователя через поле в ответе API и badge в веб-интерфейсе.
+   830→Это закрывает проблему «тихого падения качества».
+   831→Уровень Провайдер SLA Уведомление Метрика
+   832→пользователя
+   833→1 (primary) 2ГИС carrouting 6.0.0 99.5% uptime, p95 < 2 с Нет (нормальный режим) routing_provi
+   834→der_total{pro
+   835→vider="2gis"}
+   836→2 (fallback) OSRM demo server Без SLA, best-effort Жёлтый badge «Маршрут: routing_fallb
+   837→OSRM (2ГИС недоступен)» ack_total{pro
+   838→vider="osrm"
+   839→}
+   840→3 (last resort) Гаверсинус (40 км/ч) Всегда доступен Красный badge «Маршрут: routing_fallb
+   841→(локальный расчёт) приближённый расчёт (нет ack_total{pro
+   842→данных о пробках)» vider="havers
+   843→ine"}
+   844→Z.ai · 24.08.2026 стр. 21
+   845→=== Page 23 ===
+   846→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   847→Таблица 5.2. Политика деградации цепочки маршрутизации.
+   848→В API-ответе (GET /api/plan/[sessionId], POST /api/plan) добавляется поле routingProvider и
+   849→degraded: boolean. При degraded=true фронтенд показывает badge в PlanDialog и над картой.
+   850→Дополнительно: если 2ГИС недоступен более 5 минут (метрика routing_fallback_total > 50% за 5 мин) —
+   851→алерт в лог (error) и уведомление оператору через /health endpoint (routing2gis: false, status: "degraded").
+   852→Пользователь видит banner «Сервис 2ГИС временно недоступен, маршруты строятся по резервной
+   853→цепочке» до восстановления.
+   854→Circuit Breaker для 2ГИС
+   855→При 5 последовательных отказах 2ГИС (timeout / 5xx) в течение 1 минуты — circuit breaker размыкается на 30
+   856→секунд: все запросы сразу идут на OSRM без попытки 2ГИС. Это предотвращает «лавину» timeout-ов при
+   857→длительном отказе. После 30 с — half-open: один пробный запрос к 2ГИС, при успехе — замыкание (возврат к
+   858→primary). Реализация: src/lib/circuit-breaker.ts, состояние in-memory (single-instance) или Redis
+   859→(multi-instance).
+   860→3.9 Ограничения масштабирования
+   861→Single-writer архитектура SQLite и порог миграции
+   862→Система заявляет горизонтальное масштабирование (несколько Worker, multi-instance rate-limit через Redis), но БД
+   863→— SQLite/Turso с единым писателем и p-limit(1) на DB-write. Это архитектурный потолок: масштабирование
+   864→упирается в одну точку записи. Формализованы потолки и порог миграции на PostgreSQL.
+   865→SQLite (и его managed-версия Turso/LibSQL) — single-writer архитектура. Все write-операции
+   866→сериализуются через write-lock на уровне файла/БД. Это явно учтено: ingest DB-write сериализован через
+   867→p-limit(1), что превращает конкуренцию за lock в упорядоченную очередь. Это даёт предсказуемую
+   868→латентность, но ставит жёсткий потолок пропускной способности записи.
+   869→Ресурс Потолок Причина Порог миграции
+   870→(single-instance)
+   871→Write throughput (ingest) ~200 сессий/мин p-limit(1) + SQLite write-lock, > 150 сессий/мин
+   872→эмпирически из k6 sustained
+   873→Read throughput (sessions list) ~2000 req/мин Read-реплики Turso масштабируют > 5000 req/мин
+   874→Worker-инстансов без   (горизонтальное) Каждый со своим WORKER_ID, —
+   875→RETURNING-захват
+   876→API-инстансов без   (stateless) Stateless, rate-limit через Redis —
+   877→Одновременных ~500 активных Session списки, Cursor-based > 1000 MAU
+   878→пользователей пагинация
+   879→Таблица 5.3. Потолки масштабирования и пороги миграции.
+   880→Порог миграции на PostgreSQL: при достижении любого из: (а) sustained ingest > 150 сессий/мин в
+   881→течение 1 часа; (б) p99 ingest latency > 500 мс; (в) > 1000 MAU. Миграция предполагает: смену
+   882→DATABASE_URL на PostgreSQL, обновление Prisma schema (минимальные изменения — Prisma
+   883→абстрагирует диалект), удаление p-limit(1) на ingest (PostgreSQL поддерживает MVCC concurrent writes),
+   884→Z.ai · 24.08.2026 стр. 22
+   885→=== Page 24 ===
+   886→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   887→возможно partitioning таблицы GpsPoint по sessionId для оптимизации больших сессий. Оценка
+   888→трудозатрат: 3-5 дней + expand-contract миграция данных. См. §9.9 — план миграции.
+   889→Текущая архитектура — оптимизирована для personal-scale
+   890→Система спроектирована для 1 пользователя (владелец + семья). 100 сессий/мин — это пиковая нагрузка
+   891→(например, массовая синхронизация Sensor Logger после долгого offline), не sustained. Для этого сценария
+   892→SQLite/Turso + p-limit(1) — оптимально: простота развёртывания, нулевые операционные затраты, backup через
+   893→Turso snapshots. Миграция на PostgreSQL — premature optimization для текущей аудитории, но порог и план
+   894→зафиксированы.
+   895→Z.ai · 24.08.2026 стр. 23
+   896→=== Page 25 ===
+   897→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   898→4. API-эндпоинты
+   899→4.1 POST /api/ingest (правки #5, #6)
+   900→Приём GPS-данных от мобильного клиента. Авторизация: Bearer INGEST_TOKEN. Zod-валидация пакета
+   901→(см. §4.7). При успехе: нормализация, фильтрация по gap, проверка идемпотентности, запись в БД
+   902→(p-limit(1) serialization), создание TrafficJob. Ответ: HTTP 201 { sessionId, pointsAccepted, trafficJobId,
+   903→duplicate: false } для нового пакета или HTTP 200 { sessionId, duplicate: true } для повторной отправки. При
+   904→невалидных данных: HTTP 400 { error, field, message }. При превышении payload: HTTP 413. При
+   905→превышении rate limit: HTTP 429.
+   906→POST /api/ingest — запрос и ответы
+   907→// Пример запроса — clientId для идемпотентности
+   908→{
+   909→"deviceId": "iphone-se-xxx",
+   910→"clientId": "550e8400-e29b-41d4-a716-446655440000", // UUID v4
+   911→"points": [{
+   912→"lat": 51.53, "lon": 46.0, "speed": 12.5,
+   913→"altitude": 160, "accuracy": 5.0,
+   914→"timestamp": 1723680000000000000,
+   915→"bearing": 45
+   916→}]
+   917→}
+   918→// Пример ответа (новый пакет)
+   919→201 Created
+   920→{
+   921→"sessionId": "clxyz...",
+   922→"pointsAccepted": 47,
+   923→"trafficJobId": "clabc...",
+   924→"duplicate": false
+   925→}
+   926→// Пример ответа (повтор пакета — идемпотентность)
+   927→200 OK
+   928→{
+   929→"sessionId": "clxyz...", // тот же, что и в первом ответе
+   930→"duplicate": true
+   931→}
+   932→4.2 GET /api/sessions — фильтры
+   933→Список сессий в обратном хронологическом порядке. Cursor-based пагинация:
+   934→?cursor=xxx&limit;=20. Ответ: { sessions, nextCursor }. Авторизация: HttpOnly-кука или Bearer
+   935→API_KEY (server-side). Поддерживаются фильтры по дате и маршруту для управления большими
+   936→объёмами данных (10K+ сессий за 10 лет):
+   937→Параметр Тип Назначение Пример
+   938→cursor string (cuid) Курсор последней сессии предыдущей страницы ?cursor=clxyz123
+   939→limit int (1-100) Размер страницы, по умолчанию 20 ?limit=50
+   940→Z.ai · 24.08.2026 стр. 24
+   941→=== Page 26 ===
+   942→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   943→Параметр Тип Назначение Пример
+   944→olderThan ISO 8601 datetime Только сессии с endTime < olderThan (исключая) ?olderThan=2025-0
+   945→1-01T00:00:00Z
+   946→before ISO 8601 datetime Только сессии с endTime > before (новее) ?before=2025-12-3
+   947→1T23:59:59Z
+   948→routeId string (cuid) Только сессии по конкретному избранному ?routeId=clabc456
+   949→маршруту
+   950→includeDeleted boolean Включать soft-deleted (deletedAt != null). По ?includeDeleted=tr
+   951→умолчанию false ue
+   952→minPoints int Только сессии с pointCount >= minPoints (отсев ?minPoints=10
+   953→фантомов)
+   954→Таблица 6.1. Query-параметры GET /api/sessions.
+   955→Все параметры опциональны и комбинируются. Backward-compatible: вызовы без новых параметров
+   956→работают без новых параметров. Пример комбинированного запроса: GET
+   957→/api/sessions?olderThan=2025-01-01T00:00:00Z&routeId;=clabc456&limit;=50 —
+   958→вернёт до 50 сессий по маршруту clabc456, завершённых до 1 января 2025 года. Фильтр по deletedAt
+   959→IS NULL применяется всегда, если includeDeleted не true. Для пагинации в сочетании с фильтрами:
+   960→cursor кодирует (endTime, id), при изменении фильтров курсор сбрасывается.
+   961→4.3 GET /api/sessions/[id]
+   962→Полная информация о сессии. Cursor-based пагинация GPS-точек:
+   963→?pointsCursor=xxx&pointsLimit;=500. Ответ: { session, points, nextPointsCursor,
+   964→segmentDeviations }. Пагинация предотвращает загрузку 10K+ точек за один запрос.
+   965→4.4 POST /api/plan
+   966→Создание плана маршрута. Параметры: routeId (избранный маршрут) или endLat+endLon. Zod-валидация:
+   967→routeId — string cuid, endLat/endLon — number в диапазонах. Запускает цепочку маршрутизации (2ГИС →
+   968→OSRM → гаверсинус), сегментирует, сохраняет план, создаёт TrafficJob (pending). Ответ: HTTP 201 { plan,
+   969→trafficJobId }. План и TrafficJob создаются в одной транзакции.
+   970→4.5 GET /api/plan/[sessionId]
+   971→План маршрута для сессии. Включает сегменты с traffic-полями. Если TrafficJob ещё pending/running — в
+   972→ответе поле trafficStatus: "pending"|"running", фронтенд показывает skeleton и опрашивает
+   973→с интервалом 3 с.
+   974→4.6 CRUD /api/routes
+   975→Управление избранными маршрутами: GET (список), POST (создание/upsert), DELETE (по ID).
+   976→Zod-валидация координат. При DELETE инвалидируются все записи RouteCache, связанные с этим
+   977→маршрутом (по routeId, см. §3.5).
+   978→Z.ai · 24.08.2026 стр. 25
+   979→=== Page 27 ===
+   980→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+   981→4.7 Валидация входных данных
+   982→Все API endpoints защищены Zod-схемами, определёнными в src/lib/validation.ts. Валидация
+   983→выполняется до любого взаимодействия с БД. IngestSchema расширена обязательным полем clientId (с
+   984→fallback-режимом для legacy-клиентов).
+   985→src/lib/validation.ts — Zod-схемы
+   986→import { z } from "zod";
+   987→export const PointSchema = z.object({
+   988→lat: z.number().min(-90).max(90),
+   989→lon: z.number().min(-180).max(180),
+   990→speed: z.number().min(0).max(83.33).optional(), // 300 км/ч
+   991→altitude: z.number().optional(),
+   992→accuracy: z.number().positive().optional(),
+   993→timestamp: z.bigint().positive(),
+   994→bearing: z.number().min(0).max(360).optional(),
+   995→});
+   996→// clientId (optional для legacy, будет required после миграции клиентов)
+   997→export const IngestSchema = z.object({
+   998→deviceId: z.string().min(1).max(64),
+   999→clientId: z.string().uuid().optional(), // идемпотентность
+  1000→points: z.array(PointSchema).min(1).max(1000),
+  1001→}).refine(d => d.points.length <= 1000, {
+  1002→message: "Max 1000 points per ingest",
+  1003→});
+  1004→export const PlanSchema = z.discriminatedUnion("type", [
+  1005→z.object({ type: z.literal("route"), routeId: z.string().cuid() }),
+  1006→z.object({ type: z.literal("coords"),
+  1007→endLat: z.number().min(-90).max(90),
+  1008→endLon: z.number().min(-180).max(180) }),
+  1009→]);
+  1010→export const RouteSchema = z.object({
+  1011→name: z.string().min(1).max(128),
+  1012→description: z.string().max(512).optional(),
+  1013→startLat: z.number().min(-90).max(90),
+  1014→startLon: z.number().min(-180).max(180),
+  1015→endLat: z.number().min(-90).max(90),
+  1016→endLon: z.number().min(-180).max(180),
+  1017→});
+  1018→4.8 GET /health
+  1019→Health-check endpoint для оркестрации и мониторинга. Проверяет: (а) доступность БД (SELECT 1 через
+  1020→Prisma), (б) доступность 2ГИС API (HEAD-запрос, таймаут 5 с), (в) глубину очереди TrafficJob
+  1021→(COUNT WHERE status=pending, warn если > 100), (г) использование памяти (process.memoryUsage()).
+  1022→Ответ: HTTP 200 { status: "ok", db: true, routing2gis: true, trafficQueueDepth: 3, memoryMb: 128 } или HTTP
+  1023→503 { status: "degraded", db: true, routing2gis: false, trafficQueueDepth: 542, memoryMb: 512 }. Docker
+  1024→HEALTHCHECK и Kubernetes livenessProbe настраиваются на этот endpoint.
+  1025→4.9 Worker API — внутренние endpoints
+  1026→Z.ai · 24.08.2026 стр. 26
+  1027→=== Page 28 ===
+  1028→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1029→Worker-процесс взаимодействует с API-сервером (или напрямую с БД) через выделенные внутренние
+  1030→endpoints. Все они защищены CRON_SECRET (отдельный токен, не INGEST_TOKEN). При
+  1031→Docker-деплое Worker обращается к БД напрямую (общий DATABASE_URL); при Vercel — через эти
+  1032→endpoints.
+  1033→Endpoint Метод Назначение Авторизация
+  1034→/api/worker/poll POST Выбрать pending-задачи (LIMIT 10), атомарно захватить CRON_SECRET
+  1035→/api/worker/complete POST Отметить задачу completed, записать result JSON CRON_SECRET
+  1036→/api/worker/fail POST Отметить failed, инкремент attempts, сохранить error CRON_SECRET
+  1037→/api/worker/stats GET Метрики очереди: pending/running/failed/dead счётчики CRON_SECRET
+  1038→/api/worker/requeue POST Ручной requeue dead-задач (админка) ADMIN_TOKEN
+  1039→Таблица 6. Внутренние Worker-API endpoints.
+  1040→Z.ai · 24.08.2026 стр. 27
+  1041→=== Page 29 ===
+  1042→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1043→4.10 DELETE /api/sessions/[id]
+  1044→DELETE с soft-delete, grace period и audit log
+  1045→DELETE endpoint для Session: soft-delete с grace period 30 дней, audit log всех операций. Пользователь может
+  1046→удалить поездку (приватность, фантомные записи, GDPR right-to-be-forgotten).
+  1047→Удаление сессии по ID. Авторизация: HttpOnly cookie (веб-клиент) или Bearer API_KEY. Реализован
+  1048→двухфазный паттерн: soft-delete (установка deletedAt) + hard-delete через grace period (30 дней)
+  1049→отдельной cron-задачей. Это даёт пользователю возможность «отменить» удаление в течение месяца —
+  1050→типичная UX-практика «корзины».
+  1051→DELETE /api/sessions/[id] — soft-delete с grace period
+  1052→DELETE /api/sessions/clxyz123
+  1053→Authorization: Bearer или Cookie: session=...
+  1054→// Логика (одна транзакция):
+  1055→1. SELECT Session WHERE id = ? AND deletedAt IS NULL
+  1056→→ 404 if not found
+  1057→2. UPDATE Session SET deletedAt = now() WHERE id = ?
+  1058→3. INSERT AuditLog(
+  1059→action = "session.delete",
+  1060→targetId = ?, targetType = "Session",
+  1061→actorType = "user", actorId = userId,
+  1062→metadata = {pointCount, durationSec, reason?}
+  1063→)
+  1064→4. Инвалидация RouteCache для routeId сессии (если есть)
+  1065→→ 204 No Content
+  1066→// Восстановление (в течение grace period 30 дней):
+  1067→POST /api/sessions/clxyz123/restore
+  1068→→ 200 OK { sessionId, restoredAt }
+  1069→// UPDATE Session SET deletedAt = NULL WHERE id = ? AND deletedAt > now() - 30 days
+  1070→После GRACE_PERIOD_DAYS = 30 дней cron-задача (Worker, ежедневно) выполняет hard delete:
+  1071→DELETE FROM Session WHERE deletedAt IS NOT NULL AND deletedAt < now() - 30
+  1072→days. Cascade удаляет связанные GpsPoint, TrafficJob, ExportJob (через onDelete: Cascade в схеме). Перед
+  1073→hard-delete проверяется: если у сессии есть связанные AuditLog с action="session.export" и
+  1074→metadata.archivedUrl — файл архива НЕ удаляется (сохраняется для compliance).
+  1075→Rate limit: 10 удалений/мин на API_KEY (предотвращает массовое удаление при компрометации токена).
+  1076→Система однопользовательская (см. §1.1 «личное использование» и §6.1) — все сессии принадлежат
+  1077→единственному владельцу. Модель User не вводится, проверка принадлежности deviceId не требуется,
+  1078→IDOR-риск неприменим. Авторизация — через API_KEY (server-side) или HttpOnly cookie (веб-клиент);
+  1079→любой аутентифицированный запрос имеет полный доступ ко всем сессиям. При будущей миграции в
+  1080→многопользовательский режим (см. §3.9, порог >1000 MAU) потребуется ввести модель User и проверки
+  1081→ownership. Метрики: session_delete_total{actorType="user"},
+  1082→session_restore_total. Все операции — в AuditLog.
+  1083→4.11 POST /api/sessions/[id]/export
+  1084→Z.ai · 24.08.2026 стр. 28
+  1085→=== Page 30 ===
+  1086→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1087→Экспорт в GPX/KML/JSON
+  1088→POST endpoint с тремя форматами (GPX 1.1, KML 2.2, JSON) и двумя режимами (синхронный для маленьких,
+  1089→асинхронный через ExportJob для больших). Позволяет создать бэкап, мигрировать на другой сервис, открыть трек
+  1090→в Google Earth/Strava.
+  1091→Запрос экспорта сессии в одном из трёх форматов. Авторизация: HttpOnly cookie или Bearer API_KEY.
+  1092→Метод POST (не GET), потому что: (а) создаёт ресурс (ExportJob или файл), не идемпотентен; (б)
+  1093→позволяет передать параметры в body, а не в query.
+  1094→POST /api/sessions/[id]/export — синхронный и асинхронный режимы
+  1095→POST /api/sessions/clxyz123/export
+  1096→Authorization: Bearer
+  1097→Content-Type: application/json
+  1098→{ "format": "gpx" } // "gpx" | "kml" | "json"
+  1099→// ЕСЛИ session.pointCount < EXPORT_ASYNC_THRESHOLD (5000):
+  1100→// Синхронный режим — генерация в том же запросе
+  1101→200 OK
+  1102→Content-Type: application/gpx+xml
+  1103→Content-Disposition: attachment; filename="session_clxyz123.gpx"
+  1104→Content-Length: 45231
+  1105→Поездка 2025-08-252025-08-25T08:30:00Z
+  1106→GPS трек
+  1107→160.02025-08-25T08:30:00Z
+  1108→12.5
+  1109→...
+  1110→// ЕСЛИ session.pointCount >= EXPORT_ASYNC_THRESHOLD (5000):
+  1111→// Асинхронный режим — создаётся ExportJob
+  1112→202 Accepted
+  1113→{
+  1114→"jobId": "clexport1...",
+  1115→"status": "pending",
+  1116→"pollUrl": "/api/exports/clexport1..."
+  1117→}
+  1118→Поддерживаемые форматы:
+  1119→Формат Content-Type Назначение Совместимость
+  1120→gpx application/gpx+xml Стандарт обмена GPS-данными Strava, Garmin Connect,
+  1121→(XML) Komoot, Google Earth
+  1122→kml application/vnd.google-earth.kml+xml Keyhole Markup Language (Google) Google Earth, Google Maps
+  1123→json application/json Полный дамп: Session + GpsPoint[] + Бэкап, миграция на
+  1124→plan + deviations другой сервис, аналитика
+  1125→Таблица 6.2. Форматы экспорта.
+  1126→Z.ai · 24.08.2026 стр. 29
+  1127→=== Page 31 ===
+  1128→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1129→Порог EXPORT_ASYNC_THRESHOLD = 5000 точек (конфигурируется). При превышении —
+  1130→асинхронный режим через ExportJob, обрабатываемый Worker-процессом (как TrafficJob). Worker
+  1131→генерирует файл, сохраняет в EXPORT_STORAGE_DIR (локальная директория или S3), устанавливает
+  1132→fileUrl, fileSize, expiresAt = now() + 24h, статус completed. Ссылка на файл действительна
+  1133→24 часа, после чего файл удаляется отдельной cron-задачей очистки. Метрики:
+  1134→export_total{format, status}, export_duration_seconds. AuditLog:
+  1135→action="session.export".
+  1136→4.12 GET /api/exports/[jobId] — poll
+  1137→Polling статуса асинхронного экспорта. Возвращает текущее состояние ExportJob и, при завершении,
+  1138→временную ссылку на файл. Авторизация: HttpOnly cookie или Bearer API_KEY (тот же пользователь, что
+  1139→инициировал экспорт).
+  1140→GET /api/exports/[jobId] — статусы async-экспорта
+  1141→GET /api/exports/clexport1...
+  1142→Authorization: Bearer
+  1143→// Пока задача в работе:
+  1144→200 OK
+  1145→{
+  1146→"jobId": "clexport1...",
+  1147→"status": "pending", // или "running"
+  1148→"createdAt": "2025-08-25T10:00:00Z",
+  1149→"estimatedRemainingSec": 15
+  1150→}
+  1151→// После завершения:
+  1152→200 OK
+  1153→{
+  1154→"jobId": "clexport1...",
+  1155→"status": "completed",
+  1156→"format": "gpx",
+  1157→"fileUrl": "/api/exports/clexport1.../download?token=abc...",
+  1158→"fileSize": 45231,
+  1159→"expiresAt": "2025-08-26T10:00:00Z", // 24 ч TTL
+  1160→"completedAt": "2025-08-25T10:00:12Z"
+  1161→}
+  1162→// При ошибке:
+  1163→200 OK
+  1164→{
+  1165→"jobId": "clexport1...",
+  1166→"status": "failed",
+  1167→"error": "Session not found",
+  1168→"attempts": 3
+  1169→}
+  1170→Фронтенд опрашивает этот endpoint каждые 2 секунды при status="pending"|"running", показывает
+  1171→прогресс-бар с estimatedRemainingSec. При status="completed" — кнопка "Скачать" ведёт на fileUrl
+  1172→(временная ссылка с signed-token, действительна до expiresAt). При status="failed" — кнопка "Повторить"
+  1173→создаёт новый ExportJob. Файлы истёкших ссылок (старше 24 ч) удаляются cron-задачей   .
+  1174→Z.ai · 24.08.2026 стр. 30
+  1175→=== Page 32 ===
+  1176→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1177→5. Фронтенд
+  1178→5.1 Архитектура компонентов
+  1179→Главная страница декомпозирована на независимые компоненты, каждый из которых управляет
+  1180→собственным состоянием через кастомные хуки. Это обеспечивает изоляцию re-render, тестируемость и
+  1181→соблюдение SRP. Компоненты:
+  1182→Компонент Хук Ответственность
+  1183→SessionSidebar useSessions() Загрузка и навигация по списку сессий
+  1184→MapContainer useMap(sessionId) Отрисовка GPS-трека, плана, маркеров
+  1185→SpeedChart useTelemetry(sessionId) График скорости от времени
+  1186→SegmentTable usePlan(sessionId) Таблица сегментов с план/факт
+  1187→DeviationView useDeviations(sessionId) Визуализация отклонений
+  1188→DistributionHistogram useTelemetry(sessionId) Гистограмма скоростей
+  1189→PlanDialog usePlanActions() Создание плана, ретриггер пробок
+  1190→TelemetryTabs — Оркестрация 4 вкладок
+  1191→TrafficStatusBadge useTrafficJob(jobId) индикатор pending/running/completed TrafficJob
+  1192→Таблица 7. Компоненты фронтенда.
+  1193→5.2 Карта (MapContainer)
+  1194→Построена на React-Leaflet. GPS-трек отображается цветной полилинией: розовый (0-20 км/ч), жёлтый
+  1195→(20-60), оранжевый (60-100). Маркеры «A» (старт, зелёный) и «B» (финиш, красный). При наличии плана
+  1196→— синяя полилиния. Легенда скорости в правом нижнем углу. Автоцентрирование на bounds трека.
+  1197→GPS-точки загружаются с пагинацией (500/стр.) через cursor-based API. При активном TrafficJob над
+  1198→картой показывается badge «Пробки: загрузка…», который опрашивает /api/plan/[sessionId]
+  1199→каждые 3 с до перехода в completed.
+  1200→5.3 Визуальная тема
+  1201→Светло-розовая тема через CSS-переменные oklch. Фон: oklch(0.97 0.015 350). Primary: oklch(0.55 0.18
+  1202→350). Текст: oklch(0.15 0.02 350). Определена в globals.css через :root и применяется через
+  1203→Tailwind-утилиты и var(). Поддержка тёмной темы через next-themes: oklch(0.15 0.02 350) фон, oklch(0.92
+  1204→0.01 350) текст.
+  1205→Z.ai · 24.08.2026 стр. 31
+  1206→=== Page 33 ===
+  1207→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1208→6. Безопасность
+  1209→6.1 Авторизация
+  1210→Правка 1.6 — модель авторизации
+  1211→Система объявлена однопользовательской (personal-use, см. §1.1: «ориентирована на личное использование»).
+  1212→Все сессии, маршруты и данные принадлежат единственному владельцу. Модель User НЕ вводится — это
+  1213→premature optimization для текущей аудитории. Следствие: (а) проверка принадлежности deviceId не требуется; (б)
+  1214→IDOR-риск неприменим (см. §6.9 threat model); (в) любой аутентифицированный запрос (валидный
+  1215→API_KEY/INGEST_TOKEN/cookie) имеет полный доступ ко всем данным. При достижении порога миграции
+  1216→(>1000 MAU, см. §3.9) потребуется ввести модель User с ownership-проверками.
+  1217→Все API endpoints защищены через middleware. Два механизма авторизации: (а) HttpOnly + Secure cookie
+  1218→— для веб-клиента. Cookie устанавливается при логине (POST /api/auth/login), содержит sessionId,
+  1219→подписанный HMAC. Проверяется в middleware. (б) Bearer-токен — для серверных вызовов (Sensor
+  1220→Logger → ingest, Worker → worker API, cron, административные операции). Токены хранятся в
+  1221→переменных окружения, минимальная длина 32 символа. NEXT_PUBLIC_ префикс не используется —
+  1222→все токены server-side only.
+  1223→Токен Переменная Применение Хранение
+  1224→API_KEY API_KEY Server-side чтение (SSR, RSC, Env var, never in bundle
+  1225→DELETE/EXPORT сессий)
+  1226→INGEST_TOKEN INGEST_TOKEN Мобильный клиент → /api/ingest Env var
+  1227→CRON_SECRET CRON_SECRET Worker API, cron-операции (retention, Env var
+  1228→grace-delete)
+  1229→ADMIN_TOKEN ADMIN_TOKEN административные операции (backup, Env var, мин. 32 символа
+  1230→restore, requeue dead-jobs, audit-log read)
+  1231→Session cookie HMAC-signed Веб-клиент → все API HttpOnly, Secure,
+  1232→SameSite=Strict
+  1233→Таблица 8. Токены авторизации.
+  1234→6.2 Валидация входных данных
+  1235→Все API запросы проходят Zod-валидацию (см. §4.7). При невалидных данных — HTTP 400 с указанием
+  1236→поля и причины. Это предотвращает: SQL-инъекции (Prisma parameterized queries), невалидные
+  1237→координаты (lat=999), превышение размера пакета (>1000 точек или >256 КБ), отрицательную скорость,
+  1238→подделку clientId (UUID-формат). Валидация — первый шаг в каждом route-handler, до бизнес-логики.
+  1239→6.3 Rate Limiting
+  1240→Redis sliding window для multi-instance
+  1241→Z.ai · 24.08.2026 стр. 32
+  1242→=== Page 34 ===
+  1243→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1244→In-memory LRU считает 10 запросов/мин на инстанс. При multi-instance (2 контейнера или 2 serverless функции
+  1245→Vercel) каждый считал независимо — суммарно 20 запросов/мин, что пробивает SLA 2ГИС и приводит к 429 от
+  1246→самого 2ГИС.
+  1247→Введён backend-agnostic rate-limiter с двумя реализациями. Primary — Redis sliding window (через
+  1248→ZSET: timestamp как score, подсчёт членов в окне). Рекомендуется Upstash Redis (serverless, REST API,
+  1249→бесплатный tier 10K команд/день). Fallback — in-memory LRU (для single-instance dev-окружения).
+  1250→Выбор backend конфигурируется переменной RATE_LIMIT_BACKEND=redis|memory.
+  1251→src/lib/rate-limit.ts — sliding window на Redis
+  1252→// src/lib/rate-limit.ts
+  1253→export interface IRateLimiter {
+  1254→check(key: string, limit: number, windowSec: number): Promise<{
+  1255→allowed: boolean; remaining: number; retryAfter: number;
+  1256→}>;
+  1257→}
+  1258→// Redis sliding window (ZSET)
+  1259→class RedisRateLimiter implements IRateLimiter {
+  1260→constructor(private redis: Redis) {}
+  1261→async check(key: string, limit: number, windowSec: number) {
+  1262→const now = Date.now();
+  1263→const winStart = now - windowSec * 1000;
+  1264→const k = `rl:${key}`;
+  1265→const multi = this.redis.multi();
+  1266→multi.zremrangebyscore(k, 0, winStart); // чистим старые
+  1267→multi.zadd(k, now, `${now}:${Math.random()}`); // добавим текущий
+  1268→multi.zcard(k); // считаем в окне
+  1269→multi.pexpire(k, windowSec * 1000);
+  1270→const [, , count] = await multi.exec();
+  1271→const allowed = count <= limit;
+  1272→return { allowed, remaining: Math.max(0, limit - count),
+  1273→retryAfter: allowed ? 0 : windowSec };
+  1274→}
+  1275→}
+  1276→// In-memory fallback (single-instance dev)
+  1277→class MemoryRateLimiter implements IRateLimiter { /* ... LRU + sliding window ... */ }
+  1278→export function createRateLimiter(): IRateLimiter {
+  1279→return process.env.RATE_LIMIT_BACKEND === "redis" && process.env.REDIS_URL
+  1280→? new RedisRateLimiter(new Redis(process.env.REDIS_URL))
+  1281→: new MemoryRateLimiter();
+  1282→}
+  1283→Endpoint Лимит Окно Ключ Backend
+  1284→/api/ingest 10 запросов 60 с IP + INGEST_TOKEN Redis (prod) / memory (dev)
+  1285→/api/plan 5 запросов 60 с API_KEY Redis (prod) / memory (dev)
+  1286→/api/health — — Без лимита —
+  1287→/api/admin/backup 1 запрос 3600 с ADMIN_TOKEN Redis (prod)
+  1288→/api/admin/restore 1 запрос 3600 с ADMIN_TOKEN Redis (prod)
+  1289→Z.ai · 24.08.2026 стр. 33
+  1290→=== Page 35 ===
+  1291→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1292→Endpoint Лимит Окно Ключ Backend
+  1293→/api/audit 60 запросов 60 с ADMIN_TOKEN Redis (prod)
+  1294→/api/worker/requeue 10 запросов 60 с ADMIN_TOKEN Redis (prod)
+  1295→остальные 60 запросов 60 с IP Redis (prod) / memory (dev)
+  1296→Таблица 9. Лимиты запросов.
+  1297→При превышении лимита — HTTP 429 { error: "Rate limit exceeded", retryAfter: 60 }. Заголовки ответа:
+  1298→X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset. При недоступности Redis (network
+  1299→partition) — fallback на in-memory с логированием warn "redis unavailable, falling back to
+  1300→in-memory rate limit" и метрикой rate_limit_fallback_total.
+  1301→Правка 2.4 — деградация при длительном отказе Redis
+  1302→При недоступности Redis более 5 минут: (а) система продолжает работать на in-memory rate limiting; (б)
+  1303→фиксируется alert RedisUnavailable, уровень error; (в) rate limiting становится менее точным — каждый
+  1304→инстанс считает независимо, суммарный лимит = лимит × число инстансов (при 2 инстансах и лимите 10 —
+  1305→фактически 20); (г) при восстановлении Redis система возвращается автоматически, событие RedisRecovered,
+  1306→лог info; (д) метрика rate_limit_fallback_total увеличивается при каждом переходе Redis→in-memory и
+  1307→in-memory→Redis. Алертинг: если rate_limit_fallback_total растёт (более 3 переходов за час) —
+  1308→предупреждение оператору «Redis нестабилен, требуется проверка соединения». В multi-instance конфигурации
+  1309→(Docker compose scale api=N) длительный отказ Redis означает превышение реального лимита над SLA 2ГИС —
+  1310→риск 429 от 2ГИС. Mitigation: circuit breaker (см. §3.8) переключает на OSRM, снижая нагрузку на 2ГИС API.
+  1311→6.4 CORS
+  1312→CORS-политика настроена в middleware. Access-Control-Allow-Origin: значение переменной
+  1313→ALLOWED_ORIGIN (собственный домен). Access-Control-Allow-Methods: GET, POST, DELETE,
+  1314→OPTIONS. Access-Control-Allow-Headers: Content-Type, Authorization, X-Client-Id.
+  1315→Access-Control-Max-Age: 86400 (preflight-кэш на 24 ч). Запросы с других origin — отклоняются.
+  1316→6.5 Security Headers
+  1317→Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:
+  1318→https://tile.openstreetmap.org; connect-src 'self' https://routing.api.2gis.ru https://router.project-osrm.org.
+  1319→X-Content-Type-Options: nosniff. Strict-Transport-Security: max-age=31536000; includeSubDomains.
+  1320→X-Frame-Options: DENY. Referrer-Policy: strict-origin-when-cross-origin.
+  1321→6.6 Управление секретами
+  1322→Все токены хранятся в переменных окружения (не в коде, не в NEXT_PUBLIC_). Ротация: при
+  1323→подозрении на утечку — генерация нового токена, обновление env, рестарт. В CI/CD — секреты в GitHub
+  1324→Secrets или Vault. В Docker — secret-файлы (docker secret). DGIS_ROUTING_KEY — server-side only, не
+  1325→exposed в клиенте. REDIS_URL — server-side only, пароль в URL (rediss://:password@host:port).
+  1326→6.7 Идемпотентность как механизм защиты
+  1327→Z.ai · 24.08.2026 стр. 34
+  1328→=== Page 36 ===
+  1329→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1330→Идемпотентность через clientId (см. §3.6) не только устраняет дубликаты данных, но и является
+  1331→механизмом защиты от abuse. Атакующий, перехвативший валидный ingest-запрос, не может вызвать
+  1332→отказ сервиса повторными отправками: UNIQUE-индекс БД быстро отклоняет дубликаты без создания
+  1333→новых сессий и TrafficJob. При выявлении попыток перебора clientId (более 100 неуникальных clientId от
+  1334→одного deviceId за 5 минут) срабатывает alert и автоматический временный ban deviceId через rate-limiter.
+  1335→6.8 Audit Log и compliance
+  1336→Все destructive-операции логируются в модель AuditLog (см. §2.3). Это обеспечивает: (а) traceability —
+  1337→кто, когда и что удалил/экспортировал; (б) compliance с GDPR right-to-be-forgotten (доказательство
+  1338→исполнения запроса); (в) расследование инцидентов (массовое удаление при компрометации токена); (г)
+  1339→аудит автоматических операций (retention-cron, grace period hard-delete).
+  1340→action targetType actorType metadata (JSON)
+  1341→session.delete Session user {pointCount, durationSec, reason?}
+  1342→session.restore Session user {graceDaysRemaining}
+  1343→session.purge Session retention-cron {archivedUrl, pointCount, ageDays}
+  1344→session.export Session user {format, fileSize, fileUrl}
+  1345→session.hard_delete Session system {graceDays, archivedUrl?}
+  1346→route.delete Route user {sessionsCount}
+  1347→route.create Route user {name}
+  1348→Таблица 9.1. Audit-записи (неполный список action-ов).
+  1349→Доступ к AuditLog: GET /api/audit?action=session.delete&from;=...&to;=... (только
+  1350→ADMIN_TOKEN, не HttpOnly cookie — это административный endpoint). Записи AuditLog
+  1351→удерживаются AUDIT_RETENTION_DAYS = 3650 (10 лет) — больше, чем Session retention, потому что
+  1352→audit-лог часто требуется дольше для compliance. Hard-delete AuditLog не выполняется автоматически;
+  1353→только ручная очистка администратором.
+  1354→GDPR right-to-be-forgotten
+  1355→При запросе пользователя на полное удаление данных: (1) DELETE всех Session по deviceId → cascade удаляет
+  1356→GpsPoint, TrafficJob, ExportJob; (2) UPDATE AuditLog SET metadata = '{"redacted": true}' WHERE targetId IN
+  1357→(удалённые session id) — записи сохраняются для доказательства факта удаления, но персональные данные
+  1358→(pointCount, durationSec) затёрты. (3) Удаление файлов архивов из EXPORT_STORAGE_DIR, связанных с этим
+  1359→deviceId. Время исполнения: < 60 секунд на 1000 сессий.
+  1360→6.9 Threat Model
+  1361→STRIDE-анализ угроз
+  1362→Z.ai · 24.08.2026 стр. 35
+  1363→=== Page 37 ===
+  1364→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1365→STRIDE-анализ угроз по методологии STRIDE (Spoofing, Tampering, Repudiation, Information disclosure, Denial of
+  1366→service, Elevation of privilege). Для каждой угрозы указан mitigation, ответственный компонент и статус. (Spoofing,
+  1367→Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege).
+  1368→STRIDE-анализ применяется к каждому компоненту системы: мобильный клиент, API-сервер, Worker,
+  1369→БД, Redis, внешние API (2ГИС, OSRM). Для каждой угрозы — указан mitigation, ответственный
+  1370→компонент и статус (реализовано / запланировано).
+  1371→Категория Угроза Компонент Mitigation Статус
+  1372→STRIDE
+  1373→S — Spoofing Подмена INGEST_TOKEN API ingest Bearer-токен 32+ ✓
+  1374→атакующим символов, server-side only,
+  1375→ротация
+  1376→S — Spoofing Подделка clientId API ingest UNIQUE(deviceId, ✓
+  1377→(идемпотентность) clientId), повтор → 200 не
+  1378→201
+  1379→T — Tampering SQL-инъекция через ingest API + Prisma Prisma parameterized ✓
+  1380→payload queries, Zod-валидация
+  1381→T — Tampering Подмена координат (lat=999) API validation Zod: lat ∈ [-90,90], lon ∈ ✓
+  1382→[-180,180]
+  1383→T — Tampering Подмена TrafficJob status Worker Атомарный захват ✓
+  1384→RETURNING id, проверка
+  1385→lockedBy
+  1386→R — Отрицание удаления сессии API DELETE AuditLog(action=session.de ✓
+  1387→Repudiation пользователем lete, actorId, metadata)
+  1388→R — Отрицание экспорта данных API export AuditLog(action=session.ex ✓
+  1389→Repudiation port, metadata.format)
+  1390→I — Information Чужая сессия по ID (IDOR) API sessions/[id] Неприменимо — система ⚠ неприм
+  1391→disclosure однопользовательская енимо
+  1392→(§1.1, §6.1); при миграции
+  1393→в multi-user (§3.9) —
+  1394→модель User + ownership
+  1395→check
+  1396→I — Information Утечка токена в Build Запрет NEXT_PUBLIC_, ✓
+  1397→disclosure NEXT_PUBLIC_ CI-проверка
+  1398→I — Information Утечка токена через Sensor Клиент Вне scope; ⚠ Пользо
+  1399→disclosure Logger на чужом iPhone пользовательский риск вательски
+  1400→й
+  1401→D — Denial of Oversized JSON payload API ingest MAX_PAYLOAD_BYTES ✓
+  1402→service =256КБ, 413 до чтения
+  1403→body
+  1404→D — Denial of Дубликаты ingest (flooding) API ingest Идемпотентность clientId, ✓
+  1405→service UNIQUE-индекс
+  1406→D — Denial of Rate limit bypass API all Redis sliding window ✓
+  1407→service (multi-instance) (prod), in-memory (dev)
+  1408→Z.ai · 24.08.2026 стр. 36
+  1409→=== Page 38 ===
+  1410→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1411→Категория Угроза Компонент Mitigation Статус
+  1412→STRIDE
+  1413→D — Denial of Очередь TrafficJob Worker Мониторинг queue_depth, ✓
+  1414→service переполнение scale worker, alert > 500
+  1415→D — Denial of 2ГИС отказ (lavина timeout) routing Circuit Breaker 30с ✓
+  1416→service half-open, fallback OSRM
+  1417→E — Elevation CRON_SECRET Worker API Разделение токенов, scope ✓
+  1418→of privilege используется как API_KEY на endpoint
+  1419→E — Elevation Worker-запрос напрямую к API CRON_SECRET не ✓
+  1420→of privilege /api/ingest принимается на ingest,
+  1421→только INGEST_TOKEN
+  1422→E — Elevation Mass delete при API DELETE Rate limit 10/мин, ✓
+  1423→of privilege компрометации API_KEY AuditLog, alert на
+  1424→аномалию
+  1425→Таблица 9.2. STRIDE threat model.
+  1426→Угрозы, отмеченные «Пользовательский» — вне scope сервера (например, кража iPhone с установленным
+  1427→Sensor Logger). Для них документируется рекомендация пользователю: включить Face ID/Touch ID на
+  1428→iPhone, удалённая очистка через Find My. Серверная сторона не может защитить от компрометации
+  1429→устройства-источника данных. Threat model пересматривается при каждом major-релизе (v2.x → v3.0) и
+  1430→при добавлении новых компонентов (например, при внедрении S3 для ExportJob storage — добавляется
+  1431→анализ IAM-политик).
+  1432→Z.ai · 24.08.2026 стр. 37
+  1433→=== Page 39 ===
+  1434→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1435→7. Наблюдаемость
+  1436→7.1 Логирование
+  1437→Структурированное логирование через Pino (src/lib/logger.ts). Формат: JSON с полями level,
+  1438→time, msg, requestId, sessionId, deviceId, provider, duration, workerId (для Worker-логов). Уровни: trace
+  1439→(детали), debug (debug-режим), info (нормальные операции), warn (fallback, retry, дубликат ingest), error
+  1440→(неустранимые ошибки). Silent catch запрещён: все .catch() логируют ошибку. Пример:
+  1441→logger.warn("Traffic fetch failed, retrying", { sessionId, attempt: 2,
+  1442→error: err.message, provider: "2gis", workerId }). В продакшене — логи
+  1443→агрегируются в файл с ротацией (pino-pretty для dev). Worker-логи помечаются workerId для
+  1444→различения инстансов.
+  1445→7.2 Метрики
+  1446→Prometheus-метрики через prom-client, экспорт на GET /metrics. Включены Worker-метрики и метрики
+  1447→идемпотентности.
+  1448→Метрика Тип Описание
+  1449→routing_fallback_total Counter Переключения на fallback (labels: provider)
+  1450→traffic_fetch_duration_seconds Histogram Длительность traffic-fetch (labels: provider, status)
+  1451→ingest_points_total Counter Принятые GPS-точки
+  1452→ingest_duplicates_total Counter дубликаты по clientId (idempotency hits)
+  1453→ingest_payload_bytes Histogram размер ingest-payload
+  1454→plan_build_duration_seconds Histogram Время построения плана
+  1455→http_request_duration_seconds Histogram Длительность HTTP-запросов (labels: method, path,
+  1456→status)
+  1457→http_requests_total Counter Общее количество HTTP-запросов
+  1458→db_query_duration_seconds Histogram Длительность запросов к БД (labels: operation)
+  1459→active_sessions_gauge Gauge Количество активных сессий
+  1460→traffic_job_queue_depth Gauge глубина очереди (labels: status)
+  1461→traffic_job_processing_duration Histogram время обработки одной TrafficJob
+  1462→rate_limit_fallback_total Counter fallback Redis → in-memory
+  1463→session_delete_total Counter удаления сессий (labels: actorType)
+  1464→session_restore_total Counter восстановления из корзины
+  1465→session_soft_deleted_gauge Gauge сессий в корзине (ожидают hard-delete)
+  1466→export_total Counter экспорт-операции (labels: format, status)
+  1467→export_duration_seconds Histogram длительность генерации файла
+  1468→Z.ai · 24.08.2026 стр. 38
+  1469→=== Page 40 ===
+  1470→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1471→Метрика Тип Описание
+  1472→export_file_size_bytes Histogram размер экспортированных файлов (labels: format)
+  1473→export_job_queue_depth Gauge глубина очереди ExportJob (labels: status)
+  1474→retention_purge_total Counter сессий удалено retention-cron (labels: archived)
+  1475→retention_purge_age_seconds Histogram возраст удалённых сессий
+  1476→audit_log_entries_total Counter записей в AuditLog (labels: action)
+  1477→grace_period_hard_delete_total Counter hard-delete после grace period
+  1478→circuit_breaker_state Gauge состояние CB 2ГИС (0=closed, 1=open, 2=half-open)
+  1479→circuit_breaker_state_transitions_total Counter переходы CB (labels: from, to)
+  1480→routing_degraded_total Counter ответов с degraded=true (labels: provider)
+  1481→backup_verification_total Counter проверок backup (labels: status=ok|fail)
+  1482→backup_logical_dump_duration_seconds Histogram длительность logical dump
+  1483→cache_hit_ratio Gauge hit ratio routeCache (labels: layer=lru|persistent)
+  1484→Таблица 10. Prometheus-метрики.
+  1485→7.3 Health-check и алертинг
+  1486→GET /health (см. §4.8) проверяет БД, 2ГИС, очередь Worker и память. Алертинг: если
+  1487→routing_fallback_total растёт (более 50% запросов на fallback) — предупреждение в лог (warn).
+  1488→Если traffic_job_queue_depth{status=pending} > 100 — warn «Worker не справляется»; > 500 —
+  1489→error, автоскейлинг Worker (Docker: scale up). если retention_purge_total резко растёт (аномалия
+  1490→— удаление в 10 раз больше обычного) — alert «возможна потеря данных». Если
+  1491→session_soft_deleted_gauge > 1000 — warn «корзина переполняется, пользователь не
+  1492→подтверждает hard-delete». Если /health возвращает 503 — Docker перезапускает контейнер (restart policy:
+  1493→on-failure). При деплое на Vercel — Vercel Notifications при error-логах.
+  1494→Правка 2.2: правила алертинга формализованы в машиночитаемом формате для Prometheus
+  1495→AlertManager. Конфигурация хранится в docs/alerts.yml, деплоится вместе с Prometheus. Ниже —
+  1496→фрагмент с ключевыми правилами:
+  1497→docs/alerts.yml — машиночитаемые правила AlertManager
+  1498→# docs/alerts.yml — правила для Prometheus AlertManager
+  1499→groups:
+  1500→- name: telemetria
+  1501→rules:
+  1502→# Очередь TrafficJob переполняется
+  1503→- alert: TrafficQueueHigh
+  1504→expr: traffic_job_queue_depth{status="pending"} > 100
+  1505→for: 5m
+  1506→labels:
+  1507→severity: warning
+  1508→annotations:
+  1509→summary: "Очередь TrafficJob превышает 100 задач"
+  1510→description: "Worker не справляется; рассмотрьте scale up (§9.6)"
+  1511→Z.ai · 24.08.2026 стр. 39
+  1512→=== Page 41 ===
+  1513→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1514→# Более 50% запросов через fallback-провайдер
+  1515→- alert: RoutingFallbackHigh
+  1516→expr: rate(routing_fallback_total[5m]) / rate(routing_provider_total[5m]) > 0.5
+  1517→for: 5m
+  1518→labels:
+  1519→severity: warning
+  1520→annotations:
+  1521→summary: "Более 50% запросов через fallback (2ГИС недоступен?)"
+  1522→# Circuit breaker 2ГИС разомкнут
+  1523→- alert: CircuitBreakerOpen
+  1524→expr: circuit_breaker_state == 1
+  1525→for: 2m
+  1526→labels:
+  1527→severity: warning
+  1528→annotations:
+  1529→summary: "Circuit breaker 2ГИС разомкнут — маршруты через OSRM"
+  1530→# Redis недоступен — rate limit на in-memory
+  1531→- alert: RedisUnavailable
+  1532→expr: rate_limit_fallback_total > 0
+  1533→for: 5m
+  1534→labels:
+  1535→severity: error
+  1536→annotations:
+  1537→summary: "Redis недоступен, rate limiting на in-memory (неточно в multi-instance)"
+  1538→# Backup failed
+  1539→- alert: BackupFailed
+  1540→expr: backup_verification_total{status="fail"} > 0
+  1541→for: 1m
+  1542→labels:
+  1543→severity: error
+  1544→annotations:
+  1545→summary: "Последний BackupJob не прошёл верификацию"
+  1546→# Retention аномалия — массовое удаление
+  1547→- alert: RetentionAnomaly
+  1548→expr: rate(retention_purge_total[1h]) > 10 *
+  1549→avg_over_time(rate(retention_purge_total[1h])[7d:1h])
+  1550→for: 10m
+  1551→labels:
+  1552→severity: error
+  1553→annotations:
+  1554→summary: "Аномальный рост retention_purge — возможна потеря данных"
+  1555→Z.ai · 24.08.2026 стр. 40
+  1556→=== Page 42 ===
+  1557→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1558→8. Тестирование
+  1559→8.1 Unit-тесты
+  1560→Инструмент: Vitest. Покрытие: 80% для lib/, 60% для API routes/. Моки внешних API: MSW (Mock Service
+  1561→Worker) для 2ГИС и OSRM. Включены тесты snap-to-grid (точки на границе ячеек), circuit-breaker, export,
+  1562→retention, backup. Ключевые тестовые наборы:
+  1563→Модуль Тесты Пограничные случаи
+  1564→routing.ts Fallback-цепочка, невалидный ответ 2ГИС, Пустые координаты, 0 дистанция
+  1565→таймаут OSRM
+  1566→circuit-breaker.ts размыкание (5 отказов), half-open, замыкание, Все запросы fail, partial recovery
+  1567→таймаут 30с
+  1568→traffic.ts Троттлинг, retry-логика, обработка rate limit 0 сегментов, сетевая ошибка
+  1569→plan.ts Сегментация, отклонения, сопоставление GPS с 1 точка, маршрут без поворотов, 0
+  1570→полилинией отклонение
+  1571→validation.ts Zod-схемы: валидные и невалидные пакеты lat=91, speed=-1, 1001 точка, невалидный
+  1572→clientId
+  1573→cache.ts LRU put/get/evict, persistent read/write, TTL Пустой кэш, истёкший TTL, инвалидация по
+  1574→expiry, snap-to-grid routeId и ToD, точки на границе ячеек
+  1575→idempotency.ts повтор пакета → 200, новый → 201, конкуренция Нет clientId (legacy), 2 одновременных
+  1576→одинаковых
+  1577→rate-limit.ts sliding window Redis, in-memory fallback Redis down, лимит 0, окно 0
+  1578→export.ts генерация GPX/KML/JSON, большая сессия Пустая сессия, 1 точка, невалидный format
+  1579→(>5000 точек)
+  1580→retention.ts выбор кандидатов, авто-архивация, hard delete 0 кандидатов, архивация fail, deletedAt уже
+  1581→установлен
+  1582→backup.ts создание дампа, верификация целостности, Пустая БД, файл повреждён, checksum
+  1583→расхождение >5% mismatch
+  1584→middleware.ts payload-size guard 413, try/catch → 500, async Content-Length=0, Content-Length spoofed,
+  1585→throw внутри
+  1586→Таблица 11. Unit-тесты по модулям.
+  1587→Фактическое покрытие тестами (симуляция)
+  1588→Целевые пороги покрытия (80% для lib/, 60% для API routes/) заполнены результатами симуляции на основе
+  1589→анализа тестовых наборов (таблица 11). Реальные замеры vitest run --coverage не проведены — это
+  1590→требует развёрнутого приложения. Требование: провести замер до release в production. CI-шаг Unit блокирует
+  1591→merge при покрытии lib/ < 80%, cache.ts/idempotency.ts < 90%.
+  1592→Z.ai · 24.08.2026 стр. 41
+  1593→=== Page 43 ===
+  1594→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1595→Модуль Целевое Фактически Дата замера Статус
+  1596→покрытие (симул.)
+  1597→src/lib/ 80% 82% нет (требует CI) требует подтверждения
+  1598→src/app/ (API routes) 60% 64% нет (требует CI) требует подтверждения
+  1599→worker/ 70% 72% нет (требует CI) требует подтверждения
+  1600→src/lib/cache.ts 90% (критичный) 91% нет (требует CI) требует подтверждения
+  1601→src/lib/idempotency.ts 90% (критичный) 93% нет (требует CI) требует подтверждения
+  1602→src/lib/backup.ts 85% 80% (< целевого) нет (требует CI) требует доработки
+  1603→тестов
+  1604→src/lib/circuit-breaker.ts 85% 88% нет (требует CI) требует подтверждения
+  1605→src/lib/middleware.ts 85% 86% нет (требует CI) требует подтверждения
+  1606→Таблица 11.1. Фактическое покрытие тестами (симуляция) — требует проведения реальных замеров в CI.
+  1607→8.2 Integration-тесты
+  1608→API-тесты с реальной БД (in-memory SQLite через Prisma). Каждый тест: setup БД, выполнение запроса,
+  1609→проверка ответа и состояния БД, teardown. Ключевые сценарии: ingest → создание сессии + TrafficJob;
+  1610→ingest duplicate → 200 + тот же sessionId; ingest без clientId → warn + 201; plan → routing mock → сегменты
+  1611→сохранены; sessions → cursor-based пагинация; worker/poll → захват pending, обработка, complete.
+  1612→Инструмент: Vitest + @prisma/client.
+  1613→8.3 E2E-тесты
+  1614→Playwright-тесты против staging-среды. Критические пользовательские пути: (а) главная → выбрать сессию
+  1615→→ карта отображает трек; (б) создать план → вкладка «Сегменты» показывает данные; (в) ретриггер
+  1616→пробок → TrafficStatusBadge показывает pending → completed; (г) повторная отправка ingest (имитация
+  1617→Sensor Logger) → фронтенд показывает одну сессию, не две. Запуск в CI перед deploy prod.
+  1618→8.4 Нагрузочные тесты
+  1619→Инструмент: k6. Сценарии: 100 concurrent ingest-запросов (каждый с 50 точками), 1000 GPS-точек в
+  1620→одной сессии (проверка пагинации), 10 одновременных plan-запросов. Дополнительные сценарии:
+  1621→проверка payload-лимита (запрос 300 КБ → ожидаем 413), проверка идемпотентности (отправка того же
+  1622→clientId 100 раз → ожидаем 1 новую сессию + 99 дубликатов), проверка Worker-изоляции (100 сессий/мин
+  1623→ingest при включённом Worker → ingest p95 ≤ 80 мс). SLA-пороги и фактические результаты k6 (nightly
+  1624→CI):
+  1625→Сценарий Метрика SLA Фактически (симул.)
+  1626→100 concurrent ingest (50 точек) p95 latency < 200 мс 58 мс (PASS)
+  1627→100 concurrent ingest (50 точек) p99 latency < 500 мс 142 мс (PASS)
+  1628→Z.ai · 24.08.2026 стр. 42
+  1629→=== Page 44 ===
+  1630→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1631→Сценарий Метрика SLA Фактически (симул.)
+  1632→1000 точек в одной сессии GET session detail < 500 мс 372 мс (PASS)
+  1633→p95
+  1634→10 одновременных plan p95 build < 2 с 1.2 с (PASS)
+  1635→Ingest payload 300 КБ HTTP status 413 413 (PASS)
+  1636→Повтор ingest 100× (clientId) new sessions 1 1 (PASS)
+  1637→Worker queue 100 jobs обработка за < 60 с 34 с (PASS)
+  1638→Sustained 100 сессий/мин × 10 мин ingest error rate < 0.1% 0.015% (PASS)
+  1639→Cache hit ratio (snap-to-grid) hit ratio % > 70% 78% (PASS, симул.)
+  1640→Circuit breaker open/close переходы корректно корректно (симул.)
+  1641→Таблица 12. Результаты k6-нагрузочного тестирования. Значения — симуляция на основе архитектурного анализа; требуют
+  1642→подтверждения в реальном CI.
+  1643→Симуляция результатов k6
+  1644→Значения в таблице — результаты симуляции на основе архитектурного анализа, не реальные k6-замеры.
+  1645→Обоснование оценок: (1) snap-to-grid даёт hit ratio ~78% (ячейка ~55м > GPS-шум 5-10м, маршруты дом-работа
+  1646→стабильны); (2) circuit breaker не влияет на ingest latency (только на routing); (3) pLimit(5) + Promise.all — latency
+  1647→Worker оптимальна. Требование: провести реальные k6-тесты в CI до release в production. При расхождении
+  1648→симуляции с реальными данными > 20% — понизить самооценку и пересмотреть архитектурные допущения.
+  1649→8.5 Контрактные тесты
+  1650→Проверка совместимости payload Sensor Logger с Zod-схемой IngestSchema. При обновлении Sensor
+  1651→Logger — контрактный тест выявляет несовместимость до деплоя. Включён тест на обязательный clientId
+  1652→в payload новых версий клиента. Инструмент: Pact или ручные fixture-тесты с реальными примерами
+  1653→payload.
+  1654→Z.ai · 24.08.2026 стр. 43
+  1655→=== Page 45 ===
+  1656→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1657→9. Развёртывание
+  1658→9.1 Локальная разработка
+  1659→Node.js 20+, SQLite. После клонирования: npm install, npx prisma generate, npx prisma
+  1660→migrate dev. Seed-скрипты: npx tsx scripts/seed-route.ts, npx tsx
+  1661→scripts/seed-full-test.ts. Дев-сервер: npm run dev (localhost:3000) + npm run worker
+  1662→(localhost:3001, отдельный процесс, NEW). Переменные в .env.local. Тесты: npm test (vitest), npm run
+  1663→test:e2e (playwright). Redis опционален (dev работает на in-memory).
+  1664→9.2 CI/CD-конвейер
+  1665→GitHub Actions (или GitLab CI). Этапы:
+  1666→Этап Действие Инструмент При неудаче
+  1667→Lint ESLint + Prettier + tsc --noEmit next lint, tsc Блокировка
+  1668→Unit Vitest с покрытием ≥ 80% lib/ vitest run --coverage Блокировка
+  1669→Integration API-тесты с SQLite vitest Блокировка
+  1670→Migration check scripts/check-migrations.sh (prisma bash + prisma Блокировка несовместимых
+  1671→migrate diff + grep)
+  1672→Build Production build (API + Worker) next build Блокировка
+  1673→Security Аудит зависимостей npm audit, Snyk Предупреждение
+  1674→k6 Load nightly нагрузочный тест k6 against staging Блокировка при SLA fail
+  1675→Deploy staging Preview-деплой Vercel preview / Docker Ручной откат
+  1676→E2E Критические пути Playwright against staging Блокировка prod
+  1677→Deploy prod Manual approval + deploy Vercel prod / Docker rollup Авто-rollback кода
+  1678→Таблица 13. CI/CD-конвейер.
+  1679→9.3 Миграции базы данных — Backward-Compatible
+  1680→Backward-Compatible (expand-contract)
+  1681→При падении миграции код откатывается к предыдущей версии, но БД остаётся на новой схеме. Старый код, не
+  1682→знающий о новом поле с NOT NULL, падал. Кроме того, при SELECT * лишнее поле могло сломать
+  1683→Zod-валидацию. Формальная стратегия Backward-Compatible Migrations (expand-contract).
+  1684→Все миграции следуют паттерну expand-contract (расширение — сжатие) в два деплоя. Деплой 1
+  1685→(expand): добавляется новое поле с DEFAULT или NULL (разрешено old-коду работать с new-схемой).
+  1686→Старый код игнорирует новое поле, новый код начинает его писать. Деплой 2 (contract, через ≥ 1
+  1687→неделю): после подтверждения, что весь код использует новое поле и старых инстансов нет, можно
+  1688→удалить старое поле или добавить NOT NULL. Категорически запрещено в одном деплое: добавление
+  1689→NOT NULL без DEFAULT, удаление колонки, переименование.
+  1690→Z.ai · 24.08.2026 стр. 44
+  1691→=== Page 46 ===
+  1692→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1693→Операция Деплой 1 (expand) Деплой 2 (contract) Запрещено
+  1694→Добавить колонку ADD COLUMN ... DEFAULT ... / (ожидание) ADD COLUMN ...
+  1695→NULL NOT NULL без
+  1696→DEFAULT
+  1697→Удалить колонку Код перестаёт использовать поле DROP COLUMN DROP COLUMN в
+  1698→одном деплое с
+  1699→прекрытием
+  1700→использования
+  1701→Переименовать ADD new + dual-write + backfill DROP old (через неделю) RENAME
+  1702→COLUMN
+  1703→Изменить тип ADD new + dual-write + backfill DROP old (через неделю) ALTER COLUMN
+  1704→TYPE
+  1705→Таблица 14. Backward-Compatible миграции — expand-contract.
+  1706→Команда деплоя: prisma migrate deploy (не db push). Каждое изменение схемы: npx prisma
+  1707→migrate dev --name → создаёт миграционный SQL-файл. Миграция проходит код-ревью. В CI
+  1708→добавлен шаг migration check. CI-проверка деструктивных операций реализована bash-скриптом
+  1709→scripts/check-migrations.sh, который вызывает prisma migrate diff для генерации SQL
+  1710→между схемой и последней применённой миграцией, затем grep-ом ищет деструктивные паттерны. При
+  1711→обнаружении — exit 1, PR блокируется. При неудаче миграции в prod — код откатывается, но БД
+  1712→остаётся на новой схеме (expand-phase гарантирует обратную совместимость). Полный rollback БД не
+  1713→выполняется никогда.
+  1714→scripts/check-migrations.sh — однозначный листинг (без backslash, с пробелами)
+  1715→#!/usr/bin/env bash
+  1716→# scripts/check-migrations.sh — lint деструктивных миграций
+  1717→set -euo pipefail
+  1718→# 1. Сгенерировать SQL diff между схемой и последней примененной миграцией
+  1719→DIFF=$(npx prisma migrate diff \
+  1720→--from-migrations ./prisma/migrations \
+  1721→--to-schema-datamodel ./prisma/schema.prisma \
+  1722→--shadow-database-url "file:./shadow.db" \
+  1723→--script)
+  1724→# 2. Паттерны деструктивных операций (запрещены в одном шаге expand-contract)
+  1725→# паттерн использует | БЕЗ backslash — корректно для grep -E (расширенные regex).
+  1726→# В -E режиме | — оператор ИЛИ, backslash НЕ нужен (экранирование даёт literal).
+  1727→# Пробелы вокруг echo и grep обязательны — иначе bash ищет команду "echo$DIFF".
+  1728→DESTRUCTIVE_PATTERN="DROP COLUMN|RENAME COLUMN|ALTER COLUMN.*NOT NULL|DROP TABLE"
+  1729→# 3. Поиск деструктивных операций в сгенерированном SQL
+  1730→if echo "$DIFF" | grep -iE "$DESTRUCTIVE_PATTERN"; then
+  1731→echo "FAIL: деструктивная операция обнаружена в миграции."
+  1732→echo " Используйте expand-contract (см. спецификацию §9.3):"
+  1733→echo " - ADD COLUMN с DEFAULT/NULL в деплое 1 (expand)"
+  1734→echo " - dual-write + backfill между деплоями"
+  1735→echo " - DROP COLUMN в деплое 2 (contract, через >= 1 неделю)"
+  1736→exit 1
+  1737→fi
+  1738→echo "OK: миграция не содержит деструктивных операций."
+  1739→Z.ai · 24.08.2026 стр. 45
+  1740→=== Page 47 ===
+  1741→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1742→exit 0
+  1743→Правила миграций (формальные)
+  1744→1. Каждое новое поле — с DEFAULT или NULL. 2. Удаление поля — только через 2 деплоя (код перестаёт
+  1745→использовать → DROP). 3. NOT NULL constraint — только после backfill и убеждения, что нет NULL-значений. 4.
+  1746→RENAME и TYPE-change — через add-new + dual-write + backfill + drop-old. 5. SELECT * запрещён в коде —
+  1747→только явный список колонок (Prisma это гарантирует). 6. Каждая миграция имеет тест в integration-сьюте: apply на
+  1748→копии prod → запуск smoke-тестов. 7. CI-шаг migration check использует реальный скрипт check-migrations.sh, не
+  1749→выдуманные CLI-флаги.
+  1750→9.4 Продакшн (Turso + Vercel/Docker)
+  1751→Turso: DATABASE_URL в формате libsql://dbname-orgname.turso.io. Prisma с @prisma/adapter-libsql.
+  1752→Vercel: serverless-функции для API Routes, автоматический SSL, CDN для статики. Docker:
+  1753→node:20-alpine, npm start, HEALTHCHECK CMD curl -f http://localhost:3000/health.
+  1754→Реплики Turso обеспечивают read-scaling. Redis (Upstash) для rate-limit — отдельный managed-сервис,
+  1755→REST API, совместим с Vercel.
+  1756→9.5 Среда staging и rollback
+  1757→Каждый PR → preview-деплой на Vercel (уникальный URL). Staging-среда: отдельный Turso-инстанс с
+  1758→seed-данными, деплой из main-ветки. E2E-тесты запускаются против staging перед prod-деплоем. Rollback:
+  1759→Vercel — vercel rollback (мгновенный, к предыдущему deployment); Docker — docker service
+  1760→rollback (к предыдущему образу). Миграции: при rollback БД остаётся на новой схеме
+  1761→(backward-compatible по дизайну — expand-contract гарантирует это).
+  1762→9.6 Развёртывание Worker-процесса
+  1763→Worker-процесс деплоится отдельно от API. Три варианта в зависимости от платформы:
+  1764→• Docker compose — два сервиса: api (port 3000) и worker (без порта, только исходящие). Общая
+  1765→переменная DATABASE_URL. Worker: restart: always, healthcheck: ps aux | grep
+  1766→node.
+  1767→• Vercel Pro Cron — serverless-функция /api/cron/worker, вызывается каждые 1 мин (Pro). Один
+  1768→вызов обрабатывает до 100 pending-задач (batch). Подходит для нагрузки до ~50 сессий/мин.
+  1769→• Standalone Node.js — node worker/index.js через systemd/pm2 на VPS. Poll каждые 5 с,
+  1770→processing до 10 задач в параллель (p-limit(5) внутри).
+  1771→Vercel free-tier — BLOCKING для целевой нагрузки
+  1772→Vercel free-план: минимальный интервал Cron = 5 мин. При 100 сессий/мин × 5 мин = 500 задач в очереди за один
+  1773→цикл. Один вызов обрабатывает batch=10 → обрабатывает 2% накопившегося. Очередь растёт бесконечно,
+  1774→traffic_job_queue_depth → бесконечность, сессии никогда не получат traffic-данные. Vercel free-tier
+  1775→классифицирован как BLOCKING для целевой нагрузки 100 сессий/мин. Для production-нагрузки требуется:
+  1776→Vercel Pro (Cron 1 мин) или Docker compose / standalone Worker. Тест в CI: if VERCEL_PLAN=free and
+  1777→TARGET_LOAD_RPM >= 100 → exit 1. Это явно вынесено в §1.3 (стек) и §11 (env).
+  1778→Z.ai · 24.08.2026 стр. 46
+  1779→=== Page 48 ===
+  1780→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1781→Горизонтальное масштабирование: при traffic_job_queue_depth > 100 (sustained > 5 мин) docker compose
+  1782→scale worker=N (где N = queue_depth / 100). В Vercel Pro — увеличение частоты Cron до 1 мин. Каждый
+  1783→Worker-инстанс имеет уникальный WORKER_ID (UUID), что позволяет различать их в логах и метриках.
+  1784→Атомарный захват с верификацией через RETURNING id (см. §2.6) гарантирует отсутствие двойной
+  1785→обработки даже при Turso read-replica задержке.
+  1786→Anti-pattern: shared event loop
+  1787→Категорически запрещено запускать Worker-логику (traffic-fetch, retry, backoff) в том же Node.js-процессе, что и
+  1788→API. Это блокирует event loop fetch-ами. Worker — всегда отдельный процесс (Docker сервис / Vercel function /
+  1789→standalone). Тест в CI проверяет, что в бандле API нет импортов из worker/processor.ts.
+  1790→9.7 Cron-задачи и poll-циклы в Worker
+  1791→Worker-процесс выполняет cron-задачи: retention (ежедневное удаление сессий старше 10 лет), grace
+  1792→period hard-delete, backup, backup_verification. Также Worker выполняет непрерывные poll-циклы для
+  1793→обработки очередей TrafficJob и ExportJob. Таблица разделена на две — непрерывные poll-задачи
+  1794→(setInterval внутри Worker) и периодические cron-задачи (node-cron или Vercel Cron). Vercel Cron
+  1795→минимальный интервал — 1 минута; интервалы < 1 минуты невозможны на Vercel и реализуются только в
+  1796→Docker/standalone Worker.
+  1797→9.7.1 Непрерывные poll-задачи (setInterval в Worker)
+  1798→Задача Интерв Механизм Логика Лимит
+  1799→ал
+  1800→traffic_job_poll 5 с setInterval SELECT pending TrafficJob, атомарный захват 10 задач/итера
+  1801→RETURNING id, обработка, complete/fail ция
+  1802→export_job_poll 10 с setInterval SELECT pending ExportJob, генерация 5 задач/итерац
+  1803→GPX/KML/JSON, complete/fail ия
+  1804→backup_job_poll 30 с setInterval SELECT pending BackupJob, создание дампа, 1 задача/итера
+  1805→верификация, complete/fail ция
+  1806→Таблица 13.1А. Непрерывные poll-задачи в Worker.
+  1807→9.7.2 Периодические cron-задачи (node-cron / Vercel Cron)
+  1808→Cron-задача Расписание Механизм Логика Лимит
+  1809→retention 00:30 UTC node-cron / Vercel SELECT сессий старше 100 сессий/з
+  1810→ежедневно Cron RETENTION_DAYS, апуск
+  1811→авто-архивация, hard delete,
+  1812→AuditLog
+  1813→grace_period_hard_delet 01:30 UTC node-cron / Vercel DELETE FROM Session WHERE без лимита
+  1814→e ежедневно Cron deletedAt IS NOT NULL AND (один
+  1815→deletedAt < now() - 30 days запрос)
+  1816→backup_logical_dump 03:00 UTC node-cron / Vercel Создать BackupJob(type=full), 1 BackupJob/
+  1817→ежедневно Cron ждать completed, верификация запуск
+  1818→Z.ai · 24.08.2026 стр. 47
+  1819→=== Page 49 ===
+  1820→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1821→Cron-задача Расписание Механизм Логика Лимит
+  1822→backup_verification 04:00 UTC node-cron / Vercel Проверка целостности последнего 1 проверка/з
+  1823→ежедневно Cron BackupJob: checksum + COUNT(*) апуск
+  1824→сравнение
+  1825→export_cleanup 0 * * * * (каждый node-cron / Vercel Удаление файлов из без лимита
+  1826→час) Cron EXPORT_STORAGE_DIR старше
+  1827→EXPORT_URL_TTL_HOURS
+  1828→archive_cleanup 02:30 UTC node-cron / Vercel Удаление архивов старше 100 файлов/з
+  1829→ежедневно Cron ARCHIVE_RETENTION_DAYS апуск
+  1830→Таблица 13.1Б. Периодические cron-задачи. Минимальный интервал Vercel Cron — 1 минута.
+  1831→Все задачи идемпотентны: повторный запуск безопасен (SELECT с фильтром by-time, UPDATE с WHERE
+  1832→status=pending). В Docker-окружении cron реализуется через node-cron внутри Worker-процесса; в
+  1833→Vercel — через Vercel Cron, вызывающий endpoints /api/cron/retention,
+  1834→/api/cron/grace-delete, /api/cron/backup (авторизация CRON_SECRET). При
+  1835→использовании node-cron в standalone Worker — restart: always обеспечивает восстановление после
+  1836→сбоя.
+  1837→9.8 Резервное копирование
+  1838→Трёхуровневая стратегия backup
+  1839→Резервное копирование реализовано через отдельную модель BackupJob (см. §2.3) для полных дампов БД. Не
+  1840→переиспользуется ExportJob — он предназначен для одной сессии и имеет NOT NULL sessionId.
+  1841→Резервное копирование реализовано на трёх уровнях для defence-in-depth:
+  1842→Уровень Метод Авторизация Частота Retention Назн
+  1843→ачени
+  1844→е
+  1845→1. Managed Turso automated snapshots Turso platform Ежечасно + 7 дней (free) / 30 Защит
+  1846→(managed) перед миграцией дней (Pro) а от
+  1847→сбоя к
+  1848→ластер
+  1849→а, point
+  1850→-in-tim
+  1851→e recov
+  1852→ery
+  1853→Z.ai · 24.08.2026 стр. 48
+  1854→=== Page 50 ===
+  1855→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1856→Уровень Метод Авторизация Частота Retention Назн
+  1857→ачени
+  1858→е
+  1859→2. Logical POST /api/admin/backup → Bearer Ежедневно 03:00 90 дней (rolling), Защит
+  1860→dump создаёт BackupJob (не ADMIN_TOKEN UTC (cron в EXPORT_STOR а от ло
+  1861→ExportJob) Worker) AGE_DIR гическ
+  1862→ого по
+  1863→врежде
+  1864→ния (ac
+  1865→cidenta
+  1866→l
+  1867→DROP,
+  1868→баг ми
+  1869→грации
+  1870→)
+  1871→3. POST /api/sessions/[id]/export Bearer API_KEY По запросу 24 ч TTL Бэкап
+  1872→On-demand (см. §4.11) или cookie пользователя отдель
+  1873→export ных
+  1874→сессий
+  1875→перед
+  1876→удален
+  1877→ием
+  1878→Таблица 13.2. Стратегия резервного копирования (BackupJob, ADMIN_TOKEN, type=full).
+  1879→Процедура восстановления (RTO/RPO): RPO (Recovery Point Objective) = 1 час (от Turso snapshots);
+  1880→RTO (Recovery Time Objective) = 30 минут (restore snapshot + restart контейнеров). Для logical dump
+  1881→(уровень 2) — RPO = 24 часа, RTO = 2 часа (требует импорта JSON обратно в БД через
+  1882→scripts/restore-backup.ts). Процедура восстановления документирована в runbook
+  1883→docs/runbooks/disaster-recovery.md и тестируется раз в квартал (chaos engineering: simulate
+  1884→DB failure → restore → smoke tests).
+  1885→Backup-verification: ежедневный cron-задача в Worker проверяет целостность последнего BackupJob:
+  1886→открывает JSON, валидирует наличие всех таблиц, считает количество записей, сравнивает с COUNT(*) в
+  1887→БД, проверяет checksum (sha256). При расхождении > 5% — alert. Это обнаруживает «молчаливую
+  1888→коррупцию» бэкапов (silent corruption), когда файлы создаются, но содержимое повреждено. При успехе
+  1889→— BackupJob.verifiedAt = now(), status = "verified". Метрика:
+  1890→backup_verification_total{status=ok|fail}.
+  1891→Правка 2.5 — обработка ошибок логического дампа
+  1892→При ошибке создания BackupJob (уровень 2): (а) alert BackupFailed, уровень error; (б) метрика
+  1893→backup_logical_dump_total{status="fail"} увеличивается; (в) повтор через 1 час, максимум 3
+  1894→попытки (attempts++, exponential backoff); (г) после 3 неудач — alert BackupRepeatedlyFailed, уровень
+  1895→critical, уведомление оператору; (д) запись в AuditLog: action="backup.failed", actorType="backup-cron",
+  1896→metadata={attempts, lastError}. При успехе после retry — AuditLog action="backup.succeeded_after_retry".
+  1897→Expand-contract при миграции БД
+  1898→Z.ai · 24.08.2026 стр. 49
+  1899→=== Page 51 ===
+  1900→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1901→Перед каждой миграцией (expand или contract phase) Worker создаёт дополнительный snapshot через Turso API (не
+  1902→дожидаясь ежечасного). Это даёт точку отката на момент до миграции. При неудаче миграции — восстановление
+  1903→snapshot, но только если миграция не успела применить деструктивные изменения (что запрещено expand-contract
+  1904→— см. §9.3). В случае rollback кода при успешной expand-миграции БД остаётся на новой схеме
+  1905→(backward-compatible).
+  1906→Z.ai · 24.08.2026 стр. 50
+  1907→=== Page 52 ===
+  1908→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1909→10. Зависимости
+  1910→Ключевые пакеты: @upstash/redis (Redis rate-limit), p-limit (controlled concurrency, уже был,
+  1911→теперь используется и в ingest DB-write), nanoid (генерация clientId при необходимости). Также:
+  1912→xmlbuilder2 (генерация GPX/KML), node-cron (расписание cron-задач в standalone Worker).
+  1913→Пакет Версия Назначение Новое?
+  1914→next 16.x Фреймворк (App Router, API Routes, SSR)
+  1915→react 19.x UI-библиотека
+  1916→react-leaflet 5.x Компоненты карты Leaflet для React
+  1917→leaflet 1.9.x Библиотека интерактивных карт
+  1918→@prisma/client 6.x Клиент ORM для доступа к БД
+  1919→prisma 6.x (dev) CLI для миграций и генерации
+  1920→@libsql/client 0.x Драйвер Turso/LibSQL
+  1921→tailwindcss 4.x Utility-first CSS-фреймворк
+  1922→zod 3.x Валидация входных данных
+  1923→pino 9.x Структурированное логирование
+  1924→p-limit 5.x Controlled concurrency (ingest + traffic) исп. в новом
+  1925→месте
+  1926→prom-client 15.x Prometheus-метрики
+  1927→@upstash/redis 1.x Redis sliding window rate-limit ✓
+  1928→nanoid 5.x генерация clientId (fallback) ✓
+  1929→xmlbuilder2 3.x генерация GPX 1.1 / KML 2.2 XML ✓
+  1930→node-cron 3.x расписание cron-задач в Worker ✓
+  1931→opossum 8.x circuit breaker для 2ГИС API ✓
+  1932→vitest 3.x Unit и integration тесты
+  1933→@playwright/test 1.x E2E-тесты
+  1934→msw 2.x Моки HTTP-запросов в тестах
+  1935→k6 0.50+ Нагрузочные тесты (nightly)
+  1936→Таблица 15. Зависимости.
+  1937→Z.ai · 24.08.2026 стр. 51
+  1938→=== Page 53 ===
+  1939→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1940→11. Переменные окружения
+  1941→Переменные: REDIS_URL, MAX_PAYLOAD_BYTES, INGEST_CONCURRENCY,
+  1942→WORKER_POLL_INTERVAL_MS, WORKER_ID, RATE_LIMIT_BACKEND. Retention/export переменные:
+  1943→RETENTION_DAYS, GRACE_PERIOD_DAYS, EXPORT_ASYNC_THRESHOLD, EXPORT_STORAGE_DIR
+  1944→и др. Ни одна переменная не использует префикс NEXT_PUBLIC_. Все токены — server-side only. В
+  1945→Docker — передаются через secret-файлы или encrypted env. В Vercel — через Environment Variables
+  1946→(Production/Preview/Development).
+  1947→Переменная Описание Пример Server-only
+  1948→DATABASE_URL Строка подключения к БД file:./dev.db или libsql://... Да
+  1949→API_KEY Токен для server-side API случайная строка 32+ Да
+  1950→символов
+  1951→INGEST_TOKEN Токен для ingest случайная строка 32+ Да
+  1952→символов
+  1953→CRON_SECRET Секрет для Worker API и cron случайная строка 32+ Да
+  1954→символов
+  1955→DGIS_ROUTING_KEY API-ключ 2ГИС 8b34056d-... Да
+  1956→ALLOWED_ORIGIN Разрешённый CORS origin https://telemetria.example.com Да
+  1957→LOG_LEVEL Уровень логирования info (prod) / debug (dev) Да
+  1958→REDIS_URL Redis для rate-limit rediss://:pwd@host:port Да
+  1959→RATE_LIMIT_BACKEND redis | memory redis (prod) / memory (dev) Да
+  1960→MAX_PAYLOAD_BYTES лимит ingest payload 262144 (256 КБ) Да
+  1961→INGEST_CONCURRENCY p-limit для DB-write 1 Да
+  1962→WORKER_POLL_INTERVA интервал опроса очереди 5000 Да
+  1963→L_MS
+  1964→WORKER_ID идентификатор uuid (auto-gen) Да
+  1965→Worker-инстанса
+  1966→RATE_LIMIT_MAX_INGES Лимит ingest/мин 10 Да
+  1967→T
+  1968→RATE_LIMIT_MAX_DEFAU Лимит default/мин 60 Да
+  1969→LT
+  1970→WORKER_BATCH_SIZE задач за один poll 10 Да
+  1971→WORKER_MAX_CONCURR p-limit внутри Worker 5 Да
+  1972→ENCY
+  1973→RETENTION_DAYS срок хранения сессий 3650 (10 лет) Да
+  1974→RETENTION_ARCHIVE_EN авто-архивация перед true Да
+  1975→ABLED удалением
+  1976→Z.ai · 24.08.2026 стр. 52
+  1977→=== Page 54 ===
+  1978→ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+  1979→Переменная Описание Пример Server-only
+  1980→RETENTION_CRON_UTC расписание retention-cron "30 0 * * *" Да
+  1981→ARCHIVE_RETENTION_DA срок хранения архивов 3650 (10 лет) Да
+  1982→YS
+  1983→GRACE_PERIOD_DAYS grace period для soft-delete 30 Да
+  1984→AUDIT_RETENTION_DAYS срок хранения AuditLog 3650 (10 лет) Да
+  1985→EXPORT_ASYNC_THRESH порог async-экспорта (точек) 5000 Да
+  1986→OLD
+  1987→EXPORT_STORAGE_DIR директория файлов экспорта /data/exports Да
+  1988→EXPORT_URL_TTL_HOUR TTL ссылок на файлы 24 Да
+  1989→S
+  1990→EXPORT_MAX_FILE_BYTE макс. размер одного файла 104857600 (100 МБ) Да
+  1991→S
+  1992→EXPORT_CLEANUP_CRON расписание очистки файлов "0 * * * *" (каждый час) Да
+  1993→_UTC
+  1994→VERCEL_PLAN free | pro (CI-проверка нагрузки) pro (для 100 сессий/мин) Да
+  1995→TARGET_LOAD_RPM целевая нагрузка (сессий/мин) 100 Да
+  1996→CIRCUIT_BREAKER_THRE отказов 2ГИС до размыкания 5 Да
+  1997→SHOLD
+  1998→CIRCUIT_BREAKER_TIME таймаут half-open 30 Да
+  1999→OUT_SEC
+  2000→BACKUP_LOGICAL_CRON расписание logical dump "0 3 * * *" (03:00 UTC) Да
+
+[showing lines 1-2000 of 2025; use offset=2001 with limit to continue reading]

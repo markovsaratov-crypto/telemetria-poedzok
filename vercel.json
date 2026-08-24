@@ -4,12 +4,6 @@
   "buildCommand": "bun run build",
   "devCommand": "bun run dev",
   "installCommand": "bun install",
-  "crons": [
-    {
-      "path": "/api/worker/poll",
-      "schedule": "*/1 * * * *"
-    }
-  ],
   "functions": {
     "src/app/api/worker/poll/route.ts": {
       "maxDuration": 60

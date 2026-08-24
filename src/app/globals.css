@@ -120,7 +120,93 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
+  /* Better focus visible */
+  *:focus-visible {
+    @apply outline-2 outline-offset-2 outline-ring/70;
+  }
+}
+
+/* ===== Animated gradient mesh background (login + dashboard) ===== */
+.mesh-bg {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+.mesh-bg::before {
+  content: "";
+  position: absolute;
+  inset: -50%;
+  z-index: -1;
+  background:
+    radial-gradient(circle at 15% 20%, oklch(0.7 0.15 162 / 0.18), transparent 40%),
+    radial-gradient(circle at 85% 15%, oklch(0.696 0.17 184 / 0.15), transparent 45%),
+    radial-gradient(circle at 75% 80%, oklch(0.828 0.189 84 / 0.12), transparent 40%),
+    radial-gradient(circle at 25% 75%, oklch(0.627 0.265 150 / 0.13), transparent 45%);
+  filter: blur(40px);
+  animation: meshFloat 18s ease-in-out infinite;
+  will-change: transform;
+}
+.dark .mesh-bg::before {
+  background:
+    radial-gradient(circle at 15% 20%, oklch(0.7 0.15 162 / 0.22), transparent 40%),
+    radial-gradient(circle at 85% 15%, oklch(0.696 0.17 184 / 0.18), transparent 45%),
+    radial-gradient(circle at 75% 80%, oklch(0.769 0.188 70 / 0.13), transparent 40%),
+    radial-gradient(circle at 25% 75%, oklch(0.627 0.265 150 / 0.15), transparent 45%);
+}
+@keyframes meshFloat {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  33% { transform: translate(3%, -2%) rotate(2deg); }
+  66% { transform: translate(-2%, 3%) rotate(-1deg); }
+}
+
+/* ===== Glassmorphism card ===== */
+.glass {
+  background: oklch(1 0 0 / 0.65);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+  border: 1px solid oklch(1 0 0 / 0.4);
+}
+.dark .glass {
+  background: oklch(0.21 0.012 165 / 0.65);
+  border: 1px solid oklch(1 0 0 / 0.08);
+}
+
+/* ===== Shimmer loading ===== */
+.shimmer {
+  position: relative;
+  overflow: hidden;
+  background: oklch(0.92 0.01 165 / 0.6);
+}
+.dark .shimmer {
+  background: oklch(0.27 0.015 165 / 0.6);
+}
+.shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    oklch(1 0 0 / 0.5),
+    transparent
+  );
+  animation: shimmer 1.6s infinite;
+}
+.dark .shimmer::after {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    oklch(1 0 0 / 0.12),
+    transparent
+  );
+}
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
 }
 
 /* ===== Custom scrollbar (emerald accent) ===== */
@@ -148,18 +234,126 @@
   scrollbar-color: oklch(0.7 0.15 162 / 0.4) transparent;
 }
 
-/* Leaflet z-index корректировка чтобы не перекрывало диалоги */
+/* ===== Glow effect for primary buttons ===== */
+.glow-primary {
+  box-shadow:
+    0 0 0 1px oklch(0.596 0.145 162 / 0.3),
+    0 4px 16px -4px oklch(0.596 0.145 162 / 0.4);
+}
+.glow-primary:hover {
+  box-shadow:
+    0 0 0 1px oklch(0.596 0.145 162 / 0.5),
+    0 8px 24px -6px oklch(0.596 0.145 162 / 0.6);
+}
+.dark .glow-primary {
+  box-shadow:
+    0 0 0 1px oklch(0.7 0.15 162 / 0.3),
+    0 4px 16px -4px oklch(0.7 0.15 162 / 0.4);
+}
+
+/* ===== Animated number / count-up ===== */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* ===== Slide-in entrance ===== */
+.slide-in {
+  animation: slideIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ===== Pulse dot (live indicator) ===== */
+.pulse-dot {
+  position: relative;
+}
+.pulse-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  animation: pulseDot 1.6s ease-out infinite;
+  opacity: 0.7;
+}
+@keyframes pulseDot {
+  0% { transform: scale(1); opacity: 0.7; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+
+/* Leaflet z-index корректировки чтобы не перекрывало диалоги */
 .leaflet-container {
   z-index: 0 !important;
   font-family: var(--font-geist-sans), system-ui, sans-serif;
+  background: oklch(0.96 0.01 165) !important;
+}
+.dark .leaflet-container {
+  background: oklch(0.18 0.008 165) !important;
 }
 .leaflet-pane,
 .leaflet-top,
 .leaflet-bottom {
   z-index: 0 !important;
 }
-
-/* Скрыть стандартную ссылку атрибуции на мелких экранах для compactness */
 .leaflet-control-attribution {
   font-size: 10px;
+  background: oklch(1 0 0 / 0.7) !important;
+}
+.dark .leaflet-control-attribution {
+  background: oklch(0.18 0.008 165 / 0.7) !important;
+  color: oklch(0.7 0.01 160) !important;
+}
+.dark .leaflet-control-attribution a {
+  color: oklch(0.7 0.15 162) !important;
+}
+.dark .leaflet-control-zoom a {
+  background: oklch(0.21 0.012 165) !important;
+  color: oklch(0.97 0.005 160) !important;
+  border-color: oklch(1 0 0 / 0.1) !important;
+}
+.dark .leaflet-control-zoom a:hover {
+  background: oklch(0.27 0.015 165) !important;
+}
+
+/* ===== KBD styling ===== */
+kbd {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 4px;
+  background: oklch(0.92 0.01 165);
+  border: 1px solid oklch(0.85 0.01 165);
+  color: oklch(0.4 0.02 165);
+  box-shadow: 0 1px 0 oklch(0.85 0.01 165);
+}
+.dark kbd {
+  background: oklch(0.27 0.015 165);
+  border-color: oklch(1 0 0 / 0.1);
+  color: oklch(0.8 0.01 160);
+  box-shadow: 0 1px 0 oklch(0 0 0 / 0.3);
+}
+
+/* ===== Selection ===== */
+::selection {
+  background: oklch(0.596 0.145 162 / 0.25);
+  color: inherit;
+}
+.dark ::selection {
+  background: oklch(0.7 0.15 162 / 0.3);
+}
+
+/* ===== Reduced motion ===== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .mesh-bg::before { animation: none; }
+  .shimmer::after { animation: none; }
+  .pulse-dot::after { animation: none; opacity: 0; }
 }

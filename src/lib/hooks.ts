@@ -52,6 +52,31 @@ export function useHealth() {
   });
 }
 
+// ===== Aggregate stats (dashboard overview) =====
+export interface StatsResponse {
+  totalSessions: number;
+  totalPoints: number;
+  totalRoutes: number;
+  totalTrafficJobs: number;
+  deadJobs: number;
+  pendingJobs: number;
+  todaySessions: number;
+  totalPayloadBytes: number;
+  perDay: { date: string; count: number; points: number }[];
+  heatmapSessions: { startTime: string; pointCount: number }[];
+  capacity: { targetLoadRpm: number; rateLimitMaxIngest: number; headroom: number };
+  version: string;
+}
+
+export function useStats() {
+  return useQuery({
+    queryKey: ["stats"],
+    queryFn: () => api.get<StatsResponse>("/api/stats"),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+}
+
 // ===== Sessions list =====
 export interface SessionsQuery {
   limit?: number;

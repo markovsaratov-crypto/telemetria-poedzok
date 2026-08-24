@@ -16,6 +16,7 @@ import {
   ExternalLink,
   Command,
   Zap,
+  Search,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
@@ -37,6 +38,7 @@ import { MetricsViewer } from "@/components/metrics-viewer";
 import { TrafficJobsCard } from "@/components/traffic-jobs-card";
 import { CommandPalette } from "@/components/command-palette";
 import { ShortcutsHelp } from "@/components/shortcuts-help";
+import { GlobalSearch } from "@/components/global-search";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import {
@@ -53,6 +55,7 @@ export default function Home() {
   const [selectedSession, setSelectedSession] = React.useState<string | null>(null);
   const [cmdOpen, setCmdOpen] = React.useState(false);
   const [helpOpen, setHelpOpen] = React.useState(false);
+  const [searchOpen, setSearchOpen] = React.useState(false);
 
   // Принудительный сброс auth-кэша при 401 из любого запроса.
   React.useEffect(() => {
@@ -85,6 +88,11 @@ export default function Home() {
           e.preventDefault();
           setHelpOpen((v) => !v);
         }
+      }
+      // Cmd+Shift+F — глобальный поиск
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "F") {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
       }
     }
     window.addEventListener("keydown", onKey);
@@ -150,6 +158,17 @@ export default function Home() {
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setSearchOpen(true)}
+              className="hidden md:flex gap-2 px-2.5 text-muted-foreground"
+              title="Глобальный поиск (Cmd+Shift+F)"
+            >
+              <Search className="h-3.5 w-3.5" />
+              <span className="text-xs">Поиск</span>
+              <kbd className="ml-1">⌘⇧F</kbd>
+            </Button>
             <Button
               variant="outline"
               size="sm"
@@ -288,7 +307,7 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-3">
             <span className="hidden md:inline">
-              <kbd>⌘K</kbd> команды · <kbd>?</kbd> справка · <kbd>Alt+1..5</kbd> табы
+              <kbd>⌘K</kbd> команды · <kbd>⌘⇧F</kbd> поиск · <kbd>?</kbd> справка · <kbd>Alt+1..5</kbd> табы
             </span>
             <span className="hidden sm:inline">
               Cookie: <code className="font-mono">__Host-telem_session</code> · HMAC-SHA256
@@ -314,6 +333,14 @@ export default function Home() {
         onRefresh={handleRefresh}
       />
       <ShortcutsHelp open={helpOpen} onOpenChange={setHelpOpen} />
+      <GlobalSearch
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        onSelect={(id) => {
+          setSelectedSession(id);
+          setTab("sessions");
+        }}
+      />
     </div>
   );
 }

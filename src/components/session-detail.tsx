@@ -43,6 +43,7 @@ import { ExportDialog } from "@/components/export-dialog";
 import { SpeedChart, ElevationChart } from "@/components/speed-chart";
 import { SpeedHistogram } from "@/components/speed-histogram";
 import { SessionNotes } from "@/components/session-notes";
+import { SessionReplay } from "@/components/session-replay";
 import { fmtDate, fmtDuration, fmtBytes, fmtNumber, avgSpeed, trackDistance } from "@/lib/format";
 
 const MapTrack = dynamic(() => import("@/components/map-track"), {
@@ -229,6 +230,10 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
                 <SpeedHistogram points={points} height={100} />
               </CardContent>
             </Card>
+          </div>
+          {/* Session replay */}
+          <div className="px-4 pb-4">
+            <SessionReplay points={points} />
           </div>
         </>
       )}

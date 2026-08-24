@@ -27,7 +27,7 @@ interface Shortcut {
 const SHORTCUTS: Shortcut[] = [
   // Global
   { keys: ["⌘", "K"], description: "Открыть командную палитру", group: "Глобальные" },
-  { keys: ["⌘", "K"], description: "Закрыть командную палитру", group: "Глобальные" },
+  { keys: ["⌘", "⇧", "F"], description: "Глобальный поиск сессий", group: "Глобальные" },
   { keys: ["Alt", "1"], description: "Перейти на вкладку Обзор", group: "Глобальные" },
   { keys: ["Alt", "2"], description: "Перейти на вкладку Сессии", group: "Глобальные" },
   { keys: ["Alt", "3"], description: "Перейти на вкладку Маршруты", group: "Глобальные" },
@@ -44,6 +44,7 @@ const SHORTCUTS: Shortcut[] = [
   { keys: ["Drag"], description: "Перемещение карты", group: "Карта" },
   // Sessions
   { keys: ["Enter"], description: "Применить фильтр (в поле Device ID)", group: "Сессии" },
+  { keys: ["Space"], description: "Воспроизвести/пауза (в replay)", group: "Сессии" },
 ];
 
 export function ShortcutsHelp({ open, onOpenChange }: ShortcutsHelpProps) {

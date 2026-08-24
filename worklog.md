@@ -579,3 +579,81 @@ Stage Summary:
 - Новых багов не обнаружено.
 - UI значительно улучшен: 4 типа карт с layer switcher, glow effect на polylines, tooltips с координатами, animated theme toggle, CSV export для audit, weekly bar chart с двумя метриками.
 - MapTrack теперь production-grade: scale control, zoom control positioning, satellite imagery, custom tooltips.
+
+---
+Task ID: 10 (webDevReview cron run #4)
+Agent: orchestrator (main) — webDevReview
+Task: QA + session compare feature + shortcuts help + data freshness indicator.
+
+Work Log:
+- Прочитал worklog.md — система стабильна после Task 9.
+- Перезапустил dev server (Next :3000 + Worker :3001).
+- E2E: 7/7 endpoints PASS, включая новый BATCH endpoint.
+- Page render: 30.9KB HTML (больше из-за новых компонентов).
+- Lint: 0 ошибок, 0 warnings.
+
+New features (mandatory):
+1. POST /api/sessions/batch endpoint:
+   • Получить до 10 сессий по IDs за один запрос
+   • Возвращает sessions[] с gpsPoints (Number(timestamp) для BigInt)
+   • Zod валидация: ids array min 1, max 10
+   • Cookie или Bearer API_KEY auth
+
+2. SessionCompare component (новый, 220 строк):
+   • Сравнение до 4 сессий на одной карте
+   • Popover picker для выбора сессий (список с deviceName, pointCount, date)
+   • 4 цветовых схемы: emerald, teal, amber, rose
+   • Цветные маркеры start/end для каждой сессии
+   • Сравнительная таблица: точек, ср. скорость, дистанция, длительность
+   • AnimatePresence для карточек
+   • Empty state с CTA
+   • MapTrack с fitToPoints для всех сессий сразу
+
+3. ShortcutsHelp component (новый, 95 строк):
+   • Dialog со списком всех keyboard shortcuts
+   • Группировка: Глобальные, Командная палитра, Карта, Сессии
+   • 14 shortcuts с kbd отображением
+   • Открытие по "?" (Shift+/) — с guard от input/textarea focus
+   • Кнопка "?" в header (между CommandPalette и HealthIndicator)
+
+4. Keyboard shortcut "?" — открыть/закрыть справку:
+   • Guard: не срабатывает в INPUT, TEXTAREA, contentEditable
+   • Не конфликтует с Cmd+K, Alt+1..5
+
+5. LastUpdated component (новый, 70 строк):
+   • Индикатор свежести данных (React Query subscription)
+   • "обновлено только что / Nс / Nм / Nч назад"
+   • Color-coded: emerald (<10с, animate-pulse), amber (>60с), muted (>10с)
+   • RefreshCw button для invalidateQueries
+   • Подписка на queryCache события
+
+6. useBatchSessions hook (src/lib/hooks.ts):
+   • React Query с staleTime 30с
+   • enabled: ids.length > 0
+
+Styling improvements (mandatory):
+- Header: добавлена "?" кнопка для shortcuts help
+- Footer: обновлён hint ("⌘K команды · ? справка · Alt+1..5 табы")
+- Dashboard: capacity strip теперь содержит LastUpdated индикатор
+- Sessions tab: добавлен SessionCompare над ResizablePanelGroup
+- Sessions tab layout: space-y-4, высота панели уменьшена до calc(100vh-340px)
+
+Файлы созданы/изменены:
+- src/app/api/sessions/batch/route.ts (новый endpoint, 50 строк)
+- src/components/session-compare.tsx (новый, 220 строк)
+- src/components/shortcuts-help.tsx (новый, 95 строк)
+- src/components/last-updated.tsx (новый, 70 строк)
+- src/lib/hooks.ts (+20 строк: useBatchSessions hook + BatchSession type)
+- src/app/page.tsx (+25 строк: SessionCompare, ShortcutsHelp, "?" shortcut, header button)
+- src/components/dashboard-overview.tsx (+2 строки: LastUpdated в capacity strip)
+
+Stage Summary:
+- Lint: 0 ошибок, 0 warnings.
+- E2E: 7/7 endpoints PASS (curl), включая новый BATCH (2 sessions fetched).
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Worker: стабилен на :3001.
+- Новых багов не обнаружено.
+- UI значительно улучшен: session comparison на одной карте, keyboard shortcuts help dialog, data freshness indicator с refresh button.
+- Sessions tab теперь содержит: SessionCompare (сверху) + ResizablePanelGroup (список + детали).
+- Header содержит 5 элементов: CommandPalette, "?", HealthIndicator, ThemeToggle, Logout.
+- Все keyboard shortcuts документированы: ⌘K, ?, Alt+1..5, ↑↓, ↵, Esc.

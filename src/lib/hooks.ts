@@ -112,6 +112,29 @@ export function useSession(id: string | null) {
   });
 }
 
+// ===== Batch sessions (for compare) =====
+export interface BatchSession {
+  id: string;
+  deviceId: string;
+  deviceName: string | null;
+  startTime: string;
+  endTime: string | null;
+  pointCount: number;
+  payloadBytes: number;
+  status: string;
+  gpsPoints: Array<{ lat: number; lon: number; speed: number | null; altitude: number | null; timestamp: number }>;
+}
+
+export function useBatchSessions(ids: string[]) {
+  return useQuery({
+    queryKey: ["sessions-batch", ids],
+    queryFn: () =>
+      api.post<{ sessions: BatchSession[] }>("/api/sessions/batch", { ids }),
+    enabled: ids.length > 0,
+    staleTime: 30_000,
+  });
+}
+
 export function useDeleteSession() {
   const qc = useQueryClient();
   return useMutation({

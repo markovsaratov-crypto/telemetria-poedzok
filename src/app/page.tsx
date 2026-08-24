@@ -27,6 +27,7 @@ import { HealthIndicator } from "@/components/health-indicator";
 import { DashboardOverview } from "@/components/dashboard-overview";
 import { SessionsList } from "@/components/sessions-list";
 import { SessionDetail } from "@/components/session-detail";
+import { SessionCompare } from "@/components/session-compare";
 import { RoutePlanner } from "@/components/route-planner";
 import { RoutesManager } from "@/components/routes-manager";
 import { CsvImport } from "@/components/csv-import";
@@ -35,6 +36,7 @@ import { AuditLog } from "@/components/audit-log";
 import { MetricsViewer } from "@/components/metrics-viewer";
 import { TrafficJobsCard } from "@/components/traffic-jobs-card";
 import { CommandPalette } from "@/components/command-palette";
+import { ShortcutsHelp } from "@/components/shortcuts-help";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import {
@@ -50,6 +52,7 @@ export default function Home() {
   const [tab, setTab] = React.useState("overview");
   const [selectedSession, setSelectedSession] = React.useState<string | null>(null);
   const [cmdOpen, setCmdOpen] = React.useState(false);
+  const [helpOpen, setHelpOpen] = React.useState(false);
 
   // Принудительный сброс auth-кэша при 401 из любого запроса.
   React.useEffect(() => {
@@ -62,6 +65,7 @@ export default function Home() {
   }, []);
 
   // Cmd+K / Ctrl+K — открыть command palette
+  // "?" — показать справку по shortcuts
   React.useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -73,6 +77,14 @@ export default function Home() {
         e.preventDefault();
         const tabs = ["overview", "sessions", "routes", "import", "admin"];
         setTab(tabs[Number(e.key) - 1]);
+      }
+      // "?" (Shift+/) — справка
+      if (e.shiftKey && e.key === "?" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const target = e.target as HTMLElement;
+        if (target.tagName !== "INPUT" && target.tagName !== "TEXTAREA" && !target.isContentEditable) {
+          e.preventDefault();
+          setHelpOpen((v) => !v);
+        }
       }
     }
     window.addEventListener("keydown", onKey);
@@ -149,6 +161,15 @@ export default function Home() {
               <span className="text-xs">Команды</span>
               <kbd className="ml-1">⌘K</kbd>
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setHelpOpen(true)}
+              className="h-8 w-8 p-0 text-muted-foreground"
+              title="Горячие клавиши (?)"
+            >
+              <span className="text-xs font-semibold">?</span>
+            </Button>
             <HealthIndicator />
             <ThemeToggle />
             <Button
@@ -211,8 +232,9 @@ export default function Home() {
                 />
               </TabsContent>
 
-              <TabsContent value="sessions" className="mt-0">
-                <div className="h-[calc(100vh-200px)] min-h-[480px] rounded-xl border overflow-hidden bg-card">
+              <TabsContent value="sessions" className="mt-0 space-y-4">
+                <SessionCompare />
+                <div className="h-[calc(100vh-340px)] min-h-[400px] rounded-xl border overflow-hidden bg-card">
                   <ResizablePanelGroup direction="horizontal">
                     <ResizablePanel defaultSize={38} minSize={25} maxSize={55}>
                       <SessionsList
@@ -266,7 +288,7 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-3">
             <span className="hidden md:inline">
-              <kbd>⌘K</kbd> команды · <kbd>Alt+1..5</kbd> табы
+              <kbd>⌘K</kbd> команды · <kbd>?</kbd> справка · <kbd>Alt+1..5</kbd> табы
             </span>
             <span className="hidden sm:inline">
               Cookie: <code className="font-mono">__Host-telem_session</code> · HMAC-SHA256
@@ -291,6 +313,7 @@ export default function Home() {
         onLogout={handleLogout}
         onRefresh={handleRefresh}
       />
+      <ShortcutsHelp open={helpOpen} onOpenChange={setHelpOpen} />
     </div>
   );
 }

@@ -34,6 +34,7 @@ import { Button } from "@/components/ui/button";
 import { fmtDate, fmtBytes, fmtNumber, avgSpeed, trackDistance } from "@/lib/format";
 import { ActivityHeatmap } from "./activity-heatmap";
 import { WeeklyStatsChart } from "./weekly-stats-chart";
+import { LastUpdated } from "./last-updated";
 
 const MapTrack = dynamic(() => import("@/components/map-track"), {
   ssr: false,
@@ -135,6 +136,7 @@ export function DashboardOverview({
             <Badge variant="outline" className="border-emerald-500/30 text-emerald-700 dark:text-emerald-400 ml-auto">
               OK
             </Badge>
+            <LastUpdated queryKey="stats" className="ml-2" />
           </CardContent>
         </Card>
       )}

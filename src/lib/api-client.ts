@@ -189,6 +189,8 @@ export interface SessionDetail extends SessionListItem {
   points: GpsPoint[];
   traffic: { status?: string; trafficFetched?: boolean; [k: string]: unknown };
   route?: { id: string; name: string; description?: string | null } | null;
+  notes?: string | null;
+  tags?: string | null;
 }
 
 export interface RouteItem {

@@ -48,6 +48,8 @@ export async function GET(
         status: session.status,
         route: session.route,
         traffic,
+        notes: session.notes,
+        tags: session.tags,
         points: session.gpsPoints.map((p) => ({
           lat: p.lat,
           lon: p.lon,

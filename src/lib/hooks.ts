@@ -164,6 +164,23 @@ export function useDeleteSession() {
   });
 }
 
+// ===== Session notes/tags =====
+export function useUpdateSessionNotes() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { id: string; notes?: string; tags?: string }) =>
+      api.patch<{ notes: string | null; tags: string | null }>(
+        `/api/sessions/${params.id}/notes`,
+        { notes: params.notes, tags: params.tags }
+      ),
+    onSuccess: (_, vars) => {
+      qc.invalidateQueries({ queryKey: ["session", vars.id] });
+      qc.invalidateQueries({ queryKey: ["sessions"] });
+      qc.invalidateQueries({ queryKey: ["audit"] });
+    },
+  });
+}
+
 // ===== Routes =====
 export function useRoutes() {
   return useQuery({

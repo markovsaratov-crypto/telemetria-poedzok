@@ -727,3 +727,77 @@ Stage Summary:
 - Session detail теперь содержит: header + map + speed chart + elevation chart + speed histogram + metrics (8) + points table.
 - 3 новых визуализации: device leaderboard с progress bars, speed histogram с 7 бакетами, device stats endpoint.
 - 26 API endpoints всего (добавлен /api/stats/devices).
+
+---
+Task ID: 12 (webDevReview cron run #6)
+Agent: orchestrator (main) — webDevReview
+Task: QA + session notes/tags feature + bug fix.
+
+Work Log:
+- Прочитал worklog.md — система стабильна после Task 11.
+- Перезапустил dev server (Next :3000 + Worker :3001).
+- E2E: 5/5 endpoints PASS, включая новый PATCH /api/sessions/[id]/notes.
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Lint: 0 ошибок, 0 warnings.
+
+Bug fix (critical):
+- /api/sessions/[id] GET route не возвращал поля notes и tags после добавления их в Prisma schema.
+  • Симптом: PATCH /api/sessions/[id]/notes успешно сохранял заметки, но GET возвращал notes=null.
+  • Причина: route возвращал объект с явно перечисленными полями, notes/tags не были включены.
+  • Фикс (src/app/api/sessions/[id]/route.ts): добавлены notes: session.notes, tags: session.tags в ответ.
+  • Верификация: PATCH + GET цикл — notes и tags сохраняются и читаются корректно (notes=True, tags=True в E2E).
+
+New features (mandatory):
+1. Prisma schema: добавлены поля notes и tags в model Session:
+   • notes: String? — пользовательские заметки к сессии (до 2000 символов)
+   • tags: String? — теги через запятую (до 500 символов)
+   • db:push выполнен, Prisma Client regenerated
+   • Backward-compatible: nullable, не влияет на существующие сессии
+
+2. PATCH /api/sessions/[id]/notes endpoint:
+   • Body: { notes?: string (max 2000), tags?: string (max 500) }
+   • Zod валидация
+   • Cookie или Bearer API_KEY auth
+   • Audit log: action="session.notes", metadata: { notes: bool, tags: string }
+   • 404 если сессия не найдена или удалена
+
+3. SessionNotes component (новый, 150 строк):
+   • Режим просмотра/редактирования с toggle
+   • Textarea для заметок (2000 char limit, counter)
+   • Input для тегов (500 char limit)
+   • Badge отображение тегов (emerald, с Tag иконкой)
+   • Save/Cancel кнопки с loading state
+   • Toast уведомления
+   • Sync при смене сессии (useEffect на sessionId)
+   • Empty state: "Нет заметок. Нажмите «Редактировать» чтобы добавить."
+
+4. useUpdateSessionNotes hook:
+   • React Query mutation
+   • PATCH /api/sessions/[id]/notes
+   • InvalidateQueries: session, sessions, audit
+
+Styling improvements (mandatory):
+- session-detail.tsx: добавлен SessionNotes между метриками и таблицей точек
+  • Карточка "Заметки и теги" с StickyNote иконкой (amber)
+  • Полная интеграция с session data flow
+  • Inline editing с сохранением
+
+Файлы созданы/изменены:
+- prisma/schema.prisma (+2 строки: notes, tags поля в Session)
+- src/app/api/sessions/[id]/notes/route.ts (новый endpoint, 50 строк)
+- src/app/api/sessions/[id]/route.ts (+2 строки: notes, tags в ответе — bug fix)
+- src/components/session-notes.tsx (новый, 150 строк)
+- src/lib/hooks.ts (+18 строк: useUpdateSessionNotes hook)
+- src/lib/api-client.ts (+2 строки: notes, tags в SessionDetail type)
+- src/components/session-detail.tsx (+8 строк: SessionNotes import + render)
+
+Stage Summary:
+- Lint: 0 ошибок, 0 warnings.
+- E2E: 5/5 endpoints PASS (curl), включая NOTES (PATCH + VERIFY).
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Worker: стабилен на :3001.
+- Bug fix: notes/tags поля теперь корректно возвращаются в GET /api/sessions/[id].
+- Новых багов не обнаружено.
+- 27 API endpoints (добавлен PATCH /api/sessions/[id]/notes).
+- Session detail теперь содержит: header + map + speed chart + elevation chart + speed histogram + metrics (8) + session notes + points table.
+- Пользователь может добавлять заметки и теги к любой сессии, они сохраняются в БД.

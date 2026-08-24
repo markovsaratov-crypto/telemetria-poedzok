@@ -42,6 +42,7 @@ import {
 import { ExportDialog } from "@/components/export-dialog";
 import { SpeedChart, ElevationChart } from "@/components/speed-chart";
 import { SpeedHistogram } from "@/components/speed-histogram";
+import { SessionNotes } from "@/components/session-notes";
 import { fmtDate, fmtDuration, fmtBytes, fmtNumber, avgSpeed, trackDistance } from "@/lib/format";
 
 const MapTrack = dynamic(() => import("@/components/map-track"), {
@@ -283,6 +284,15 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
           icon={<MapPin className="h-4 w-4" />}
           label="Маршрут"
           value={session.route?.name || "—"}
+        />
+      </div>
+
+      {/* Заметки и теги */}
+      <div className="px-4 pb-4">
+        <SessionNotes
+          sessionId={session.id}
+          initialNotes={session.notes}
+          initialTags={session.tags}
         />
       </div>
 

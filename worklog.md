@@ -405,3 +405,101 @@ Stage Summary:
 - UI значительно улучшен: animated mesh background, glassmorphism, shimmer loading, sparklines, activity heatmap, speed/elevation charts, command palette, keyboard shortcuts, password strength meter, caps lock indicator.
 - Добавлен /api/stats endpoint для агрегированной статистики dashboard.
 - Блокер №1 (rate-limit vs TARGET_LOAD_RPM) теперь визуализирован в UI (capacity strip с headroom).
+
+---
+Task ID: 8 (webDevReview cron run #2)
+Agent: orchestrator (main) — webDevReview
+Task: QA + styling refinements + new admin features.
+
+Work Log:
+- Прочитал worklog.md — система в стабильном состоянии после Task 7 (webDevReview #1).
+- Перезапустил dev server (Next :3000 + Worker :3001). Оба стабилизированы.
+- E2E через curl: 10/10 endpoints PASS (добавлен JOBS endpoint).
+- Page render: 30.5KB HTML, без ошибок компиляции.
+- Lint: 0 ошибок, 0 warnings.
+
+Styling refinements (mandatory):
+- sessions-list.tsx полностью переписан:
+  • Header с count и view toggle (detailed/compact)
+  • Sort options: date_desc, date_asc, points_desc, size_desc
+  • DetailedList: группировка по дате (Сегодня/Вчера/дата) со sticky headers
+  • CompactList: компактный вид с status dot, deviceId, points, date
+  • Active filters count badge
+  • RefreshCw button в header
+  • HardDrive icon для payload bytes
+  • AnimatePresence для compact list items
+  • Border-l-2 для selected state
+  • Hover effects
+
+- route-planner.tsx: добавлены preset маршруты:
+  • 6 популярных маршрутов: Москва→СПб, Москва центр, СПб центр, Казань→аэропорт, Сочи→Адлер, Екатеринбург
+  • Pill-style кнопки с цветными маркерами (emerald start, amber end)
+  • Toast уведомление при загрузке пресета
+  • title с описанием маршрута
+
+- admin-panel.tsx: добавлен SystemInfoCard:
+  • 10 метрик: status, db, worker, uptime, version, totalSessions, totalPoints, deadJobs, rateLimit, targetLoad
+  • Grid 5 колонок с motion staggered animations
+  • Color-coded values (emerald=ok, amber=degraded, red=dead>0)
+  • Иконки: Activity, Cpu, Server, Clock, GitBranch, Database, HardDrive, Hash, Zap
+
+- health-indicator.tsx полностью переписан:
+  • Popover с детальной информацией вместо простого title tooltip
+  • 5 health rows: status, db, worker, uptime, version
+  • Circuit breakers секция (если есть)
+  • Rate limiter info
+  • Color-coded values
+  • Pulse-dot animation для ok состояния
+
+New features (mandatory):
+1. /api/admin/jobs endpoint — список TrafficJob для admin panel:
+   • Query: ?status=pending|running|failed|dead|completed&limit=50
+   • Returns: jobs[] (with session.deviceId), summary (counts by status), total
+   • Auth: ADMIN_TOKEN или cookie
+
+2. TrafficJobsCard component — таблица TrafficJob:
+   • Status filter chips (Все/Pending/Running/Failed/Dead/Completed) с counts
+   • Live refresh каждые 15с
+   • Per-job: deviceId, status badge, attempts, created, lockedBy, scheduledFor, error
+   • Requeue button для dead/failed jobs (inline)
+   • Status icons + colors (amber/teal/red/emerald)
+   • AnimatePresence для list items
+   • max-h-96 overflow-y-auto с custom scrollbar
+
+3. CSV import: добавлен "Шаблон" button:
+   • Скачивает telemetria-sample.csv с 6 примерами строк
+   • Правильные колонки: device_id, client_id, device_name, lat, lon, speed, altitude, accuracy, timestamp, bearing
+   • Демонстрирует 2 устройства с разными координатами (Москва + СПб)
+
+4. SessionsList improvements:
+   • Sort по 4 критериям (date asc/desc, points, size)
+   • View modes: detailed (с группировкой по датам) / compact
+   • Quick stats footer
+   • Filter count badge
+
+5. useAdminJobs hook (src/lib/hooks.ts):
+   • React Query с refetchInterval=15с
+   • staleTime=10с
+   • Query key с status filter
+
+Файлы созданы/изменены:
+- src/components/sessions-list.tsx (полностью переписан, +130 строк: sort, view modes, grouping)
+- src/components/route-planner.tsx (+25 строк: presets UI, +20 строк: PRESETS const)
+- src/components/admin-panel.tsx (+100 строк: SystemInfoCard)
+- src/components/health-indicator.tsx (полностью переписан, +90 строк: popover details)
+- src/components/traffic-jobs-card.tsx (новый, 190 строк)
+- src/components/csv-import.tsx (+20 строк: sample CSV download)
+- src/app/api/admin/jobs/route.ts (новый endpoint, 50 строк)
+- src/lib/hooks.ts (+30 строк: useAdminJobs hook + AdminJobItem types)
+- src/app/page.tsx (+2 строки: TrafficJobsCard в admin tab)
+
+Stage Summary:
+- Lint: 0 ошибок, 0 warnings.
+- E2E: 10/10 endpoints PASS (curl), включая новый /api/admin/jobs.
+- Page render: 30.5KB HTML, без ошибок компиляции.
+- Worker: стабилен на :3001, обрабатывает TrafficJob.
+- Новых багов не обнаружено.
+- UI значительно улучшен: sort + view modes в sessions, preset маршруты, system info card, traffic jobs table с requeue, health popover, sample CSV template.
+- Admin panel теперь содержит 4 карточки: SystemInfo, Backups, Requeue, TrafficJobs.
+- Блокер №1 (rate-limit) визуализирован в SystemInfoCard (rateLimit + targetLoad + headroom).
+- Все 5 табов (Обзор/Сессии/Маршруты/Импорт/Администрирование) полностью функциональны.

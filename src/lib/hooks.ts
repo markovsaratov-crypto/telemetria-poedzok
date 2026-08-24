@@ -250,6 +250,38 @@ export function useBackups() {
   });
 }
 
+// ===== Admin TrafficJobs =====
+export interface AdminJobItem {
+  id: string;
+  sessionId: string;
+  status: string;
+  attempts: number;
+  lockedBy: string | null;
+  lockedAt: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  scheduledFor: string;
+  session: { deviceId: string; startTime: string } | null;
+}
+export interface AdminJobsResponse {
+  jobs: AdminJobItem[];
+  summary: Record<string, number>;
+  total: number;
+}
+
+export function useAdminJobs(status?: string) {
+  return useQuery({
+    queryKey: ["admin-jobs", status],
+    queryFn: () => {
+      const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+      return api.get<AdminJobsResponse>(`/api/admin/jobs${qs}`);
+    },
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  });
+}
+
 export function useCreateBackup() {
   const qc = useQueryClient();
   return useMutation({

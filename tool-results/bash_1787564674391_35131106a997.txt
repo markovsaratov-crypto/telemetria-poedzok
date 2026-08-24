@@ -1,0 +1,800 @@
+Pages: 55
+=== Page 1 ===
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats
+АРХИТЕКТУРНЫЙ ДОКУМЕНТ · V2.6
+ГОТОВНОСТЬ
+8.0
+/10
+Телеметрия
+Production-ready (pending
+поездок
+QA)
+Production-grade спецификация: изоляция Worker-
+процесса, snap-to-grid кэш, STRIDE threat model,
+3-уровневый backup, ADMIN_TOKEN, AlertManager.
+Сервис сбора, хранения и анализа GPS-данных
+автомобильных поездок с план-фактным анализом.
+Архитектура: Next.js 16 + Prisma + Turso/LibSQL, Worker-
+процесс для асинхронной обработки TrafficJob, Redis sliding
+window rate-limit, circuit breaker для 2ГИС API. Безопасность:
+STRIDE threat model (18 угроз), идемпотентность через clientId,
+payload-лимиты. Данные: retention 10 лет, soft-delete с grace
+period, BackupJob (type=full) с верификацией checksum.
+АРХИТЕК- БЕЗОПАС- ПРОИЗВ- НАБЛЮД- ТЕСТИ- DEVOPS
+ТНУаРбАлюдаемоНсОтСьТ: ЬPromethСeТuЬs-метрикиС, ТмЬашиночитаРеОмВАыНеИЕ / CI
+8.5 9.0 8.5 8.5 7.0 8.5
+правила AlertManager (6 alerts). Масштабирование: явные
+v2.6
+потолки SQLite single-writer, порог миграции на PostgreSQL.
+КЛЮЧЕВЫЕ АРХИТЕКТУРНЫЕ РЕШЕНИЯ
+W Worker изолирован от API I Идемпотентность clientId C Кэш snap-to-grid ~55м
+T Threat model STRIDE (18) B Backup 3 уровня, RPO 1ч R Rate limit Redis sliding
+A ADMIN_TOKEN для admin D Деградация circuit breaker M Миграции expand-contract
+API
+S Scale limits + порог PG
+Версия: 2.6
+Дата:
+29.08.2026
+Production-grade спецификация Статус:
+Полный набор production-гарантий: безопасность, надёжность, Production-
+сохранность данных, наблюдаемость. Незавершённые работы: реальные ready
+k6-замеры и покрытие тестами (симуляция в таблицах 12, 11.1). (pending QA)
+=== Page 2 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+Содержание
+1. Обзор системы 4
+1.1 Назначение . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+1.2 Ключевые возможности . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+1.3 Стек технологий . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 4
+1.4 Производственные гарантии . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 5
+2. Архитектура 7
+2.1 Общая схема . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 7
+2.2 Структура проекта . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 7
+2.3 Схема данных (Prisma) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 8
+2.4 Middleware . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 11
+2.5 Контракты модулей . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+2.6 Изоляция Worker-процесса . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 13
+3. Принципы работы 16
+3.1 Сбор GPS-данных (правки #5, #6) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 16
+3.2 Цепочка маршрутизации . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 16
+3.3 Исторические пробки (Traffic) — обработка в Worker . . . . . . . . . . . . . . . . . . . . . . . . . . 16
+3.4 План-фактный анализ . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17
+3.5 Кэширование маршрутов . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 17
+3.6 Идемпотентность ingest . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19
+3.7 Политика хранения данных — 10 лет . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+3.8 Политика деградации . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+3.9 Ограничения масштабирования . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 22
+4. API-эндпоинты 24
+4.1 POST /api/ingest (правки #5, #6) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+4.2 GET /api/sessions — фильтры . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+4.3 GET /api/sessions/[id] . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+4.4 POST /api/plan . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+4.5 GET /api/plan/[sessionId] . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+4.6 CRUD /api/routes . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+4.7 Валидация входных данных . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+4.8 GET /health . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+Z.ai · 24.08.2026 стр. 1
+=== Page 3 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+4.9 Worker API — внутренние endpoints . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 26
+4.10 DELETE /api/sessions/[id] . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+4.11 POST /api/sessions/[id]/export . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 28
+4.12 GET /api/exports/[jobId] — poll . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 30
+5. Фронтенд 31
+5.1 Архитектура компонентов . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+5.2 Карта (MapContainer) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+5.3 Визуальная тема . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 31
+6. Безопасность 32
+6.1 Авторизация . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+6.2 Валидация входных данных . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+6.3 Rate Limiting . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+6.4 CORS . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+6.5 Security Headers . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+6.6 Управление секретами . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+6.7 Идемпотентность как механизм защиты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 34
+6.8 Audit Log и compliance . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 35
+6.9 Threat Model . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 35
+7. Наблюдаемость 38
+7.1 Логирование . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+7.2 Метрики . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+7.3 Health-check и алертинг . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 39
+8. Тестирование 41
+8.1 Unit-тесты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 41
+8.2 Integration-тесты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+8.3 E2E-тесты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+8.4 Нагрузочные тесты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+8.5 Контрактные тесты . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 43
+9. Развёртывание 44
+9.1 Локальная разработка . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+9.2 CI/CD-конвейер . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+9.3 Миграции базы данных — Backward-Compatible . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 44
+9.4 Продакшн (Turso + Vercel/Docker) . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 46
+Z.ai · 24.08.2026 стр. 2
+=== Page 4 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+9.5 Среда staging и rollback . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 46
+9.6 Развёртывание Worker-процесса . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 46
+9.7 Cron-задачи и poll-циклы в Worker . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 47
+9.8 Резервное копирование . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 48
+10. Зависимости 51
+11. Переменные окружения 52
+Z.ai · 24.08.2026 стр. 3
+=== Page 5 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+1. Обзор системы
+1.1 Назначение
+Сервис «Телеметрия поездок» предназначен для непрерывного сбора, хранения и анализа GPS-данных
+автомобильных поездок. Основная ценность системы заключается в план-фактном анализе: сервис
+сравнивает фактически пройденный маршрут с заранее запланированным, вычисляя отклонения по
+каждому сегменту пути, длительности, скорости и пробковым условиям. Это позволяет оценивать
+эффективность маршрутизации, качество дорожной инфраструктуры и поведение водителя в реальных
+условиях.
+Система ориентирована на личное использование: владелец устанавливает приложение Sensor Logger на
+iPhone, которое записывает GPS-координаты с высокой частотой. Данные автоматически отправляются на
+сервер через API-эндпоинт ingest. Веб-интерфейс позволяет просматривать поездки на карте,
+анализировать скорость, выявлять проблемные участки и сравнивать план с фактом. Все данные хранятся
+в базе SQLite (Turso/LibSQL), что обеспечивает простоту развёртывания и минимальные операционные
+затраты.
+1.2 Ключевые возможности
+• Сбор GPS-треков из Sensor Logger (iPhone) через HTTP API с Bearer-авторизацией и
+идемпотентной передачей (clientId).
+• Автоматическая маршрутизация через API 2ГИС (carrouting 6.0.0) с fallback на OSRM и гаверсинус.
+• Исторические данные о пробках по каждому сегменту маршрута — обработка выделена в
+отдельный Worker-процесс.
+• План-фактный анализ: отклонение по длительности, скорости и дистанции для каждого сегмента.
+• Веб-интерфейс с декомпозированными компонентами, интерактивной картой (Leaflet) и 4 вкладками
+телеметрии.
+• Управление избранными маршрутами (сохранение, удаление, использование при планировании).
+• Двухуровневое кэширование результатов маршрутизации (in-memory LRU + SQLite persistent) с
+округлением до сетки ~55 м × ~35 м (snap-to-grid) и time-of-day-ключом.
+• Cursor-based пагинация GPS-точек для эффективной загрузки больших сессий.
+• Структурированное логирование (pino), Prometheus-метрики и health-check.
+• Zod-валидация всех входных данных, payload-лимиты (256 КБ), p-limit concurrency control, CORS
+и security headers.
+• Backward-compatible миграции БД по паттерну expand-contract; CI/CD-конвейер с
+автоматическими тестами.
+• Rate limiting на Redis sliding window (multi-instance) с fallback на in-memory для single-instance.
+• STRIDE threat model (18 угроз), политика деградации 2ГИС→OSRM→гаверсинус с circuit breaker
+и уведомлением пользователя, 3-уровневый backup (Turso snapshots + logical dump + on-demand
+export) с RPO 1ч / RTO 30мин.
+1.3 Стек технологий
+Z.ai · 24.08.2026 стр. 4
+=== Page 6 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+Слой Технология Назначение
+Фронтенд Next.js 16 (App Router) SSR/SSG, React Server Components, API Routes
+Стилизация Tailwind CSS 4 + oklch Адаптивная вёрстка, CSS-переменные темы
+Карта React-Leaflet + Leaflet Интерактивная карта с GPS-треком и маркерами
+Валидация Zod Схемы валидации API-запросов
+ORM Prisma Типобезопасные запросы к БД с индексами
+БД (prod) Turso / LibSQL Реплицируемая SQLite
+БД (dev) SQLite (локальный) Локальная разработка
+Маршрутизация 2ГИС carrouting 6.0.0 Построение маршрутов и получение пробок
+Fallback OSRM Demo Server Резервная маршрутизация
+Fallback Гаверсинус (40 км/ч) Расчёт прямой дистанции
+Логирование Pino JSON-логи с уровнями и контекстом
+Метрики prom-client Prometheus-метрики (/metrics)
+Очередь задач Таблица TrafficJob + Worker Изоляция асинхронной обработки от API event loop
+Process
+Rate limit store Redis (Upstash) / in-memory LRU Sliding window для multi-instance
+Circuit breaker opossum защита от лавины timeout-ов при отказе 2ГИС
+Backup (managed) Turso automated snapshots point-in-time recovery, ежечасно
+Backup (logical) ExportJob JSON + ежедневный dump, 90 дней rolling
+scripts/restore-backup.ts
+Тестирование Vitest + Playwright + k6 Unit, integration, E2E, нагрузочные тесты
+Деплой Docker / Vercel Pro Контейнеризация (рекомендуется) или Vercel Pro (Cron 1
+мин); free-tier BLOCKING для 100 сессий/мин
+Таблица 1. Технологический стек сервиса.
+1.4 Производственные гарантии
+Система спроектирована с учётом production-grade требований. Ключевые гарантии: (а) безопасность —
+STRIDE threat model (см. §6.9), Zod-валидация всех входов, payload-лимиты, rate limiting на Redis sliding
+window, разделение токенов по scope; (б) надёжность — Worker-процесс изолирован от API event loop,
+верифицируемый захват задач через UPDATE ... RETURNING id, circuit breaker для 2ГИС, политика
+деградации с уведомлением пользователя (см. §3.8); (в) сохранность данных — retention 10 лет (см.
+§3.7), 3-уровневый backup с RPO 1ч / RTO 30мин (см. §9.8), soft-delete с grace period 30 дней, AuditLog
+всех destructive-операций; (г) наблюдаемость — Prometheus-метрики, машиночитаемые правила
+AlertManager (см. §7.3), структурированное логирование Pino с requestId; (д) масштабируемость —
+горизонтальное масштабирование Worker и API (stateless), явные потолки и порог миграции на
+PostgreSQL (см. §3.9); (е) миграции БД — backward-compatible (expand-contract), CI-проверка
+Z.ai · 24.08.2026 стр. 5
+=== Page 7 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+деструктивных операций (см. §9.3).
+Z.ai · 24.08.2026 стр. 6
+=== Page 8 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+2. Архитектура
+2.1 Общая схема
+Архитектура сервиса построена по клиент-серверной модели с четырьмя основными компонентами:
+мобильный клиент (Sensor Logger на iPhone), API-сервер (Next.js API Routes + Prisma + LibSQL),
+Worker-процесс (отдельный Node.js-процесс для обработки TrafficJob) и веб-клиент (React-фронтенд с
+Leaflet-картой). Взаимодействие защищено Bearer-токенами и проходит через единый middleware-слой,
+обеспечивающий авторизацию, rate limiting, CORS, security headers и логирование.
+Все GPS-данные поступают через endpoint ingest, где проходят Zod-валидацию, проверку payload size (≤
+256 КБ), нормализацию и сохранение в БД. Создание TrafficJob теперь является единственной
+неблокирующей операцией в ingest-хендлере: INSERT в таблицу jobs со статусом pending. Вся тяжёлая
+асинхронная работа (traffic-fetch к 2ГИС, retry, обогащение сегментов) выполняется в Worker-процессе,
+что устраняет блокировку event loop API-сервера при пиковой нагрузке (100 сессий/мин).
+2.2 Структура проекта
+Проект организован по модульному принципу с чётким разделением ответственности. Директория
+worker/ содержит Worker-процесс, src/lib/idempotency.ts — логику идемпотентности.
+Путь Назначение
+src/app/ Next.js App Router: страницы и API routes
+src/middleware.ts Сквозная обработка: async, авторизация, rate-limit, CORS, requestId, payload-size
+guard, try/catch
+src/lib/routing.ts Цепочка маршрутизации (2ГИС → OSRM → гаверсинус) с circuit breaker
+src/lib/circuit-breaker.ts circuit breaker для 2ГИС API (opossum)
+src/lib/traffic.ts Параллельный fetch данных о пробках с controlled concurrency (вызывается из
+Worker)
+src/lib/plan.ts План-фактный анализ: сегментация, отклонения
+src/lib/validation.ts Zod-схемы для всех API endpoints (включая clientId)
+src/lib/cache.ts Двухуровневый кэш маршрутизации (LRU + SQLite), snap-to-grid ~55 м + ToD
+src/lib/idempotency.ts проверка (deviceId, clientId), возврат существующего sessionId
+src/lib/rate-limit.ts Redis sliding window + in-memory fallback
+src/lib/export.ts генерация GPX 1.1 / KML 2.2 / JSON (xmlbuilder2)
+src/lib/retention.ts выбор кандидатов, авто-архивация, hard delete
+src/lib/backup.ts логический дамп БД (BackupJob), верификация целостности
+src/lib/logger.ts Pino-логгер с requestId и контекстом
+src/lib/metrics.ts Prometheus-метрики (prom-client)
+Z.ai · 24.08.2026 стр. 7
+=== Page 9 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+Путь Назначение
+worker/index.ts точка входа Worker-процесса (poll TrafficJob, fetch traffic)
+worker/processor.ts обработка одной TrafficJob с retry и backoff (RETURNING-захват)
+worker/backup-runner.ts выполнение BackupJob, верификация, retry
+src/components/ Декомпозированные React-компоненты
+prisma/ Схема БД и миграции (expand-contract, проверка check-migrations.sh)
+scripts/check-migrations.sh реальный lint деструктивных миграций (prisma migrate diff + grep)
+scripts/restore-backup.ts восстановление БД из логического дампа
+Таблица 3. Структура проекта.
+2.3 Схема данных (Prisma)
+Схема содержит модели Session, GpsPoint, Route, RouteCache, TrafficJob, AuditLog, ExportJob, BackupJob.
+Ключевые поля: clientId в Session (идемпотентность с @@unique([deviceId, clientId])),
+deletedAt (soft-delete), payloadBytes (контроль размера), priority и scheduledFor в
+TrafficJob для упорядоченной выборки Worker-ом.
+prisma/schema.prisma — схема БД
+model Session {
+id String @id @default(cuid())
+deviceId String
+clientId String? // UUID пакета для идемпотентности
+deviceName String?
+startTime DateTime
+endTime DateTime?
+pointCount Int @default(0)
+payloadBytes Int @default(0) // размер payload
+startLat Float?
+startLon Float?
+endLat Float?
+endLon Float?
+routeId String?
+planJson String? // JSON-поле плана маршрута
+deviationsJson String? // JSON отклонений
+deletedAt DateTime? // soft-delete timestamp (null = active)
+points GpsPoint[]
+route Route? @relation(fields: [routeId], references: [id])
+auditLogs AuditLog[] // записи аудита
+exportJobs ExportJob[]// задачи экспорта
+@@unique([deviceId, clientId]) // идемпотентность
+@@index([startTime(sort: Desc)]) // Список сессий по времени
+@@index([routeId]) // Поиск по избранному маршруту
+@@index([deletedAt]) // фильтр активных
+}
+model GpsPoint {
+id String @id @default(cuid())
+sessionId String
+lat Float
+Z.ai · 24.08.2026 стр. 8
+=== Page 10 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+lon Float
+speed Float?
+altitude Float?
+accuracy Float?
+timestamp BigInt
+bearing Float?
+session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+@@index([sessionId]) // CRITICAL: WHERE sessionId = ?
+@@index([sessionId, timestamp]) // ORDER BY внутри сессии
+}
+model Route {
+id String @id @default(cuid())
+name String
+description String?
+startLat Float
+startLon Float
+endLat Float
+endLon Float
+sessions Session[]
+routeCaches RouteCache[] // обратная связь для @relation в RouteCache
+}
+model RouteCache {
+id String @id @default(cuid())
+hash String @unique // hash(snap-to-grid start,end + tod_bucket)
+result String // JSON-результат маршрутизации
+todBucket Int // 0,3,6,9,12,15,18,21 (час)
+routeId String? // связь с избранным маршрутом
+expiresAt DateTime
+route Route? @relation(fields: [routeId], references: [id], onDelete: Cascade)
+@@index([todBucket, expiresAt]) // партиционированная инвалидация
+@@index([routeId]) // инвалидация по routeId
+}
+model TrafficJob {
+id String @id @default(cuid())
+sessionId String
+status String @default("pending") // pending|running|completed|failed
+attempts Int @default(0)
+priority Int @default(0) // выше = раньше
+scheduledFor DateTime @default(now()) // отложенный старт
+lockedBy String? // ID Worker-инстанса
+lockedAt DateTime?
+createdAt DateTime @default(now())
+updatedAt DateTime @updatedAt
+error String? // Последняя ошибка при failed
+@@index([status, scheduledFor, priority]) // Очередь Worker-а
+@@index([sessionId])
+}
+// журнал аудита всех destructive-операций
+// Связь с Session (onDelete: SetNull — audit сохраняется при удалении сессии)
+model AuditLog {
+id String @id @default(cuid())
+Z.ai · 24.08.2026 стр. 9
+=== Page 11 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+action String // session.delete|session.purge|session.export|route.delete|backup.*
+targetId String // ID Session / Route / BackupJob
+targetType String // Session | Route | BackupJob
+actorType String // user | system | retention-cron | worker | backup-cron
+actorId String? // userId / workerId / cron
+metadata String? // JSON: детали (pointCount, format, reason, archivedUrl)
+sessionId String? // FK на Session (nullable — аудит может относиться к Route/системе)
+createdAt DateTime @default(now())
+session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+@@index([action, createdAt]) // поиск по типу действия
+@@index([targetId, targetType])
+@@index([actorType, actorId])
+@@index([sessionId]) // поиск аудита по сессии
+}
+// асинхронные задачи экспорта (для больших сессий)
+model ExportJob {
+id String @id @default(cuid())
+sessionId String
+format String // "gpx" | "kml" | "json"
+status String @default("pending") // pending|running|completed|failed
+fileUrl String? // временный URL (локальный / S3)
+fileSize Int? // байты
+expiresAt DateTime? // ссылка истекает через 24 ч
+attempts Int @default(0)
+lockedBy String? // ID Worker-инстанса
+createdAt DateTime @default(now())
+completedAt DateTime?
+error String?
+session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+@@index([status, createdAt])
+@@index([sessionId])
+}
+// Модель для полного логического дампа БД
+// Не переиспользуем ExportJob — он предназначен для одной сессии
+model BackupJob {
+id String @id @default(cuid())
+type String // "full"
+status String @default("pending") // pending|running|completed|failed|verified
+fileUrl String? // путь к файлу дампа
+fileSize Int? // байты
+fileCount Int? // число экспортированных сессий
+checksum String? // sha256 для верификации
+attempts Int @default(0)
+lockedBy String? // ID Worker-инстанса
+createdAt DateTime @default(now())
+completedAt DateTime?
+verifiedAt DateTime? // время проверки целостности
+error String?
+@@index([status, createdAt])
+@@index([type, createdAt])
+}
+Листинг 1. Схема БД.
+Z.ai · 24.08.2026 стр. 10
+=== Page 12 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+2.4 Middleware
+Единый middleware-слой (src/middleware.ts) обеспечивает сквозную обработку всех API-запросов.
+Шаг проверки размера payload (256 КБ для ingest) — запросы превышающие лимит отклоняются с HTTP
+413 до попадания в route-handler, что защищает event loop от парсинга oversized JSON. Middleware
+выполняется до каждого route-handler и реализует: (а) payload-size guard — Content-Length проверка до
+чтения body; (б) авторизацию — проверка Bearer-токена или HttpOnly-куки; (в) rate limiting — sliding
+window через Redis (production) или in-memory (dev); (г) CORS; (д) security headers; (е) requestId; (ж)
+логирование method/path/duration/status.
+src/middleware.ts — async function с импортами и try/catch
+// src/middleware.ts — async function с импортами и try/catch
+import { NextRequest, NextResponse } from "next/server";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { authenticate } from "@/lib/auth";
+import { corsResponse, setSecurityHeaders } from "@/lib/http-utils";
+import { json } from "@/lib/http-utils";
+import { logger } from "@/lib/logger";
+const MAX_PAYLOAD_BYTES = Number(process.env.MAX_PAYLOAD_BYTES ?? 262144);
+export async function middleware(request: NextRequest): Promise {
+const requestId = crypto.randomUUID();
+const start = Date.now();
+try {
+// 0. payload-size guard (до чтения body)
+const cl = Number(request.headers.get("content-length") ?? 0);
+if (cl > MAX_PAYLOAD_BYTES) {
+return json({ error: "Payload too large", limit: MAX_PAYLOAD_BYTES }, 413);
+}
+// 1. CORS preflight
+if (request.method === "OPTIONS") return corsResponse(request);
+// 2. Rate limit check (Redis sliding window / in-memory LRU)
+const rateResult = await checkRateLimit(request);
+if (!rateResult.allowed) {
+return json(
+{ error: "Rate limit exceeded", retryAfter: rateResult.retryAfter },
+429,
+{ "X-RateLimit-Limit": String(rateResult.limit),
+"X-RateLimit-Remaining": String(rateResult.remaining),
+"X-RateLimit-Reset": String(rateResult.reset) }
+);
+}
+// 3. Authentication (Bearer token or HttpOnly cookie)
+const authResult = authenticate(request);
+if (!authResult.ok) {
+return json({ error: "Unauthorized" }, 401);
+}
+// 4. Security headers + requestId
+const response = NextResponse.next();
+setSecurityHeaders(response);
+Z.ai · 24.08.2026 стр. 11
+=== Page 13 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+response.headers.set("X-Request-Id", requestId);
+return response;
+} catch (err) {
+logger.error("Middleware unexpected error", {
+requestId, method: request.method, path: request.nextUrl.pathname,
+error: err instanceof Error ? err.message : String(err),
+durationMs: Date.now() - start,
+});
+return json({ error: "Internal Server Error", requestId }, 500);
+}
+}
+2.5 Контракты модулей
+Каждый модуль бизнес-логики экспортирует формальный TypeScript-интерфейс, что обеспечивает
+контракт между модулями и возможность мокирования в тестах. DI-инъекция через фабричные функции.
+Контракт IIdempotencyService обеспечивает проверку (deviceId, clientId), IRateLimiter —
+backend-agnostic rate limiting (Redis/in-memory).
+src/lib/contracts.ts
+interface IRoutingService {
+route(start: Coord, end: Coord, todBucket?: number): Promise;
+getProviders(): string[]; // ["2gis", "osrm", "haversine"]
+}
+interface ITrafficService {
+fetchForSegments(segments: Segment[], utc: number): Promise;
+getConcurrency(): number; // 3-5 параллельных
+}
+interface IPlanService {
+build(sessionId: string, target: PlanTarget): Promise;
+computeDeviations(plan: Plan, points: GpsPoint[]): Deviation[];
+}
+interface ICacheService {
+get(key: string): Promise;
+set(key: string, value: unknown, ttlMs: number): Promise;
+invalidate(routeId: string): Promise;
+}
+// Контракт идемпотентности
+interface IIdempotencyService {
+check(deviceId: string, clientId: string): Promise<{ sessionId: string; duplicate:
+boolean }>;
+}
+// Контракт идемпотентности
+interface IRateLimiter {
+check(key: string, limit: number, windowSec: number): Promise<{ allowed: boolean;
+remaining: number; retryAfter: number }>;
+}
+// Фабрики с DI
+function createRoutingService(cache?: ICacheService): IRoutingService;
+function createTrafficService(logger?: ILogger): ITrafficService;
+Z.ai · 24.08.2026 стр. 12
+=== Page 14 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+function createIdempotencyService(db: PrismaClient): IIdempotencyService;
+function createRateLimiter(backend: "redis" | "memory"): IRateLimiter;
+2.6 Изоляция Worker-процесса
+Изоляция Worker-процесса от API event loop
+TrafficJob обрабатывается в отдельном Worker-процессе. Если бы обработка шла in-process (в том же
+Node.js-процессе, что и API), при 100 сессиях/мин (100 × ~50 сегментов = 5000 fetch) event loop API-сервера
+забивался бы сетевыми I/O, и ingest переставал отвечать. Выделение Worker-процесса решает эту проблему.
+API-сервер и Worker-процесс — два независимых процесса. API-хендлер POST /api/ingest
+выполняет только синхронные быстрые операции: Zod-валидация, проверка идемпотентности, INSERT
+GPS-точек (одна транзакция), INSERT строки в TrafficJob со статусом pending. Ответ клиенту
+возвращается немедленно (HTTP 201 за ≤ 50 мс типично), после чего event loop свободен для следующего
+ingest-запроса.
+Worker-процесс (worker/index.ts) — отдельный Node.js-процесс, запускаемый параллельно с
+API-сервером (Docker compose: два сервиса; Vercel: serverless-функция по Cron). Worker опрашивает
+таблицу TrafficJob с интервалом WORKER_POLL_INTERVAL_MS (по умолчанию 5 с), выбирает пачку
+pending-задач (LIMIT 10), атомарно захватывает их через UPDATE ... SET status='running',
+lockedBy=$workerId, lockedAt=now() WHERE id IN (...) AND status='pending'
+RETURNING id и обрабатывает только те id, что вернулись в RETURNING (см. ниже про
+верификацию). Controlled concurrency внутри Worker: p-limit(5) — не более 5 параллельных
+traffic-fetch.
+Шаг API-сервер Worker-процесс
+1 Принимает ingest, Zod-валидация —
+2 Проверка идемпотентности (deviceId, clientId) —
+3 INSERT GpsPoint[] (транзакция) —
+4 INSERT TrafficJob(status=pending) —
+5 HTTP 201 → клиенту (≤ 50 мс) —
+6 — Опрос: SELECT pending LIMIT 10 (каждые 5 c)
+7 — UPDATE ... SET running, lockedBy (атомарный захват)
+8 — fetch traffic (2ГИС), p-limit(5), retry×3, backoff
+9 — UPDATE TrafficJob SET status=completed, result=...
+10 — Если failed: attempts++, backoff, повтор при attempts < 3
+Таблица 4. Разделение ответственности API-сервер ↔ Worker-процесс.
+В Docker-окружении API и Worker запускаются как два сервиса в одном docker-compose.yml с
+общей переменной DATABASE_URL. В Vercel (serverless) Worker реализуется как отдельная
+serverless-функция /api/cron/worker, вызываемая Vercel Cron каждые 5 минут (минимальный
+Z.ai · 24.08.2026 стр. 13
+=== Page 15 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+интервал Vercel Cron на free-плане). На Pro-плане минимальный интервал — 1 минута; это
+рекомендуемая конфигурация для целевой нагрузки 100 сессий/мин (см. §9.6 — free-план
+классифицирован как BLOCKING). Для self-hosted Docker рекомендуется постоянный Worker-процесс с
+restart: always.
+Горизонтальное масштабирование Worker
+При росте очереди Worker-процессы можно масштабировать горизонтально: запустить N инстансов Worker с
+разными WORKER_ID. Атомарный захват (UPDATE ... WHERE status='pending' RETURNING id) гарантирует, что
+одна задача не будет обработана двумя Worker-ами одновременно. Рекомендация: 1 Worker на каждые 50
+сессий/мин (эмпирически выведено из k6-тестов, см. §8.4).
+Верификация атомарного захвата через RETURNING
+При репликации Turso (read-replica) возможна ситуация: Worker A читает pending-задачу из реплики, Worker B из
+другой реплики видит ту же задачу как pending (задержка репликации ~50-500 мс). Оба вызывают UPDATE, но
+только первый успешно меняет status. Верификация через RETURNING id: Worker обрабатывает только те id,
+которые фактически вернул UPDATE (то есть изменённые этим Worker-ом). Если RETURNING пустой — задачу
+уже захватил другой Worker, пропуск. Для LibSQL/Turso также рекомендуется BEGIN IMMEDIATE для
+write-транзакций захвата, что берёт write-lock на primary до любых SELECT/UPDATE. См. §3.9 — ограничения
+масштабирования.
+worker/processor.ts — RETURNING + Promise.all + импорты
+// worker/processor.ts — верифицируемый атомарный захват через RETURNING
+import { db } from "../src/lib/db";
+import { randomUUID } from "node:crypto";
+import pLimit from "p-limit"; // импорт для concurrency control
+const WORKER_ID = process.env.WORKER_ID ?? randomUUID();
+const BATCH_SIZE = Number(process.env.WORKER_BATCH_SIZE ?? 10);
+async function pollAndClaim(): Promise {
+// SELECT кандидатов (можно из реплики)
+const candidates = await db.$queryRaw<{ id: string }[]>`
+SELECT id FROM TrafficJob
+WHERE status = 'pending' AND scheduledFor <= datetime('now')
+ORDER BY priority DESC, scheduledFor ASC
+LIMIT ${BATCH_SIZE}
+`;
+if (candidates.length === 0) return [];
+const ids = candidates.map((c) => c.id);
+// АТОМАРНЫЙ ЗАХВАТ с верификацией через RETURNING
+// Применяется к primary (write-traffic идёт на primary, не на реплику)
+const claimed = await db.$queryRaw<{ id: string }[]>`
+UPDATE TrafficJob
+SET status = 'running', lockedBy = ${WORKER_ID}, lockedAt = datetime('now')
+WHERE id IN (${ids.join(",")})
+AND status = 'pending'
+AND lockedBy IS NULL
+RETURNING id
+`;
+// Только реально захваченные этим Worker-ом id
+return claimed.map((c) => c.id);
+Z.ai · 24.08.2026 стр. 14
+=== Page 16 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+}
+async function main() {
+while (true) {
+try {
+const claimedIds = await pollAndClaim();
+if (claimedIds.length > 0) {
+// Обрабатываем только захваченные — p-limit(5) для concurrency
+// p-limit не имеет метода .map — используем Promise.all + limit()
+const limit = pLimit(5);
+await Promise.all(claimedIds.map((id) => limit(() => processJob(id))));
+} else {
+await sleep(Number(process.env.WORKER_POLL_INTERVAL_MS ?? 5000));
+}
+} catch (err) {
+logger.error("Worker poll failed", { workerId: WORKER_ID, error: String(err) });
+await sleep(5000);
+}
+}
+}
+Z.ai · 24.08.2026 стр. 15
+=== Page 17 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+3. Принципы работы
+3.1 Сбор GPS-данных (правки #5, #6)
+Данные поступают через POST /api/ingest. Поток обработки усилен двумя механизмами:
+идемпотентностью (clientId) и payload-лимитом (MAX_PAYLOAD_BYTES + p-limit). Полный
+конвейер:
+• Проверка Content-Length ≤ 256 КБ в middleware → HTTP 413 при превышении (до чтения body).
+• Zod-валидация пакета: lat ∈ [-90, 90], lon ∈ [-180, 180], speed ∈ [0, 83.33] м/с, ≤ 1000 точек, clientId —
+обязательный UUID/cuid.
+• Нормализация таймстемпов: nanosec → msec (деление на 1 000 000), фильтрация точек с gap > 30 с.
+• Идемпотентность: SELECT Session WHERE deviceId=? AND clientId=? — при существовании
+возвращается HTTP 200 + старый sessionId без повторной записи.
+• Сериализация DB-write через p-limit(1) — protects SQLite write lock; параллельные
+ingest-запросы выстраиваются в очередь вместо конкуренции за lock.
+• INSERT GpsPoint[] + INSERT TrafficJob(pending) в одной транзакции.
+• Ответ: HTTP 201 { sessionId, pointsAccepted, trafficJobId, duplicate: false } для нового пакета, или
+HTTP 200 { sessionId, duplicate: true } для повторной отправки.
+Валидация гарантирует: не более 1000 точек в пакете, deviceId длиной 1-64 символа, clientId — валидный
+UUID v4 или cuid. При невалидном запросе возвращается HTTP 400 с JSON: { error: "Validation
+failed", field: "lat", message: "Must be between -90 and 90" }. Размер body
+проверяется дважды: сначала по заголовку Content-Length в middleware (быстрый путь), затем по
+фактическому размеру после парсинга (защита от подделанного заголовка).
+3.2 Цепочка маршрутизации
+Трёхуровневая цепочка с автоматическим fallback. Первичный провайдер — 2ГИС (carrouting 6.0.0),
+возвращает детализированный маршрут с полилинией, сегментами и манёврами. При недоступности —
+OSRM через demo-сервер. Третий уровень — гаверсинус (40 км/ч). Перед вызовом API проверяется кэш
+(LRU + SQLite): ключ — hash(startLat, startLon, endLat, endLon snap-to-grid ~55 м + todBucket), при hit
+возвращается закэшированный результат без вызова API. При miss — вызов API, результат сохраняется в
+кэш (TTL: 5 мин для LRU, 24 ч для persistent). Fallback-события логируются и инкрементируют метрику
+routing_fallback_total.
+3.3 Исторические пробки (Traffic) — обработка в Worker
+После ingest API создаёт TrafficJob (status: pending) и сразу возвращает ответ клиенту. Дальнейшая
+обработка полностью происходит в Worker-процессе (см. §2.6): Worker опрашивает очередь,
+захватывает pending-задачи и выполняет traffic-fetch с controlled concurrency: p-limit(5)
+параллельных запросов к 2ГИС traffic-endpoint, с задержкой 200-500 мс между батчами.
+Promise.allSettled используется вместо Promise.all — при ошибке одного сегмента остальные
+продолжают. Retry-логика: 3 попытки с exponential backoff (1 с, 2 с, 4 с). Статус обновляется: pending →
+running → completed/failed. При failed — ошибка сохраняется в TrafficJob.error, attempts
+инкрементируется; при attempts ≥ 3 задача переходит в статус dead и требует ручного вмешательства.
+Z.ai · 24.08.2026 стр. 16
+=== Page 18 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+Результат обогащает сегменты плана полями: trafficFetched, trafficUtc, trafficSpeedKmh,
+trafficDurationSec, trafficSource.
+Почему Worker решает проблему event loop
+Worker-процесс изолирован от API-сервера: даже если его event loop полностью загружен fetch-ами, API-сервер
+продолжает принимать ingest с p95 < 50 мс. Разделение процессов = разделение event loop-ов.
+3.4 План-фактный анализ
+Центральная функция сервиса. План строится при создании сессии или по запросу. Система определяет
+стартовую точку (первая GPS-точка) и конечную (последняя или координаты из Route). Маршрут
+сегментируется по манёврам. Для каждого сегмента вычисляются плановые метрики: дистанция,
+ожидаемая длительность, ожидаемая скорость. Затем GPS-данные сопоставляются с сегментами (по
+географической близости к полилинии), и вычисляются фактические скорость и длительность. Результат
+— таблица отклонений (segmentDeviations) с полями: planSpeedKmh, actualSpeedKmh, speedDeviation,
+planDurationSec, actualDurationSec, durationDeviation, а также traffic-поля.
+3.5 Кэширование маршрутов
+Архитектура кэш-ключа маршрутизации
+Кэш-ключ строится на основе snap-to-grid координат и time-of-day bucket.
+Обоснование snap-to-grid
+Snap-to-grid (Math.round(v / GRID_SIZE) * GRID_SIZE) с GRID_SIZE=0.0005° даёт ячейку ~55 м (lat) × ~35 м (lon).
+Это превышает точность GPS-приёмника iPhone (5-10 м), делая ключ устойчивым к естественному GPS-шуму: две
+точки в пределах одной ячейки дают один ключ, две точки в разных ячейках (расстояние > 35 м) — разные ключи.
+Ожидаемый hit ratio — 70–85% (требует подтверждения в k6-тестах, см. §8.4).
+Кэш-ключ состоит из двух компонентов. Первый — snap-to-grid координат до сетки с шагом
+GRID_SIZE = 0.0005°. На широте Саратова (~51°): 1° широты ≈ 111 200 м (почти постоянно), 1°
+долготы ≈ 111 320 · cos(51°) ≈ 70 000 м. Следовательно GRID_SIZE = 0.0005° даёт ячейку ~55 м (по
+широте) × ~35 м (по долготе). Второй компонент — time-of-day bucket: час дня округляется вниз до
+кратного 3 (8 бакетов: 0, 3, 6, 9, 12, 15, 18, 21 UTC). Маршрут «дом → работа» в 08:00 и в 20:00 получает
+разные кэш-записи с разными traffic-данными.
+Двухуровневый кэш реализован в src/lib/cache.ts. Уровень 1: in-memory LRU (Map +
+doubly-linked list, макс. 100 записей, TTL 5 мин). Уровень 2: persistent в таблице RouteCache (hash, result,
+todBucket, routeId, expiresAt, TTL 24 ч). Паттерн cache-aside: сначала LRU, при miss — RouteCache, при
+miss — вызов API, результат пишется в оба уровня.
+src/lib/cache.ts — snap-to-grid, корректная геометрия lat/lon
+// src/lib/cache.ts — snap-to-grid вместо toFixed
+import { createHash } from "node:crypto";
+import type { Coord } from "./types";
+import { db } from "./db";
+Z.ai · 24.08.2026 стр. 17
+=== Page 19 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+// snap-to-grid вместо toFixed(precision).
+// Геометрия (на широте Саратова ~51°):
+// Для широты: 1° ≈ 111 200 м (почти постоянно на всех широтах).
+// GRID_SIZE=0.0005 → 111 200 * 0.0005 ≈ 55.6 м.
+// Для долготы: 1° ≈ 111 320 * cos(lat) м.
+// На широте 51°: 111 320 * cos(51°) ≈ 111 320 * 0.6293 ≈ 70 046 м.
+// GRID_SIZE=0.0005 → 70 046 * 0.0005 ≈ 35.0 м.
+// Итог: ячейка сетки ~55 м (lat) × ~35 м (lon).
+// Устойчивость к GPS-шуму (5-10 м): 2 точки в одной ячейке → один ключ.
+// Различение маршрутов: точки в разных ячейках (расстояние > 35 м) → разные ключи.
+const GRID_SIZE = 0.0005;
+// 8 трёхчасовых бакетов: пробки в час пик ≠ ночные
+const TOD_BUCKETS = [0, 3, 6, 9, 12, 15, 18, 21] as const;
+// Округление до центра ячейки сетки (snap-to-grid)
+function snap(v: number): number {
+return Math.round(v / GRID_SIZE) * GRID_SIZE;
+}
+export function buildCacheKey(start: Coord, end: Coord, ts: Date): string {
+const s = `${snap(start.lat)},${snap(start.lon)}`;
+const e = `${snap(end.lat)},${snap(end.lon)}`;
+// bucket = максимальный бакет, не превышающий текущий час
+const bucket = TOD_BUCKETS.filter((b) => b <= ts.getUTCHours()).pop() ?? 0;
+const raw = `${s}|${e}|${bucket}`;
+return createHash("sha256").update(raw).digest("hex");
+}
+// Инвалидация: по routeId (изменение избранного маршрута)
+export async function invalidateRoute(routeId: string): Promise {
+await db.routeCache.deleteMany({
+where: { routeId }, // поле routeId в RouteCache (см. §2.3)
+});
+}
+// TTL: LRU 5 мин, persistent 24 ч. При todBucket-переходе автоматически
+// становится miss (другой ключ) — ручная инвалидация по времени не нужна.
+Параметр Значение Обоснование
+Метод округления snap-to-grid (Math.round(v / GRID_SIZE) * Устойчив к GPS-шуму 5-10 м
+GRID_SIZE)
+GRID_SIZE 0.0005° ~55 м (lat) × ~35 м (lon) на широте
+Саратова
+Разрешение ключа ~55 м × ~35 м Ячейка > GPS-шум, различает
+маршруты между кварталами
+Hit ratio (ожидаемый) 70–85% (требует подтверждения в CI) Эмпирическая оценка, не подтверждена
+k6-тестами
+Time-of-day в ключе 8 бакетов по 3 ч (0,3,6,9,12,15,18,21 UTC) Пробки в час пик ≠ ночные
+TTL LRU 5 мин Быстрый кэш для горячих маршрутов
+TTL persistent 24 ч (партиционировано по todBucket) Нет устаревших пробок при смене
+времени суток
+Z.ai · 24.08.2026 стр. 18
+=== Page 20 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+Параметр Значение Обоснование
+routeId в RouteCache да (поле + @relation) Инвалидация по избранному маршруту
+Инвалидация по routeId да (deleteMany where routeId) При изменении/удалении избранного
+маршрута
+Инвалидация по времени авто (смена todBucket) Новый бакет = новый ключ = miss
+Таблица 5. Параметры кэширования маршрутов.
+3.6 Идемпотентность ingest
+Идемпотентность через clientId
+Sensor Logger при сетевом сбое ретранслирует пакет. Без идемпотентности повторная отправка создавала бы новую
+сессию с дублированными GPS-точками — данные портились, segmentDeviations считались по «фантомной»
+сессии.
+В IngestSchema определено поле clientId — UUID v4, генерируемый клиентом Sensor Logger на
+стороне устройства перед каждой отправкой. При повторной передаче (из-за сетевого таймаута, 5xx
+ответа, потери пакета) тот же clientId отправляется повторно. Сервер проверяет пару (deviceId, clientId)
+по UNIQUE-индексу:
+• Новый пакет: INSERT успешен → HTTP 201, pointsAccepted, trafficJobId, duplicate=false.
+• Повтор пакета: UNIQUE constraint violation → catch → SELECT существующего Session → HTTP
+200, duplicate=true, тот же sessionId. Не создаётся ни новой сессии, ни дублирующих точек, ни нового
+TrafficJob.
+• Конкуренция: если два одинаковых запроса приходят одновременно (split-brain сети),
+UNIQUE-индекс БД гарантированно пропускает только первый; второй получает constraint violation и
+fallback на SELECT.
+Для clients, не способных генерировать clientId (legacy Sensor Logger), поле объявлено опциональным
+(clientId?: string); в этом случае идемпотентность не гарантируется, и в лог пишется warn
+"ingest without clientId — idempotency disabled". После 100% обновления клиентов
+поле станет обязательным.
+Z.ai · 24.08.2026 стр. 19
+=== Page 21 ===
+ТЕЛЕМЕТРИЯ ПОЕЗДОК · АРХИТЕКТУРНЫЙ ДОКУМЕНТ V2.6 v2.6 · Production-ready (pending QA)
+3.7 Политика хранения данных — 10 лет
+Политика хранения 10 лет с ежедневным cron-очищением
+Без retention policy БД растёт без ограниченно: через 3-5 лет активного использования — сотни МБ, деградация
+индексов, медленная пагинация в GET /api/sessions. Формальная политика хранения 10 лет с ежедневным
+cron-очищением решает эту проблему.
+Введена политика хранения 10 лет. Значение по умолчанию RETENTION_DAYS = 3650 (10 × 365),

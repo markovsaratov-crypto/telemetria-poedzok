@@ -25,6 +25,8 @@ model Session {
   purgedAt     DateTime? // hard-delete (retention)
   routeId      String?
   trafficJobId String?   // ссылка на последний TrafficJob (denormalized, no FK)
+  notes        String?   // пользовательские заметки к сессии
+  tags         String?   // теги через запятую (user-defined)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 

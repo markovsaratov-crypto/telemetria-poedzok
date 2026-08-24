@@ -965,3 +965,71 @@ Stage Summary:
 - Dashboard теперь содержит: stat cards + capacity strip + last sessions + mini map + weekly chart + heatmap + device leaderboard + tags cloud.
 - SessionsList поддерживает bulk mode с массовым удалением (до 50 сессий за раз).
 - Пользователь может визуализировать теги как облако и фильтровать по ним.
+
+---
+Task ID: 15 (webDevReview cron run #9)
+Agent: orchestrator (main) — webDevReview
+Task: QA + session detailed stats endpoint + stats card.
+
+Work Log:
+- Прочитал worklog.md — система стабильна после Task 14.
+- Перезапустил dev server (Next :3000 + Worker :3001).
+- E2E: 6/6 endpoints PASS, включая новый SESS_STATS endpoint (dist=255m, dur=6s, maxSpeed=17).
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Lint: 0 ошибок, 0 warnings.
+
+New features (mandatory):
+1. GET /api/sessions/[id]/stats endpoint — детальная статистика по сессии:
+   • Расчёт distance (haversine между всеми точками)
+   • duration, movingTime, idleTime (speed > 1 m/s = moving)
+   • avgSpeed, maxSpeed (m/s)
+   • elevationGain, elevationLoss (сумма подъёмов/спусков)
+   • avgAltitude (средняя высота над уровнем моря)
+   • bbox (minLat, maxLat, minLon, maxLon) — bounding box трека
+   • Возвращает 10 метрик для детального анализа
+   • Cookie или Bearer API_KEY auth
+
+2. SessionStatsCard component (новый, 165 строк):
+   • 10 метрик в grid (2/3/5 колонок responsive):
+     - Дистанция (км + м)
+     - Длительность (общее время)
+     - В движении (минуты + % времени)
+     - Стоянки (минуты + % времени)
+     - Ср. скорость (км/ч + м/с)
+     - Макс. скорость (км/ч + м/с)
+     - Набор высоты (м, подъём)
+     - Снижение (м, спуск)
+     - Ср. высота (м над уровнем моря)
+     - BBox (площадь покрытия в км)
+   • Color-coded values (emerald/teal/amber/rose/zinc)
+   • Motion staggered animation (delay i*0.03)
+   • Skeleton loading с shimmer
+   • Empty state: скрыт если нет stats
+
+3. useSessionStats hook:
+   • React Query с staleTime 30с
+   • SessionStats type с 13 полями
+   • enabled: !!id
+
+Styling improvements (mandatory):
+- session-detail: SessionStatsCard добавлен после метрик (8 MetricCard)
+  • Полная статистика: 10 детальных метрик вместо 8 базовых
+  • Color-coded icons: emerald (distance/moving), teal (duration/speed), amber (idle/elevation loss), rose (max speed), zinc (altitude)
+  • Staggered animation появления метрик
+  • Responsive grid: 2 cols mobile → 3 cols tablet → 5 cols desktop
+
+Файлы созданы/изменены:
+- src/app/api/sessions/[id]/stats/route.ts (новый endpoint, 130 строк)
+- src/components/session-stats-card.tsx (новый, 165 строк)
+- src/lib/hooks.ts (+30 строк: useSessionStats hook + SessionStats type)
+- src/components/session-detail.tsx (+6 строк: SessionStatsCard import + render)
+
+Stage Summary:
+- Lint: 0 ошибок, 0 warnings.
+- E2E: 6/6 endpoints PASS (curl), включая SESS_STATS (dist=255m, dur=6s, maxSpeed=17).
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Worker: стабилен на :3001.
+- Новых багов не обнаружено.
+- 31 API endpoints (добавлен GET /api/sessions/[id]/stats).
+- Session detail теперь содержит: header + map + speed chart + elevation chart + speed histogram + session replay + metrics (8) + session stats card (10) + session notes + points table.
+- Пользователь видит детальную статистику: дистанция, длительность, время в движении/на стоянках, ср/макс скорость, набор/снижение высоты, bounding box.

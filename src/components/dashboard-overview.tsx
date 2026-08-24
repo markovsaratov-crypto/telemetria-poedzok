@@ -35,6 +35,7 @@ import { fmtDate, fmtBytes, fmtNumber, avgSpeed, trackDistance } from "@/lib/for
 import { ActivityHeatmap } from "./activity-heatmap";
 import { WeeklyStatsChart } from "./weekly-stats-chart";
 import { LastUpdated } from "./last-updated";
+import { DeviceLeaderboard } from "./device-leaderboard";
 
 const MapTrack = dynamic(() => import("@/components/map-track"), {
   ssr: false,
@@ -302,6 +303,9 @@ export function DashboardOverview({
           </CardContent>
         </Card>
       )}
+
+      {/* Device leaderboard */}
+      <DeviceLeaderboard />
     </div>
   );
 }

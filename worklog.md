@@ -657,3 +657,73 @@ Stage Summary:
 - Sessions tab теперь содержит: SessionCompare (сверху) + ResizablePanelGroup (список + детали).
 - Header содержит 5 элементов: CommandPalette, "?", HealthIndicator, ThemeToggle, Logout.
 - Все keyboard shortcuts документированы: ⌘K, ?, Alt+1..5, ↑↓, ↵, Esc.
+
+---
+Task ID: 11 (webDevReview cron run #5)
+Agent: orchestrator (main) — webDevReview
+Task: QA + device leaderboard + speed histogram.
+
+Work Log:
+- Прочитал worklog.md — система стабильна после Task 10.
+- Перезапустил dev server (Next :3000 + Worker :3001).
+- E2E: 6/6 endpoints PASS, включая новый DEVICES endpoint.
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Lint: 0 ошибок, 0 warnings.
+
+New features (mandatory):
+1. GET /api/stats/devices endpoint — топ устройств по активности:
+   • Группировка по deviceId с _count, _sum(pointCount), _sum(payloadBytes)
+   • Top 10, ordered by session count desc
+   • Для каждого устройства: lastActivity (время последней сессии), deviceName
+   • Cookie или Bearer API_KEY auth
+
+2. DeviceLeaderboard component (новый, 120 строк):
+   • Топ-10 устройств по количеству сессий
+   • Ранги с эмодзи: 🥇 🥈 🥉 для top-3
+   • Progress bar (gradient emerald→teal) показывающий долю от максимума
+   • Stats row: точек, объём данных, последняя активность
+   • Staggered animation появления
+   • Empty state: скрыт если нет устройств
+   • Skeleton loading с shimmer
+
+3. SpeedHistogram component (новый, 110 строк):
+   • Гистограмма распределения скоростей по 7 бакетам
+   • Бакеты: 0-10, 10-20, 20-30, 30-40, 40-60, 60-80, 80+ км/ч
+   • m/s → km/h конвертация
+   • Цвета per bucket (emerald→teal→green→amber→orange→red)
+   • Percentage labels на столбцах (>5%)
+   • Dominant bucket подсвечен (opacity 0.9 vs 0.6)
+   • Animated bar growth (staggered)
+   • SVG с preserveAspectRatio
+   • Header: total points + peak range
+
+4. useDeviceStats hook (src/lib/hooks.ts):
+   • React Query с staleTime 60с
+   • Возвращает DeviceStat[] с sessionCount, totalPoints, totalBytes, lastActivity
+
+Styling improvements (mandatory):
+- session-detail.tsx: добавлен SpeedHistogram после SpeedChart + ElevationChart
+  • 3 графика в session detail: SpeedChart (линейный), ElevationChart (профиль), SpeedHistogram (распределение)
+  • Полный анализ скорости сессии
+- dashboard-overview.tsx: добавлен DeviceLeaderboard внизу
+  • После weekly chart + heatmap
+  • Новый раздел "Лидеры устройств" с trophy иконкой
+
+Файлы созданы/изменены:
+- src/app/api/stats/devices/route.ts (новый endpoint, 45 строк)
+- src/components/device-leaderboard.tsx (новый, 120 строк)
+- src/components/speed-histogram.tsx (новый, 110 строк)
+- src/lib/hooks.ts (+15 строк: useDeviceStats hook + DeviceStat type)
+- src/components/session-detail.tsx (+10 строк: SpeedHistogram integration)
+- src/components/dashboard-overview.tsx (+3 строки: DeviceLeaderboard import + render)
+
+Stage Summary:
+- Lint: 0 ошибок, 0 warnings.
+- E2E: 6/6 endpoints PASS (curl), включая новый DEVICES (4 devices).
+- Page render: 30.9KB HTML, без ошибок компиляции.
+- Worker: стабилен на :3001.
+- Новых багов не обнаружено.
+- Dashboard теперь содержит: stat cards (4) + capacity strip + last sessions + mini map + weekly chart + heatmap + device leaderboard.
+- Session detail теперь содержит: header + map + speed chart + elevation chart + speed histogram + metrics (8) + points table.
+- 3 новых визуализации: device leaderboard с progress bars, speed histogram с 7 бакетами, device stats endpoint.
+- 26 API endpoints всего (добавлен /api/stats/devices).

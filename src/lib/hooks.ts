@@ -77,6 +77,24 @@ export function useStats() {
   });
 }
 
+// ===== Device leaderboard =====
+export interface DeviceStat {
+  deviceId: string;
+  deviceName: string | null;
+  sessionCount: number;
+  totalPoints: number;
+  totalBytes: number;
+  lastActivity: string | null;
+}
+
+export function useDeviceStats() {
+  return useQuery({
+    queryKey: ["device-stats"],
+    queryFn: () => api.get<{ devices: DeviceStat[] }>("/api/stats/devices"),
+    staleTime: 60_000,
+  });
+}
+
 // ===== Sessions list =====
 export interface SessionsQuery {
   limit?: number;

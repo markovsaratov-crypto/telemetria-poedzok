@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { ExportDialog } from "@/components/export-dialog";
 import { SpeedChart, ElevationChart } from "@/components/speed-chart";
+import { SpeedHistogram } from "@/components/speed-histogram";
 import { fmtDate, fmtDuration, fmtBytes, fmtNumber, avgSpeed, trackDistance } from "@/lib/format";
 
 const MapTrack = dynamic(() => import("@/components/map-track"), {
@@ -207,18 +208,28 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
 
       {/* Графики скорости и высоты */}
       {points.length > 1 && (
-        <div className="px-4 pb-4 grid grid-cols-1 lg:grid-cols-2 gap-3">
-          <Card>
-            <CardContent className="p-3">
-              <SpeedChart points={points} height={120} />
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="p-3">
-              <ElevationChart points={points} height={120} />
-            </CardContent>
-          </Card>
-        </div>
+        <>
+          <div className="px-4 pb-4 grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <Card>
+              <CardContent className="p-3">
+                <SpeedChart points={points} height={120} />
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="p-3">
+                <ElevationChart points={points} height={120} />
+              </CardContent>
+            </Card>
+          </div>
+          {/* Speed histogram */}
+          <div className="px-4 pb-4">
+            <Card>
+              <CardContent className="p-3">
+                <SpeedHistogram points={points} height={100} />
+              </CardContent>
+            </Card>
+          </div>
+        </>
       )}
 
       {/* Метрики */}

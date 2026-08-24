@@ -1,8 +1,5 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// Telemetria поездок — Prisma schema v2.6 (§2.3)
+// SQLite (sandbox) / Turso LibSQL (prod). Prisma @relation с onDelete.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,20 +10,162 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// GPS-сессия поездки. Идемпотентность через @@unique([deviceId, clientId]).
+model Session {
+  id           String    @id @default(cuid())
+  deviceId     String
+  clientId     String?   // UUID пакета для идемпотентности
+  deviceName   String?
+  startTime    DateTime
+  endTime      DateTime?
+  pointCount   Int       @default(0)
+  payloadBytes Int       @default(0)
+  status       String    @default("active") // active | completed | archived | deleted
+  deletedAt    DateTime? // soft-delete (grace period 30 дней)
+  purgedAt     DateTime? // hard-delete (retention)
+  routeId      String?
+  trafficJobId String?   // ссылка на последний TrafficJob (denormalized, no FK)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  route       Route?       @relation(fields: [routeId], references: [id], onDelete: SetNull)
+  gpsPoints   GpsPoint[]
+  trafficJobs TrafficJob[]
+  auditLogs   AuditLog[]
+  exportJobs  ExportJob[]
+
+  @@unique([deviceId, clientId])
+  @@index([status, endTime])
+  @@index([routeId])
+  @@index([deletedAt])
+  @@index([startTime])
 }
 
-model Post {
+// GPS-точка. BigInt timestamp (нс → мс нормализация в ingest).
+model GpsPoint {
+  id        String  @id @default(cuid())
+  sessionId String
+  lat       Float
+  lon       Float
+  speed     Float?
+  altitude  Float?
+  accuracy  Float?
+  timestamp BigInt // мс (нормализованные)
+  bearing   Float?
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([sessionId, timestamp])
+}
+
+// Избранный маршрут (для повторных поездок).
+model Route {
+  id          String  @id @default(cuid())
+  name        String
+  description String?
+  startLat    Float
+  startLon    Float
+  endLat      Float
+  endLon      Float
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  sessions    Session[]
+  routeCaches RouteCache[]
+}
+
+// Snap-to-grid кэш маршрутизации (~55 м + ToD bucket).
+model RouteCache {
   id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
+  hash      String   @unique // hash(snap-to-grid start,end + tod_bucket)
+  result    String   // JSON-результат маршрутизации
+  todBucket Int      // 0,3,6,9,12,15,18,21 (час)
+  routeId   String?
+  expiresAt DateTime
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+
+  route Route? @relation(fields: [routeId], references: [id], onDelete: Cascade)
+
+  @@index([todBucket, expiresAt])
+  @@index([routeId])
+}
+
+// Асинхронная задача получения пробок (Worker).
+model TrafficJob {
+  id           String    @id @default(cuid())
+  sessionId    String
+  status       String    @default("pending") // pending | running | completed | failed | dead
+  attempts     Int       @default(0)
+  priority     Int       @default(0)
+  scheduledFor DateTime  @default(now())
+  lockedBy     String?   // WORKER_ID
+  lockedAt     DateTime?
+  result       String?   // JSON: trafficFetched, segments[]
+  error        String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([status, scheduledFor, priority])
+  @@index([sessionId])
+}
+
+// Журнал аудита destructive-операций (§6.8).
+model AuditLog {
+  id         String   @id @default(cuid())
+  action     String   // session.delete | session.purge | session.export | route.delete | backup.*
+  targetId   String
+  targetType String   // Session | Route | BackupJob
+  actorType  String   // user | system | retention-cron | worker | backup-cron
+  actorId    String?
+  metadata   String?  // JSON
+  sessionId  String?
+  createdAt  DateTime @default(now())
+
+  session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  @@index([action, createdAt])
+  @@index([targetId, targetType])
+  @@index([actorType, actorId])
+  @@index([sessionId])
+}
+
+// Асинхронный экспорт (GPX/KML/JSON).
+model ExportJob {
+  id          String    @id @default(cuid())
+  sessionId   String
+  format      String    // gpx | kml | json
+  status      String    @default("pending") // pending | running | completed | failed
+  fileUrl     String?
+  fileSize    Int?
+  expiresAt   DateTime?
+  attempts    Int       @default(0)
+  lockedBy    String?
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+  error       String?
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([sessionId])
+}
+
+// BackupJob (логический дамп БД).
+model BackupJob {
+  id           String    @id @default(cuid())
+  status       String    @default("pending") // pending | running | completed | failed
+  type         String    @default("full") // full | incremental
+  filePath     String?
+  fileSize     Int?
+  checksum     String?
+  attempts     Int       @default(0)
+  lockedBy     String?
+  createdAt    DateTime  @default(now())
+  completedAt  DateTime?
+  error        String?
+
+  @@index([status, createdAt])
 }

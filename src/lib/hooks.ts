@@ -145,6 +145,36 @@ export function useSession(id: string | null) {
   });
 }
 
+// ===== Session detailed stats =====
+export interface SessionStats {
+  sessionId: string;
+  pointCount: number;
+  distance: number;
+  duration: number;
+  movingTime: number;
+  idleTime: number;
+  avgSpeed: number | null;
+  maxSpeed: number | null;
+  avgAltitude: number | null;
+  elevationGain: number;
+  elevationLoss: number;
+  bbox: { minLat: number; maxLat: number; minLon: number; maxLon: number };
+  startTime: string;
+  endTime: string | null;
+}
+
+export function useSessionStats(id: string | null) {
+  return useQuery({
+    queryKey: ["session-stats", id],
+    queryFn: () => {
+      if (!id) return null;
+      return api.get<SessionStats>(`/api/sessions/${id}/stats`);
+    },
+    enabled: !!id,
+    staleTime: 30_000,
+  });
+}
+
 // ===== Batch sessions (for compare) =====
 export interface BatchSession {
   id: string;

@@ -44,6 +44,7 @@ import { SpeedChart, ElevationChart } from "@/components/speed-chart";
 import { SpeedHistogram } from "@/components/speed-histogram";
 import { SessionNotes } from "@/components/session-notes";
 import { SessionReplay } from "@/components/session-replay";
+import { SessionStatsCard } from "@/components/session-stats-card";
 import { fmtDate, fmtDuration, fmtBytes, fmtNumber, avgSpeed, trackDistance } from "@/lib/format";
 
 const MapTrack = dynamic(() => import("@/components/map-track"), {
@@ -290,6 +291,11 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
           label="Маршрут"
           value={session.route?.name || "—"}
         />
+      </div>
+
+      {/* Детальная статистика */}
+      <div className="px-4 pb-4">
+        <SessionStatsCard sessionId={session.id} />
       </div>
 
       {/* Заметки и теги */}

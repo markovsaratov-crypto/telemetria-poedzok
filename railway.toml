@@ -1,9 +1,9 @@
 [deploy]
-startCommand = "bun run start"
+startCommand = "node .next/standalone/server.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 
 [build]
-buildCommand = "DATABASE_URL=file:./db/build.db bun run db:generate && DATABASE_URL=file:./db/build.db bun run build"
+buildCommand = "npm install && npx next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/"

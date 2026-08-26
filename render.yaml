@@ -1,11 +1,11 @@
-# Render configuration for Telemetria поездок v2.6
+# Render Blueprint for Telemetria поездок v2.6
 services:
   - type: web
     name: telemetria-poedzok
     runtime: node
     plan: free
     region: frankfurt
-    buildCommand: npm install --legacy-peer-deps && npx next build
+    buildCommand: npm install --legacy-peer-deps && npx prisma generate && npx next build
     startCommand: node .next/standalone/server.js
     healthCheckPath: /health
     autoDeploy: true

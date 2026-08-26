@@ -1,19 +1,17 @@
-// GET /api/debug — диагностика DB соединения (временный endpoint)
+// GET /api/debug — диагностика DB соединения
 import { NextRequest } from "next/server";
 import { createClient } from "@libsql/client";
 
 export async function GET(request: NextRequest) {
   const result: Record<string, unknown> = {};
 
-  // 1. Check env vars
-  result.databaseUrl = process.env.DATABASE_URL?.slice(0, 30) + "..." || "NOT SET";
+  result.databaseUrl = process.env.DATABASE_URL?.slice(0, 50) || "NOT SET";
+  result.tursoDatabaseUrl = process.env.TURSO_DATABASE_URL?.slice(0, 50) || "NOT SET";
   result.tursoToken = process.env.TURSO_AUTH_TOKEN?.slice(0, 20) + "..." || "NOT SET";
-  result.nodeEnv = process.env.NODE_ENV;
-  result.port = process.env.PORT;
 
-  // 2. Test direct libsql connection
+  // Test libsql with TURSO_DATABASE_URL
   try {
-    const url = process.env.DATABASE_URL || "";
+    const url = process.env.TURSO_DATABASE_URL || process.env.DATABASE_URL || "";
     const authToken = process.env.TURSO_AUTH_TOKEN;
     const client = createClient({ url, authToken });
     const res = await client.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 5");
@@ -24,7 +22,7 @@ export async function GET(request: NextRequest) {
     result.libsqlError = e instanceof Error ? e.message : String(e);
   }
 
-  // 3. Test Prisma connection
+  // Test Prisma
   try {
     const { db } = await import("@/lib/db");
     const count = await db.session.count();
@@ -32,8 +30,7 @@ export async function GET(request: NextRequest) {
     result.prismaStatus = "OK";
   } catch (e) {
     result.prismaStatus = "ERROR";
-    result.prismaError = e instanceof Error ? e.message : String(e);
-    result.prismaStack = e instanceof Error ? e.stack?.slice(0, 500) : undefined;
+    result.prismaError = e instanceof Error ? e.message.slice(0, 200) : String(e);
   }
 
   return Response.json(result, { status: 200 });

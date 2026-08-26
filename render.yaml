@@ -5,7 +5,7 @@ services:
     runtime: node
     plan: free
     region: frankfurt
-    buildCommand: npm install --legacy-peer-deps && npx prisma generate && npx next build
+    buildCommand: npm install --legacy-peer-deps && DATABASE_URL="file:./db/local.db" npx prisma generate && DATABASE_URL="file:./db/local.db" npx next build
     startCommand: node .next/standalone/server.js
     healthCheckPath: /health
     autoDeploy: true

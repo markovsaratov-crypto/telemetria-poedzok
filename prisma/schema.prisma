@@ -1,6 +1,4 @@
-// Telemetria поездок — Prisma schema v2.6 (§2.3)
-// SQLite (sandbox) / Turso LibSQL (prod). Prisma @relation с onDelete.
-
+// Telemetria поездок — Prisma schema v2.6
 generator client {
   provider        = "prisma-client-js"
   previewFeatures = ["driverAdapters"]
@@ -8,26 +6,25 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
+  url      = "file:./db/local.db"
 }
 
-// GPS-сессия поездки. Идемпотентность через @@unique([deviceId, clientId]).
 model Session {
   id           String    @id @default(cuid())
   deviceId     String
-  clientId     String?   // UUID пакета для идемпотентности
+  clientId     String?
   deviceName   String?
   startTime    DateTime
   endTime      DateTime?
   pointCount   Int       @default(0)
   payloadBytes Int       @default(0)
-  status       String    @default("active") // active | completed | archived | deleted
-  deletedAt    DateTime? // soft-delete (grace period 30 дней)
-  purgedAt     DateTime? // hard-delete (retention)
+  status       String    @default("active")
+  deletedAt    DateTime?
+  purgedAt     DateTime?
   routeId      String?
-  trafficJobId String?   // ссылка на последний TrafficJob (denormalized, no FK)
-  notes        String?   // пользовательские заметки к сессии
-  tags         String?   // теги через запятую (user-defined)
+  trafficJobId String?
+  notes        String?
+  tags         String?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
@@ -44,7 +41,6 @@ model Session {
   @@index([startTime])
 }
 
-// GPS-точка. BigInt timestamp (нс → мс нормализация в ingest).
 model GpsPoint {
   id        String  @id @default(cuid())
   sessionId String
@@ -53,7 +49,7 @@ model GpsPoint {
   speed     Float?
   altitude  Float?
   accuracy  Float?
-  timestamp BigInt // мс (нормализованные)
+  timestamp BigInt
   bearing   Float?
 
   session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
@@ -62,9 +58,8 @@ model GpsPoint {
   @@index([sessionId, timestamp])
 }
 
-// Избранный маршрут (для повторных поездок).
 model Route {
-  id          String  @id @default(cuid())
+  id          String   @id @default(cuid())
   name        String
   description String?
   startLat    Float
@@ -78,12 +73,11 @@ model Route {
   routeCaches RouteCache[]
 }
 
-// Snap-to-grid кэш маршрутизации (~55 м + ToD bucket).
 model RouteCache {
   id        String   @id @default(cuid())
-  hash      String   @unique // hash(snap-to-grid start,end + tod_bucket)
-  result    String   // JSON-результат маршрутизации
-  todBucket Int      // 0,3,6,9,12,15,18,21 (час)
+  hash      String   @unique
+  result    String
+  todBucket Int
   routeId   String?
   expiresAt DateTime
   createdAt DateTime @default(now())
@@ -94,17 +88,16 @@ model RouteCache {
   @@index([routeId])
 }
 
-// Асинхронная задача получения пробок (Worker).
 model TrafficJob {
   id           String    @id @default(cuid())
   sessionId    String
-  status       String    @default("pending") // pending | running | completed | failed | dead
+  status       String    @default("pending")
   attempts     Int       @default(0)
   priority     Int       @default(0)
   scheduledFor DateTime  @default(now())
-  lockedBy     String?   // WORKER_ID
+  lockedBy     String?
   lockedAt     DateTime?
-  result       String?   // JSON: trafficFetched, segments[]
+  result       String?
   error        String?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
@@ -115,15 +108,14 @@ model TrafficJob {
   @@index([sessionId])
 }
 
-// Журнал аудита destructive-операций (§6.8).
 model AuditLog {
   id         String   @id @default(cuid())
-  action     String   // session.delete | session.purge | session.export | route.delete | backup.*
+  action     String
   targetId   String
-  targetType String   // Session | Route | BackupJob
-  actorType  String   // user | system | retention-cron | worker | backup-cron
+  targetType String
+  actorType  String
   actorId    String?
-  metadata   String?  // JSON
+  metadata   String?
   sessionId  String?
   createdAt  DateTime @default(now())
 
@@ -135,12 +127,11 @@ model AuditLog {
   @@index([sessionId])
 }
 
-// Асинхронный экспорт (GPX/KML/JSON).
 model ExportJob {
   id          String    @id @default(cuid())
   sessionId   String
-  format      String    // gpx | kml | json
-  status      String    @default("pending") // pending | running | completed | failed
+  format      String
+  status      String    @default("pending")
   fileUrl     String?
   fileSize    Int?
   expiresAt   DateTime?
@@ -156,11 +147,10 @@ model ExportJob {
   @@index([sessionId])
 }
 
-// BackupJob (логический дамп БД).
 model BackupJob {
   id           String    @id @default(cuid())
-  status       String    @default("pending") // pending | running | completed | failed
-  type         String    @default("full") // full | incremental
+  status       String    @default("pending")
+  type         String    @default("full")
   filePath     String?
   fileSize     Int?
   checksum     String?

@@ -1,11 +1,10 @@
-# Render Blueprint for Telemetria поездок v2.6
 services:
   - type: web
     name: telemetria-poedzok
     runtime: node
     plan: free
     region: frankfurt
-    buildCommand: npm install --legacy-peer-deps && DATABASE_URL="file:./db/local.db" npx prisma generate && DATABASE_URL="file:./db/local.db" npx next build
+    buildCommand: npm install --legacy-peer-deps && DATABASE_URL="file:./db/local.db" npm run build
     startCommand: node .next/standalone/server.js
     healthCheckPath: /health
     autoDeploy: true

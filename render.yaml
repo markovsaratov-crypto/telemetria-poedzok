@@ -1,5 +1,4 @@
 # Render configuration for Telemetria поездок v2.6
-# Production-grade deployment with proper build pipeline
 services:
   - type: web
     name: telemetria-poedzok
@@ -13,22 +12,24 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: "3000"
       - key: DATABASE_URL
-        sync: false
+        value: libsql://tele-markovsaratov-crypto.aws-ap-south-1.turso.io
       - key: TURSO_AUTH_TOKEN
-        sync: false
+        value: eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODc1ODE5MzUsImlkIjoiMDE5ZmVmODItZmIwMS03MjEzLWIzMzgtNjU0MTE2ZTZmNDM4Iiwia2lkIjoiUUpzM0tVWjlUb0l0d29oLXBLYTQ2eWJGYmpNYzhla2ZrbG4taFVfcVBDZyIsInJpZCI6IjdiZDJjNjBjLWY0MjUtNDVmNS05YTg1LTRkZjk1MmFmZTFhYSJ9.oi6p7mschIUm-Kz-B53yBsKcxthJUqxUyTyRbYg7KQ5Z49QgLHB9pthJAfVgYhuYdX1bUe9VIaV5v7_jlq63Ag
       - key: LOGIN_PASSWORD
-        sync: false
+        value: 11IS4M4f4EUh0MBgfc3UQDkYibMvtkF4wShzAp3E
       - key: SESSION_SECRET
-        sync: false
+        value: ca94627b90fa31c7c6faecf715b09d62809b11ce10e79d78
       - key: API_KEY
-        sync: false
+        value: 037d2343956dd5dd598fa6ef7569bbc15a216e6415136219
       - key: INGEST_TOKEN
-        sync: false
+        value: f759fb81cd36c41e5e269f92f521a304231be7df28ba4ca4
       - key: CRON_SECRET
-        sync: false
+        value: a33220e583b2b17053eff681f91c872919bf9728bfb7593a
       - key: ADMIN_TOKEN
-        sync: false
+        value: 860c36775e469d1f26155412986f85616685d8ec81ac2827
       - key: RATE_LIMIT_MAX_INGEST
         value: "120"
       - key: RATE_LIMIT_MAX_DEFAULT
@@ -67,5 +68,3 @@ services:
         value: "100"
       - key: APP_VERSION
         value: "2.6.0"
-      - key: PORT
-        value: "3000"

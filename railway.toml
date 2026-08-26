@@ -1,9 +1,5 @@
 [deploy]
-startCommand = "node .next/standalone/server.js"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-
-[build]
-buildCommand = "npm install && npx next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/"

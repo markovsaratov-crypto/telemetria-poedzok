@@ -6,10 +6,6 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
-  productionBrowserSourceMaps: false,
-  experimental: {
-    optimizePackageImports: ["lucide-react", "@radix-ui/react-dialog"],
-  },
 };
 
 export default nextConfig;

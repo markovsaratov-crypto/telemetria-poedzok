@@ -2,12 +2,13 @@
 // SQLite (sandbox) / Turso LibSQL (prod). Prisma @relation с onDelete.
 
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
 }
 
 datasource db {
   provider = "sqlite"
-  url      = "file:./db/local.db"
+  url      = "file:/tmp/local.db"
 }
 
 // GPS-сессия поездки. Идемпотентность через @@unique([deviceId, clientId]).

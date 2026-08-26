@@ -8,14 +8,18 @@ import { getRateLimiterStats } from "@/lib/rate-limit";
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   let dbStatus: "ok" | "degraded" = "ok";
+  let dbError = "";
   try {
-    await db.$queryRaw`SELECT 1`;
-  } catch {
+    // Use model count instead of $queryRaw (libsql adapter compatibility)
+    await db.session.count({ where: { deletedAt: null }, take: 1 });
+  } catch (e) {
     dbStatus = "degraded";
+    dbError = e instanceof Error ? e.message.slice(0, 100) : String(e).slice(0, 100);
   }
   const body = JSON.stringify({
     status: dbStatus === "ok" ? "ok" : "degraded",
     db: dbStatus,
+    dbError: dbError || undefined,
     worker: "ok",
     circuits: circuitStatus(),
     rateLimiter: getRateLimiterStats(),

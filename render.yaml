@@ -1,5 +1,4 @@
 # Render configuration for Telemetria поездок v2.6
-# Production-grade deployment with proper build pipeline
 services:
   - type: web
     name: telemetria-poedzok
@@ -13,22 +12,24 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: "3000"
       - key: DATABASE_URL
-        sync: false
+        value: libsql://tele-markovsaratov-crypto.aws-ap-south-1.turso.io
       - key: TURSO_AUTH_TOKEN
-        sync: false
+        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
       - key: LOGIN_PASSWORD
-        sync: false
+        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
       - key: SESSION_SECRET
-        sync: false
+        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
       - key: API_KEY
-        sync: false
+        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
       - key: INGEST_TOKEN
-        sync: false
+        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
       - key: CRON_SECRET
-        sync: false
+        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
       - key: ADMIN_TOKEN
-        sync: false
+        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
       - key: RATE_LIMIT_MAX_INGEST
         value: "120"
       - key: RATE_LIMIT_MAX_DEFAULT
@@ -67,5 +68,3 @@ services:
         value: "100"
       - key: APP_VERSION
         value: "2.6.0"
-      - key: PORT
-        value: "3000"

@@ -1,0 +1,71 @@
+# Render configuration for Telemetria поездок v2.6
+# Production-grade deployment with proper build pipeline
+services:
+  - type: web
+    name: telemetria-poedzok
+    runtime: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install --legacy-peer-deps && npx next build
+    startCommand: node .next/standalone/server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: LOGIN_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: API_KEY
+        sync: false
+      - key: INGEST_TOKEN
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: RATE_LIMIT_MAX_INGEST
+        value: "120"
+      - key: RATE_LIMIT_MAX_DEFAULT
+        value: "60"
+      - key: RATE_LIMIT_MAX_AUTH
+        value: "5"
+      - key: RATE_LIMIT_BACKEND
+        value: memory
+      - key: MAX_PAYLOAD_BYTES
+        value: "262144"
+      - key: WORKER_ID
+        value: worker-render-01
+      - key: WORKER_BATCH_SIZE
+        value: "10"
+      - key: WORKER_MAX_CONCURRENCY
+        value: "5"
+      - key: OSRM_BASE_URL
+        value: https://router.project-osrm.org
+      - key: CIRCUIT_BREAKER_THRESHOLD
+        value: "5"
+      - key: CIRCUIT_BREAKER_TIMEOUT_SEC
+        value: "30"
+      - key: RETENTION_DAYS
+        value: "3650"
+      - key: GRACE_PERIOD_DAYS
+        value: "30"
+      - key: AUDIT_RETENTION_DAYS
+        value: "3650"
+      - key: EXPORT_ASYNC_THRESHOLD
+        value: "5000"
+      - key: EXPORT_STORAGE_DIR
+        value: /tmp/exports
+      - key: BACKUP_STORAGE_DIR
+        value: /tmp/backups
+      - key: TARGET_LOAD_RPM
+        value: "100"
+      - key: APP_VERSION
+        value: "2.6.0"
+      - key: PORT
+        value: "3000"

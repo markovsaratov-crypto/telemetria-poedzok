@@ -3,5 +3,20 @@
   "framework": "nextjs",
   "buildCommand": "bun run build",
   "devCommand": "bun run dev",
-  "installCommand": "bun install"
+  "installCommand": "bun install",
+  "functions": {
+    "src/app/api/worker/poll/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/worker/complete/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/sessions/[id]/export/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/admin/backup/route.ts": {
+      "maxDuration": 60
+    }
+  },
+  "regions": ["fra1"]
 }

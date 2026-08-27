@@ -173,10 +173,12 @@ export async function POST(request: NextRequest) {
     }
     points.sort((a, b) => a.timestampMs - b.timestampMs);
 
-    // 5. Корреляция сессий: ищем активную recording-сессию для этого deviceId
+    // 5. Корреляция сессий: ищем активную recording-сессию для этого deviceId.
+    // Gap-проверка по updatedAt (реальное время последнего батча), НЕ по endTime
+    // (endTime — это время последней точки из данных, может быть в прошлом при replay/тестах).
     const now = Date.now();
     const recent = await libsql.execute({
-      sql: `SELECT id, endTime FROM Session
+      sql: `SELECT id, updatedAt FROM Session
             WHERE deviceId = ? AND status = 'recording' AND deletedAt IS NULL
             ORDER BY updatedAt DESC LIMIT 1`,
       args: [deviceId],
@@ -187,8 +189,8 @@ export async function POST(request: NextRequest) {
 
     if (recent.rows.length > 0) {
       const row = recent.rows[0] as Record<string, unknown>;
-      const lastEndTime = new Date(row.endTime as string).getTime();
-      if (now - lastEndTime < SESSION_GAP_MS) {
+      const lastUpdatedAt = new Date(row.updatedAt as string).getTime();
+      if (now - lastUpdatedAt < SESSION_GAP_MS) {
         // Продолжаем ту же сессию
         sessionId = row.id as string;
       } else {

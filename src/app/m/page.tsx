@@ -18,7 +18,7 @@ const SessionDetailScreen = dynamic(
 
 export default function MobilePage() {
   const auth = useAuth();
-  const [tab, setTab] = React.useState<MobileTab>("trips");
+  const [tab, setTab] = React.useState<MobileTab>("analytics");
   const [selectedSession, setSelectedSession] = React.useState<string | null>(null);
 
   const isAuthenticated = auth.data?.authenticated === true;

@@ -88,7 +88,8 @@ export const db = {
       return session;
     },
     async create(args: { data: Record<string, unknown> }) {
-      const data = { id: randomUUID(), ...args.data };
+      const now = new Date().toISOString();
+      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...args.data };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -138,7 +139,8 @@ export const db = {
   },
   trafficJob: {
     async create(args: { data: Record<string, unknown> }) {
-      const data = { id: randomUUID(), ...args.data };
+      const now = new Date().toISOString();
+      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...args.data };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -186,7 +188,8 @@ export const db = {
   },
   auditLog: {
     async create(args: { data: Record<string, unknown> }) {
-      const data = { id: randomUUID(), ...args.data };
+      const now = new Date().toISOString();
+      const data = { id: randomUUID(), createdAt: now, ...args.data };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -226,7 +229,8 @@ export const db = {
       return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
     },
     async create(args: { data: Record<string, unknown> }) {
-      const data = { id: randomUUID(), ...args.data };
+      const now = new Date().toISOString();
+      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...args.data };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -277,7 +281,8 @@ export const db = {
       return job;
     },
     async create(args: { data: Record<string, unknown> }) {
-      const data = { id: randomUUID(), ...args.data };
+      const now = new Date().toISOString();
+      const data = { id: randomUUID(), createdAt: now, ...args.data };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -287,7 +292,8 @@ export const db = {
   },
   backupJob: {
     async create(args: { data: Record<string, unknown> }) {
-      const data = { id: randomUUID(), ...args.data };
+      const now = new Date().toISOString();
+      const data = { id: randomUUID(), createdAt: now, ...args.data };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");

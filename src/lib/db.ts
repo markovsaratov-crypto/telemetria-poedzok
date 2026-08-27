@@ -309,3 +309,117 @@ export const db = {
     return fn(db);
   },
 };
+
+// Additional methods needed by API routes
+
+// gpsPoint.count
+(db as any).gpsPoint.count = async (args?: { where?: Record<string, unknown> }) => {
+  let sql = "SELECT COUNT(*) as count FROM GpsPoint";
+  const params: unknown[] = [];
+  if (args?.where?.sessionId) { sql += " WHERE sessionId = ?"; params.push(args.where.sessionId); }
+  const result = await libsql.execute({ sql, args: params });
+  return Number((result.rows[0] as Record<string, unknown>).count);
+};
+
+// session.aggregate
+(db as any).session.aggregate = async (args: { _sum?: Record<string, boolean>; _count?: Record<string, boolean>; where?: Record<string, unknown> }) => {
+  let sql = "SELECT";
+  const params: unknown[] = [];
+  const parts: string[] = [];
+  if (args._sum?.payloadBytes) parts.push("SUM(payloadBytes) as _sum_payloadBytes");
+  if (args._sum?.pointCount) parts.push("SUM(pointCount) as _sum_pointCount");
+  if (args._count?.id) parts.push("COUNT(*) as _count_id");
+  sql += " " + parts.join(", ") + " FROM Session WHERE deletedAt IS NULL";
+  if (args.where?.status) { sql += " AND status = ?"; params.push(args.where.status); }
+  const result = await libsql.execute({ sql, args: params });
+  const row = result.rows[0] as Record<string, unknown>;
+  return {
+    _sum: {
+      payloadBytes: row._sum_payloadBytes ? Number(row._sum_payloadBytes) : null,
+      pointCount: row._sum_pointCount ? Number(row._sum_pointCount) : null,
+    },
+    _count: { id: row._count_id ? Number(row._count_id) : 0 },
+  };
+};
+
+// trafficJob.findUnique
+(db as any).trafficJob.findUnique = async (args: { where: { id: string } }) => {
+  const result = await libsql.execute({ sql: "SELECT * FROM TrafficJob WHERE id = ?", args: [args.where.id] });
+  return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
+};
+
+// backupJob.findUnique
+(db as any).backupJob.findUnique = async (args: { where: { id: string } }) => {
+  const result = await libsql.execute({ sql: "SELECT * FROM BackupJob WHERE id = ?", args: [args.where.id] });
+  return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
+};
+
+// session.findMany with more where options (gte, lt, etc.)
+const originalFindMany = (db as any).session.findMany;
+(db as any).session.findMany = async (args?: {
+  where?: Record<string, unknown>;
+  orderBy?: Record<string, string>;
+  take?: number;
+  cursor?: { id: string };
+  skip?: number;
+  select?: Record<string, boolean>;
+  include?: Record<string, unknown>;
+}) => {
+  const take = args?.take ?? 20;
+  const skip = args?.skip ?? (args?.cursor ? 1 : 0);
+  let sql = "SELECT * FROM Session WHERE deletedAt IS NULL";
+  const params: unknown[] = [];
+  const w = args?.where || {};
+  
+  // Handle deviceId contains
+  if (w.deviceId?.contains) { sql += " AND deviceId LIKE ?"; params.push(`%${w.deviceId.contains}%`); }
+  else if (w.deviceId) { sql += " AND deviceId LIKE ?"; params.push(`%${w.deviceId}%`); }
+  // Handle status
+  if (w.status) { sql += " AND status = ?"; params.push(w.status); }
+  // Handle routeId
+  if (w.routeId) { sql += " AND routeId = ?"; params.push(w.routeId); }
+  // Handle startTime gte
+  if (w.startTime?.gte) { sql += " AND startTime >= ?"; params.push(w.startTime.gte); }
+  if (w.startTime?.lt) { sql += " AND startTime < ?"; params.push(w.startTime.lt); }
+  // Handle endTime
+  if (w.endTime?.lt) { sql += " AND endTime < ?"; params.push(w.endTime.lt); }
+  if (w.endTime?.gt) { sql += " AND endTime > ?"; params.push(w.endTime.gt); }
+  // Handle deletedAt
+  if (w.deletedAt === null) { /* already in WHERE */ }
+  else if (w.deletedAt?.not === null) { sql += " AND deletedAt IS NOT NULL"; }
+  // Handle cursor
+  if (args?.cursor?.id) { sql += " AND id != ?"; params.push(args.cursor.id); }
+  
+  const order = args?.orderBy?.startTime === "asc" ? "ASC" : "DESC";
+  sql += ` ORDER BY startTime ${order} LIMIT ?`;
+  if (skip > 0) { sql += " OFFSET ?"; params.push(take, skip); } else { params.push(take); }
+  
+  const result = await libsql.execute({ sql, args: params });
+  return result.rows.map(r => toCamel(r as Record<string, unknown>));
+};
+
+// session.count with more where options
+const originalCount = (db as any).session.count;
+(db as any).session.count = async (args?: { where?: Record<string, unknown> }) => {
+  let sql = "SELECT COUNT(*) as count FROM Session WHERE deletedAt IS NULL";
+  const params: unknown[] = [];
+  const w = args?.where || {};
+  if (w.status) { sql += " AND status = ?"; params.push(w.status); }
+  if (w.startTime?.gte) { sql += " AND startTime >= ?"; params.push(w.startTime.gte); }
+  if (w.deletedAt === null) { /* already in WHERE */ }
+  const result = await libsql.execute({ sql, args: params });
+  return Number((result.rows[0] as Record<string, unknown>).count);
+};
+
+// session.groupBy
+(db as any).session.groupBy = async (args: { by: string[]; _count: boolean; where?: Record<string, unknown> }) => {
+  let sql = `SELECT ${args.by.join(", ")}, COUNT(*) as _count FROM Session WHERE deletedAt IS NULL`;
+  const params: unknown[] = [];
+  if (args.where?.deviceId?.contains) { sql += " AND deviceId LIKE ?"; params.push(`%${args.where.deviceId.contains}%`); }
+  sql += ` GROUP BY ${args.by.join(", ")} ORDER BY _count DESC`;
+  const result = await libsql.execute({ sql, args: params });
+  return result.rows.map(r => {
+    const row = r as Record<string, unknown>;
+    return { [args.by[0]]: row[args.by[0]], _count: Number(row._count) };
+  });
+};

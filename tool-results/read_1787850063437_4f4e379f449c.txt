@@ -1,0 +1,729 @@
+     1→     1→"use client";
+     2→     2→
+     3→     3→// src/components/sessions-list.tsx — список сессий с курсорной пагинацией, фильтрами, сортировкой, view modes.
+     4→     4→
+     5→     5→import * as React from "react";
+     6→     6→import { motion, AnimatePresence } from "framer-motion";
+     7→     7→import {
+     8→     8→  Search,
+     9→     9→  Loader2,
+    10→    10→  ChevronRight,
+    11→    11→  Filter,
+    12→    12→  X,
+    13→    13→  MapPin,
+    14→    14→  Clock,
+    15→    15→  Activity,
+    16→    16→  ArrowDownUp,
+    17→    17→  LayoutList,
+    18→    18→  Rows3,
+    19→    19→  HardDrive,
+    20→    20→  Calendar,
+    21→    21→  RefreshCw,
+    22→    22→  Trash2,
+    23→    23→  CheckSquare,
+    24→    24→  Square,
+    25→    25→} from "lucide-react";
+    26→    26→import { toast } from "sonner";
+    27→    27→import { useSessions, useRoutes, useBulkDeleteSessions, useDeleteSession } from "@/lib/hooks";
+    28→    28→import { Button } from "@/components/ui/button";
+    29→    29→import { Input } from "@/components/ui/input";
+    30→    30→import {
+    31→    31→  Select,
+    32→    32→  SelectContent,
+    33→    33→  SelectItem,
+    34→    34→  SelectTrigger,
+    35→    35→  SelectValue,
+    36→    36→} from "@/components/ui/select";
+    37→    37→import { Badge } from "@/components/ui/badge";
+    38→    38→import { Skeleton } from "@/components/ui/skeleton";
+    39→    39→import { fmtDate, fmtBytes, fmtNumber } from "@/lib/format";
+    40→    40→import type { SessionListItem } from "@/lib/api-client";
+    41→    41→import { cn } from "@/lib/utils";
+    42→    42→
+    43→    43→interface SessionsListProps {
+    44→    44→  selectedId: string | null;
+    45→    45→  onSelect: (id: string) => void;
+    46→    46→}
+    47→    47→
+    48→    48→type SortKey = "date_desc" | "date_asc" | "points_desc" | "size_desc";
+    49→    49→type ViewMode = "detailed" | "compact";
+    50→    50→
+    51→    51→const STATUS_LABEL: Record<string, string> = {
+    52→    52→  active: "Активна",
+    53→    53→  completed: "Завершена",
+    54→    54→  archived: "Архив",
+    55→    55→  deleted: "Удалена",
+    56→    56→};
+    57→    57→
+    58→    58→const STATUS_BADGE: Record<string, string> = {
+    59→    59→  active: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30",
+    60→    60→  completed: "bg-teal-500/15 text-teal-700 dark:text-teal-400 border-teal-500/30",
+    61→    61→  archived: "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30",
+    62→    62→  deleted: "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30",
+    63→    63→};
+    64→    64→
+    65→    65→const SORT_LABELS: Record<SortKey, string> = {
+    66→    66→  date_desc: "Сначала новые",
+    67→    67→  date_asc: "Сначала старые",
+    68→    68→  points_desc: "Больше точек",
+    69→    69→  size_desc: "Больше объём",
+    70→    70→};
+    71→    71→
+    72→    72→export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
+    73→    73→  const [deviceId, setDeviceId] = React.useState("");
+    74→    74→  const [status, setStatus] = React.useState<string>("");
+    75→    75→  const [routeId, setRouteId] = React.useState<string>("");
+    76→    76→  const [cursor, setCursor] = React.useState<string | undefined>(undefined);
+    77→    77→  const [allSessions, setAllSessions] = React.useState<SessionListItem[]>([]);
+    78→    78→  const [hasMore, setHasMore] = React.useState(false);
+    79→    79→  const [sort, setSort] = React.useState<SortKey>("date_desc");
+    80→    80→  const [viewMode, setViewMode] = React.useState<ViewMode>("detailed");
+    81→    81→  const [bulkMode, setBulkMode] = React.useState(false);
+    82→    82→  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
+    83→    83→
+    84→    84→  const bulkDeleteMut = useBulkDeleteSessions();
+    85→    85→  const deleteMut = useDeleteSession();
+    86→    86→  const [deletingId, setDeletingId] = React.useState<string | null>(null);
+    87→    87→
+    88→    88→  // Применённые фильтры
+    89→    89→  const [applied, setApplied] = React.useState<{
+    90→    90→    deviceId?: string;
+    91→    91→    status?: string;
+    92→    92→    routeId?: string;
+    93→    93→  }>({});
+    94→    94→
+    95→    95→  const { data, isLoading, isFetching, refetch } = useSessions({
+    96→    96→    limit: 20,
+    97→    97→    cursor,
+    98→    98→    deviceId: applied.deviceId,
+    99→    99→    status: applied.status,
+   100→   100→    routeId: applied.routeId,
+   101→   101→  });
+   102→   102→
+   103→   103→  const { data: routesData } = useRoutes();
+   104→   104→
+   105→   105→  React.useEffect(() => {
+   106→   106→    setAllSessions([]);
+   107→   107→    setCursor(undefined);
+   108→   108→  }, [applied]);
+   109→   109→
+   110→   110→  React.useEffect(() => {
+   111→   111→    if (data) {
+   112→   112→      if (cursor) {
+   113→   113→        setAllSessions((prev) => [...prev, ...data.sessions]);
+   114→   114→      } else {
+   115→   115→        setAllSessions(data.sessions);
+   116→   116→      }
+   117→   117→      setHasMore(!!data.nextCursor);
+   118→   118→    }
+   119→   119→  }, [data, cursor]);
+   120→   120→
+   121→   121→  // Сортировка на клиенте (после загрузки)
+   122→   122→  const sortedSessions = React.useMemo(() => {
+   123→   123→    const arr = [...allSessions];
+   124→   124→    arr.sort((a, b) => {
+   125→   125→      switch (sort) {
+   126→   126→        case "date_asc":
+   127→   127→          return new Date(a.startTime).getTime() - new Date(b.startTime).getTime();
+   128→   128→        case "points_desc":
+   129→   129→          return b.pointCount - a.pointCount;
+   130→   130→        case "size_desc":
+   131→   131→          return b.payloadBytes - a.payloadBytes;
+   132→   132→        default:
+   133→   133→          return new Date(b.startTime).getTime() - new Date(a.startTime).getTime();
+   134→   134→      }
+   135→   135→    });
+   136→   136→    return arr;
+   137→   137→  }, [allSessions, sort]);
+   138→   138→
+   139→   139→  // Группировка по дате (только для detailed view)
+   140→   140→  const grouped = React.useMemo(() => {
+   141→   141→    if (viewMode !== "detailed") return null;
+   142→   142→    const groups: { label: string; items: SessionListItem[] }[] = [];
+   143→   143→    const today = new Date();
+   144→   144→    today.setHours(0, 0, 0, 0);
+   145→   145→    const yesterday = new Date(today);
+   146→   146→    yesterday.setDate(yesterday.getDate() - 1);
+   147→   147→
+   148→   148→    for (const s of sortedSessions) {
+   149→   149→      const d = new Date(s.startTime);
+   150→   150→      d.setHours(0, 0, 0, 0);
+   151→   151→      let label: string;
+   152→   152→      if (d.getTime() === today.getTime()) label = "Сегодня";
+   153→   153→      else if (d.getTime() === yesterday.getTime()) label = "Вчера";
+   154→   154→      else
+   155→   155→        label = d.toLocaleDateString("ru-RU", {
+   156→   156→          day: "numeric",
+   157→   157→          month: "long",
+   158→   158→          year: d.getFullYear() === today.getFullYear() ? undefined : "numeric",
+   159→   159→        });
+   160→   160→
+   161→   161→      let g = groups.find((g) => g.label === label);
+   162→   162→      if (!g) {
+   163→   163→        g = { label, items: [] };
+   164→   164→        groups.push(g);
+   165→   165→      }
+   166→   166→      g.items.push(s);
+   167→   167→    }
+   168→   168→    return groups;
+   169→   169→  }, [sortedSessions, viewMode]);
+   170→   170→
+   171→   171→  function applyFilters() {
+   172→   172→    setApplied({
+   173→   173→      deviceId: deviceId.trim() || undefined,
+   174→   174→      status: status || undefined,
+   175→   175→      routeId: routeId || undefined,
+   176→   176→    });
+   177→   177→  }
+   178→   178→
+   179→   179→  function resetFilters() {
+   180→   180→    setDeviceId("");
+   181→   181→    setStatus("");
+   182→   182→    setRouteId("");
+   183→   183→    setApplied({});
+   184→   184→  }
+   185→   185→
+   186→   186→  function toggleSelect(id: string) {
+   187→   187→    setSelectedIds((prev) => {
+   188→   188→      const next = new Set(prev);
+   189→   189→      if (next.has(id)) next.delete(id);
+   190→   190→      else next.add(id);
+   191→   191→      return next;
+   192→   192→    });
+   193→   193→  }
+   194→   194→
+   195→   195→  function selectAll() {
+   196→   196→    setSelectedIds(new Set(allSessions.map((s) => s.id)));
+   197→   197→  }
+   198→   198→
+   199→   199→  function clearSelection() {
+   200→   200→    setSelectedIds(new Set());
+   201→   201→  }
+   202→   202→
+   203→   203→  async function handleBulkDelete() {
+   204→   204→    if (selectedIds.size === 0) return;
+   205→   205→    if (!confirm(`Удалить ${selectedIds.size} сессий? Это soft-delete с grace period 30 дней.`)) {
+   206→   206→      return;
+   207→   207→    }
+   208→   208→    try {
+   209→   209→      const result = await bulkDeleteMut.mutateAsync(Array.from(selectedIds));
+   210→   210→      toast.success(`Удалено: ${result.deleted}`, {
+   211→   211→        description: result.errors.length > 0 ? `${result.errors.length} не найдено` : undefined,
+   212→   212→      });
+   213→   213→      clearSelection();
+   214→   214→      setBulkMode(false);
+   215→   215→    } catch (e) {
+   216→   216→      toast.error("Ошибка массового удаления", { description: (e as Error).message });
+   217→   217→    }
+   218→   218→  }
+   219→   219→
+   220→   220→  async function handleQuickDelete(e: React.MouseEvent, s: SessionListItem) {
+   221→   221→    e.stopPropagation();
+   222→   222→    e.preventDefault();
+   223→   223→    const label = s.deviceName || s.deviceId;
+   224→   224→    const date = new Date(s.startTime).toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" });
+   225→   225→    if (!confirm(`Удалить поездку?\n\n${label} · ${date} · ${fmtNumber(s.pointCount)} точек\n\nЭто soft-delete с grace period 30 дней.`)) {
+   226→   226→      return;
+   227→   227→    }
+   228→   228→    setDeletingId(s.id);
+   229→   229→    try {
+   230→   230→      await deleteMut.mutateAsync(s.id);
+   231→   231→      toast.success("Поездка удалена", {
+   232→   232→        description: `${label} · grace period 30 дней, потом purge`,
+   233→   233→      });
+   234→   234→      // Если удалили текущую выбранную — сбрасываем
+   235→   235→      if (selectedId === s.id) {
+   236→   236→        onSelect("");
+   237→   237→      }
+   238→   238→    } catch (err) {
+   239→   239→      toast.error("Ошибка удаления", { description: (err as Error).message });
+   240→   240→    } finally {
+   241→   241→      setDeletingId(null);
+   242→   242→    }
+   243→   243→  }
+   244→   244→
+   245→   245→  const activeFiltersCount =
+   246→   246→    (applied.deviceId ? 1 : 0) + (applied.status ? 1 : 0) + (applied.routeId ? 1 : 0);
+   247→   247→
+   248→   248→  return (
+   249→   249→    <div className="flex flex-col h-full">
+   250→   250→      {/* Header с count и view toggle */}
+   251→   251→      <div className="border-b px-3 py-2 flex items-center justify-between bg-muted/30 gap-2">
+   252→   252→        <div className="flex items-center gap-2 text-xs">
+   253→   253→          <span className="font-medium">
+   254→   254→            {allSessions.length > 0 ? `${allSessions.length} сессий` : "Сессии"}
+   255→   255→          </span>
+   256→   256→          {isFetching && (
+   257→   257→            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+   258→   258→          )}
+   259→   259→        </div>
+   260→   260→        <div className="flex items-center gap-1">
+   261→   261→          <Button
+   262→   262→            variant="ghost"
+   263→   263→            size="sm"
+   264→   264→            className="h-7 w-7 p-0"
+   265→   265→            onClick={() => refetch()}
+   266→   266→            title="Обновить"
+   267→   267→          >
+   268→   268→            <RefreshCw className="h-3 w-3" />
+   269→   269→          </Button>
+   270→   270→          <div className="flex items-center rounded-md border bg-background/50 p-0.5">
+   271→   271→            <button
+   272→   272→              onClick={() => setViewMode("detailed")}
+   273→   273→              className={cn(
+   274→   274→                "p-1 rounded transition-colors",
+   275→   275→                viewMode === "detailed" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
+   276→   276→              )}
+   277→   277→              title="Детальный вид"
+   278→   278→            >
+   279→   279→              <Rows3 className="h-3 w-3" />
+   280→   280→            </button>
+   281→   281→            <button
+   282→   282→              onClick={() => setViewMode("compact")}
+   283→   283→              className={cn(
+   284→   284→                "p-1 rounded transition-colors",
+   285→   285→                viewMode === "compact" ? "bg-primary/15 text-primary" : "text-muted-foreground hover:text-foreground"
+   286→   286→              )}
+   287→   287→              title="Компактный вид"
+   288→   288→            >
+   289→   289→              <LayoutList className="h-3 w-3" />
+   290→   290→            </button>
+   291→   291→          </div>
+   292→   292→          <Button
+   293→   293→            variant="ghost"
+   294→   294→            size="sm"
+   295→   295→            className="h-7 gap-1 text-xs"
+   296→   296→            onClick={() => {
+   297→   297→              setBulkMode((v) => !v);
+   298→   298→              if (bulkMode) clearSelection();
+   299→   299→            }}
+   300→   300→            title={bulkMode ? "Выйти из режима выбора" : "Массовое удаление"}
+   301→   301→          >
+   302→   302→            {bulkMode ? (
+   303→   303→              <>
+   304→   304→                <X className="h-3 w-3" /> Отмена
+   305→   305→              </>
+   306→   306→            ) : (
+   307→   307→              <>
+   308→   308→                <CheckSquare className="h-3 w-3" /> Выбрать
+   309→   309→              </>
+   310→   310→            )}
+   311→   311→          </Button>
+   312→   312→        </div>
+   313→   313→      </div>
+   314→   314→
+   315→   315→      {/* Bulk actions bar */}
+   316→   316→      {bulkMode && (
+   317→   317→        <motion.div
+   318→   318→          initial={{ opacity: 0, height: 0 }}
+   319→   319→          animate={{ opacity: 1, height: "auto" }}
+   320→   320→          exit={{ opacity: 0, height: 0 }}
+   321→   321→          className="border-b bg-amber-500/5 px-3 py-2 flex items-center justify-between gap-2"
+   322→   322→        >
+   323→   323→          <div className="flex items-center gap-2 text-xs">
+   324→   324→            <span className="font-medium text-amber-700 dark:text-amber-400">
+   325→   325→              Выбрано: {selectedIds.size}
+   326→   326→            </span>
+   327→   327→            <button onClick={selectAll} className="text-[10px] underline text-muted-foreground hover:text-foreground">
+   328→   328→              все
+   329→   329→            </button>
+   330→   330→            <button onClick={clearSelection} className="text-[10px] underline text-muted-foreground hover:text-foreground">
+   331→   331→              очистить
+   332→   332→            </button>
+   333→   333→          </div>
+   334→   334→          <Button
+   335→   335→            size="sm"
+   336→   336→            variant="destructive"
+   337→   337→            className="h-7 gap-1 text-xs"
+   338→   338→            disabled={selectedIds.size === 0 || bulkDeleteMut.isPending}
+   339→   339→            onClick={handleBulkDelete}
+   340→   340→          >
+   341→   341→            {bulkDeleteMut.isPending ? (
+   342→   342→              <Loader2 className="h-3 w-3 animate-spin" />
+   343→   343→            ) : (
+   344→   344→              <Trash2 className="h-3 w-3" />
+   345→   345→            )}
+   346→   346→            Удалить ({selectedIds.size})
+   347→   347→          </Button>
+   348→   348→        </motion.div>
+   349→   349→      )}
+   350→   350→
+   351→   351→      {/* Фильтры */}
+   352→   352→      <div className="space-y-2 border-b p-3 bg-muted/20">
+   353→   353→        <div className="flex items-center justify-between">
+   354→   354→          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+   355→   355→            <Filter className="h-3.5 w-3.5" /> Фильтры
+   356→   356→            {activeFiltersCount > 0 && (
+   357→   357→              <Badge className="text-[9px] h-4 px-1 bg-primary text-primary-foreground">
+   358→   358→                {activeFiltersCount}
+   359→   359→              </Badge>
+   360→   360→            )}
+   361→   361→          </div>
+   362→   362→          {/* Sort */}
+   363→   363→          <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
+   364→   364→            <SelectTrigger className="h-7 w-[140px] text-[10px] gap-1">
+   365→   365→              <ArrowDownUp className="h-2.5 w-2.5" />
+   366→   366→              <SelectValue />
+   367→   367→            </SelectTrigger>
+   368→   368→            <SelectContent>
+   369→   369→              {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
+   370→   370→                <SelectItem key={k} value={k} className="text-xs">
+   371→   371→                  {SORT_LABELS[k]}
+   372→   372→                </SelectItem>
+   373→   373→              ))}
+   374→   374→            </SelectContent>
+   375→   375→          </Select>
+   376→   376→        </div>
+   377→   377→        <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+   378→   378→          <div className="sm:col-span-5 relative">
+   379→   379→            <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+   380→   380→            <Input
+   381→   381→              placeholder="Device ID…"
+   382→   382→              value={deviceId}
+   383→   383→              onChange={(e) => setDeviceId(e.target.value)}
+   384→   384→              className="pl-7 h-8 text-xs"
+   385→   385→              onKeyDown={(e) => {
+   386→   386→                if (e.key === "Enter") applyFilters();
+   387→   387→              }}
+   388→   388→            />
+   389→   389→          </div>
+   390→   390→          <Select value={status || "all"} onValueChange={(v) => setStatus(v === "all" ? "" : v)}>
+   391→   391→            <SelectTrigger className="sm:col-span-3 h-8 text-xs">
+   392→   392→              <SelectValue placeholder="Статус" />
+   393→   393→            </SelectTrigger>
+   394→   394→            <SelectContent>
+   395→   395→              <SelectItem value="all">Все</SelectItem>
+   396→   396→              <SelectItem value="active">Активна</SelectItem>
+   397→   397→              <SelectItem value="completed">Завершена</SelectItem>
+   398→   398→              <SelectItem value="archived">Архив</SelectItem>
+   399→   399→            </SelectContent>
+   400→   400→          </Select>
+   401→   401→          <Select value={routeId || "all"} onValueChange={(v) => setRouteId(v === "all" ? "" : v)}>
+   402→   402→            <SelectTrigger className="sm:col-span-3 h-8 text-xs">
+   403→   403→              <SelectValue placeholder="Маршрут" />
+   404→   404→            </SelectTrigger>
+   405→   405→            <SelectContent>
+   406→   406→              <SelectItem value="all">Все маршруты</SelectItem>
+   407→   407→              {routesData?.routes.map((r) => (
+   408→   408→                <SelectItem key={r.id} value={r.id}>
+   409→   409→                  {r.name}
+   410→   410→                </SelectItem>
+   411→   411→              ))}
+   412→   412→            </SelectContent>
+   413→   413→          </Select>
+   414→   414→          <div className="sm:col-span-1 flex gap-1">
+   415→   415→            <Button
+   416→   416→              size="sm"
+   417→   417→              variant="default"
+   418→   418→              className="h-8 w-full"
+   419→   419→              onClick={applyFilters}
+   420→   420→              disabled={isFetching}
+   421→   421→            >
+   422→   422→              OK
+   423→   423→            </Button>
+   424→   424→          </div>
+   425→   425→        </div>
+   426→   426→        {activeFiltersCount > 0 && (
+   427→   427→          <div className="flex flex-wrap gap-1.5 pt-1 items-center">
+   428→   428→            {applied.deviceId && (
+   429→   429→              <Badge variant="outline" className="text-[10px] gap-1">
+   430→   430→                device: {applied.deviceId}
+   431→   431→                <button onClick={() => setApplied((a) => ({ ...a, deviceId: undefined }))}>
+   432→   432→                  <X className="h-2.5 w-2.5" />
+   433→   433→                </button>
+   434→   434→              </Badge>
+   435→   435→            )}
+   436→   436→            {applied.status && (
+   437→   437→              <Badge variant="outline" className="text-[10px] gap-1">
+   438→   438→                {STATUS_LABEL[applied.status] || applied.status}
+   439→   439→                <button onClick={() => setApplied((a) => ({ ...a, status: undefined }))}>
+   440→   440→                  <X className="h-2.5 w-2.5" />
+   441→   441→                </button>
+   442→   442→              </Badge>
+   443→   443→            )}
+   444→   444→            {applied.routeId && (
+   445→   445→              <Badge variant="outline" className="text-[10px] gap-1">
+   446→   446→                Маршрут
+   447→   447→                <button onClick={() => setApplied((a) => ({ ...a, routeId: undefined }))}>
+   448→   448→                  <X className="h-2.5 w-2.5" />
+   449→   449→                </button>
+   450→   450→              </Badge>
+   451→   451→            )}
+   452→   452→            <button
+   453→   453→              onClick={resetFilters}
+   454→   454→              className="text-[10px] text-muted-foreground hover:text-foreground underline ml-1"
+   455→   455→            >
+   456→   456→              сбросить всё
+   457→   457→            </button>
+   458→   458→          </div>
+   459→   459→        )}
+   460→   460→      </div>
+   461→   461→
+   462→   462→      {/* Список */}
+   463→   463→      <div className="flex-1 overflow-y-auto scroll-telem min-h-0">
+   464→   464→        {isLoading && !allSessions.length ? (
+   465→   465→          <div className="p-3 space-y-2">
+   466→   466→            {Array.from({ length: 6 }).map((_, i) => (
+   467→   467→              <Skeleton key={i} className="h-16 w-full shimmer" />
+   468→   468→            ))}
+   469→   469→          </div>
+   470→   470→        ) : allSessions.length === 0 ? (
+   471→   471→          <div className="p-8 text-center text-sm text-muted-foreground">
+   472→   472→            <MapPin className="h-8 w-8 mx-auto mb-2 opacity-30" />
+   473→   473→            {isFetching ? "Загрузка…" : "Сессий не найдено"}
+   474→   474→            <div className="mt-3">
+   475→   475→              <Button variant="outline" size="sm" onClick={() => refetch()}>
+   476→   476→                Обновить
+   477→   477→              </Button>
+   478→   478→            </div>
+   479→   479→          </div>
+   480→   480→        ) : viewMode === "compact" ? (
+   481→   481→          <CompactList
+   482→   482→            sessions={sortedSessions}
+   483→   483→            selectedId={selectedId}
+   484→   484→            onSelect={onSelect}
+   485→   485→            bulkMode={bulkMode}
+   486→   486→            selectedIds={selectedIds}
+   487→   487→            onToggleSelect={toggleSelect}
+   488→   488→            onQuickDelete={handleQuickDelete}
+   489→   489→            deletingId={deletingId}
+   490→   490→          />
+   491→   491→        ) : (
+   492→   492→          <DetailedList
+   493→   493→            groups={grouped || [{ label: "", items: sortedSessions }]}
+   494→   494→            selectedId={selectedId}
+   495→   495→            onSelect={onSelect}
+   496→   496→            bulkMode={bulkMode}
+   497→   497→            selectedIds={selectedIds}
+   498→   498→            onToggleSelect={toggleSelect}
+   499→   499→            onQuickDelete={handleQuickDelete}
+   500→   500→            deletingId={deletingId}
+   501→   501→          />
+   502→   502→        )}
+   503→   503→        {hasMore && (
+   504→   504→          <div className="p-3 border-t">
+   505→   505→            <Button
+   506→   506→              variant="outline"
+   507→   507→              className="w-full"
+   508→   508→              size="sm"
+   509→   509→              disabled={isFetching}
+   510→   510→              onClick={() => data?.nextCursor && setCursor(data.nextCursor)}
+   511→   511→            >
+   512→   512→              {isFetching ? (
+   513→   513→                <>
+   514→   514→                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Загрузка…
+   515→   515→                </>
+   516→   516→              ) : (
+   517→   517→                "Загрузить ещё"
+   518→   518→              )}
+   519→   519→            </Button>
+   520→   520→          </div>
+   521→   521→        )}
+   522→   522→      </div>
+   523→   523→    </div>
+   524→   524→  );
+   525→   525→}
+   526→   526→
+   527→   527→function DetailedList({
+   528→   528→  groups,
+   529→   529→  selectedId,
+   530→   530→  onSelect,
+   531→   531→  bulkMode,
+   532→   532→  selectedIds,
+   533→   533→  onToggleSelect,
+   534→   534→  onQuickDelete,
+   535→   535→  deletingId,
+   536→   536→}: {
+   537→   537→  groups: { label: string; items: SessionListItem[] }[];
+   538→   538→  selectedId: string | null;
+   539→   539→  onSelect: (id: string) => void;
+   540→   540→  bulkMode?: boolean;
+   541→   541→  selectedIds?: Set<string>;
+   542→   542→  onToggleSelect?: (id: string) => void;
+   543→   543→  onQuickDelete?: (e: React.MouseEvent, s: SessionListItem) => void;
+   544→   544→  deletingId?: string | null;
+   545→   545→}) {
+   546→   546→  return (
+   547→   547→    <>
+   548→   548→      {groups.map((group, gi) => (
+   549→   549→        <div key={gi}>
+   550→   550→          {group.label && (
+   551→   551→            <div className="sticky top-0 z-10 bg-muted/60 backdrop-blur-sm px-3 py-1 text-[10px] uppercase tracking-wider text-muted-foreground font-medium border-b">
+   552→   552→              {group.label} · {group.items.length}
+   553→   553→            </div>
+   554→   554→          )}
+   555→   555→          <ul className="divide-y">
+   556→   556→            {group.items.map((s, idx) => (
+   557→   557→              <motion.li
+   558→   558→                key={s.id}
+   559→   559→                initial={{ opacity: 0 }}
+   560→   560→                animate={{ opacity: 1 }}
+   561→   561→                transition={{ delay: Math.min(idx * 0.015, 0.3) }}
+   562→   562→                className={cn("group relative", deletingId === s.id && "opacity-50 pointer-events-none")}
+   563→   563→              >
+   564→   564→                <button
+   565→   565→                  onClick={() => bulkMode ? (onToggleSelect?.(s.id) ?? onSelect(s.id)) : onSelect(s.id)}
+   566→   566→                  className={cn(
+   567→   567→                    "w-full text-left p-3 hover:bg-accent/50 transition-colors flex items-start gap-3 border-l-2",
+   568→   568→                    selectedId === s.id
+   569→   569→                      ? "bg-primary/10 border-primary"
+   570→   570→                      : "border-transparent"
+   571→   571→                  )}
+   572→   572→                >
+   573→   573→                  {bulkMode && (
+   574→   574→                    <span
+   575→   575→                      className={cn(
+   576→   576→                        "shrink-0 mt-0.5",
+   577→   577→                        selectedIds?.has(s.id) ? "text-primary" : "text-muted-foreground"
+   578→   578→                      )}
+   579→   579→                    >
+   580→   580→                      {selectedIds?.has(s.id) ? (
+   581→   581→                        <CheckSquare className="h-4 w-4" />
+   582→   582→                      ) : (
+   583→   583→                        <Square className="h-4 w-4" />
+   584→   584→                      )}
+   585→   585→                    </span>
+   586→   586→                  )}
+   587→   587→                  <div className="flex-1 min-w-0 space-y-1">
+   588→   588→                    <div className="flex items-center gap-2 flex-wrap">
+   589→   589→                      <span className="text-sm font-medium truncate">
+   590→   590→                        {s.deviceName || s.deviceId}
+   591→   591→                      </span>
+   592→   592→                      <Badge
+   593→   593→                        variant="outline"
+   594→   594→                        className={cn("text-[10px]", STATUS_BADGE[s.status] || "")}
+   595→   595→                      >
+   596→   596→                        {STATUS_LABEL[s.status] || s.status}
+   597→   597→                      </Badge>
+   598→   598→                    </div>
+   599→   599→                    <div className="flex items-center gap-3 text-[11px] text-muted-foreground flex-wrap">
+   600→   600→                      <span className="inline-flex items-center gap-1">
+   601→   601→                        <Clock className="h-3 w-3" /> {fmtDate(s.startTime)}
+   602→   602→                      </span>
+   603→   603→                      <span className="inline-flex items-center gap-1">
+   604→   604→                        <Activity className="h-3 w-3" /> {fmtNumber(s.pointCount)} тчк
+   605→   605→                      </span>
+   606→   606→                      <span className="inline-flex items-center gap-1">
+   607→   607→                        <HardDrive className="h-3 w-3" /> {fmtBytes(s.payloadBytes)}
+   608→   608→                      </span>
+   609→   609→                    </div>
+   610→   610→                    {s.route && (
+   611→   611→                      <div className="text-[11px] text-muted-foreground inline-flex items-center gap-1">
+   612→   612→                        <MapPin className="h-3 w-3 text-emerald-500" /> {s.route.name}
+   613→   613→                      </div>
+   614→   614→                    )}
+   615→   615→                  </div>
+   616→   616→                  <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0 mt-1 group-hover:opacity-0 transition-opacity" />
+   617→   617→                </button>
+   618→   618→                {/* Quick delete button — показывается на hover */}
+   619→   619→                {!bulkMode && onQuickDelete && (
+   620→   620→                  <button
+   621→   621→                    onClick={(e) => onQuickDelete(e, s)}
+   622→   622→                    disabled={deletingId === s.id}
+   623→   623→                    className={cn(
+   624→   624→                      "absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md transition-all",
+   625→   625→                      "opacity-0 group-hover:opacity-100 focus:opacity-100",
+   626→   626→                      "bg-background/90 border border-destructive/30 hover:bg-destructive hover:text-destructive-foreground",
+   627→   627→                      "text-destructive shadow-sm",
+   628→   628→                      deletingId === s.id && "opacity-100"
+   629→   629→                    )}
+   630→   630→                    title="Удалить поездку"
+   631→   631→                    aria-label={`Удалить поездку ${s.deviceName || s.deviceId}`}
+   632→   632→                  >
+   633→   633→                    {deletingId === s.id ? (
+   634→   634→                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+   635→   635→                    ) : (
+   636→   636→                      <Trash2 className="h-3.5 w-3.5" />
+   637→   637→                    )}
+   638→   638→                  </button>
+   639→   639→                )}
+   640→   640→              </motion.li>
+   641→   641→            ))}
+   642→   642→          </ul>
+   643→   643→        </div>
+   644→   644→      ))}
+   645→   645→    </>
+   646→   646→  );
+   647→   647→}
+   648→   648→
+   649→   649→function CompactList({
+   650→   650→  sessions,
+   651→   651→  selectedId,
+   652→   652→  onSelect,
+   653→   653→  onQuickDelete,
+   654→   654→  deletingId,
+   655→   655→}: {
+   656→   656→  sessions: SessionListItem[];
+   657→   657→  selectedId: string | null;
+   658→   658→  onSelect: (id: string) => void;
+   659→   659→  onQuickDelete?: (e: React.MouseEvent, s: SessionListItem) => void;
+   660→   660→  deletingId?: string | null;
+   661→   661→}) {
+   662→   662→  return (
+   663→   663→    <ul className="divide-y">
+   664→   664→      <AnimatePresence>
+   665→   665→        {sessions.map((s, idx) => (
+   666→   666→          <motion.li
+   667→   667→            key={s.id}
+   668→   668→            initial={{ opacity: 0 }}
+   669→   669→            animate={{ opacity: 1 }}
+   670→   670→            transition={{ delay: Math.min(idx * 0.01, 0.2) }}
+   671→   671→            className={cn("group relative", deletingId === s.id && "opacity-50 pointer-events-none")}
+   672→   672→          >
+   673→   673→            <button
+   674→   674→              onClick={() => onSelect(s.id)}
+   675→   675→              className={cn(
+   676→   676→                "w-full text-left px-3 py-1.5 hover:bg-accent/50 transition-colors flex items-center gap-2 border-l-2",
+   677→   677→                selectedId === s.id
+   678→   678→                  ? "bg-primary/10 border-primary"
+   679→   679→                  : "border-transparent"
+   680→   680→              )}
+   681→   681→            >
+   682→   682→              <div
+   683→   683→                className={cn(
+   684→   684→                  "w-1.5 h-1.5 rounded-full shrink-0",
+   685→   685→                  s.status === "active"
+   686→   686→                    ? "bg-emerald-500"
+   687→   687→                    : s.status === "completed"
+   688→   688→                    ? "bg-teal-500"
+   689→   689→                    : "bg-muted-foreground/40"
+   690→   690→                )}
+   691→   691→              />
+   692→   692→              <span className="text-xs font-medium truncate flex-1">
+   693→   693→                {s.deviceName || s.deviceId}
+   694→   694→              </span>
+   695→   695→              <span className="text-[10px] text-muted-foreground font-mono shrink-0">
+   696→   696→                {fmtNumber(s.pointCount)}т
+   697→   697→              </span>
+   698→   698→              <span className="text-[10px] text-muted-foreground shrink-0">
+   699→   699→                {new Date(s.startTime).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" })}
+   700→   700→              </span>
+   701→   701→            </button>
+   702→   702→            {onQuickDelete && (
+   703→   703→              <button
+   704→   704→                onClick={(e) => onQuickDelete(e, s)}
+   705→   705→                disabled={deletingId === s.id}
+   706→   706→                className={cn(
+   707→   707→                  "absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded transition-all",
+   708→   708→                  "opacity-0 group-hover:opacity-100 focus:opacity-100",
+   709→   709→                  "bg-background/90 hover:bg-destructive hover:text-destructive-foreground",
+   710→   710→                  "text-destructive",
+   711→   711→                  deletingId === s.id && "opacity-100"
+   712→   712→                )}
+   713→   713→                title="Удалить"
+   714→   714→                aria-label={`Удалить ${s.deviceName || s.deviceId}`}
+   715→   715→              >
+   716→   716→                {deletingId === s.id ? (
+   717→   717→                  <Loader2 className="h-3 w-3 animate-spin" />
+   718→   718→                ) : (
+   719→   719→                  <Trash2 className="h-3 w-3" />
+   720→   720→                )}
+   721→   721→              </button>
+   722→   722→            )}
+   723→   723→          </motion.li>
+   724→   724→        ))}
+   725→   725→      </AnimatePresence>
+   726→   726→    </ul>
+   727→   727→  );
+   728→   728→}
+   729→   729→

@@ -43,11 +43,13 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { fmtDate, fmtBytes, fmtNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { SettingsCard } from "@/components/settings-card";
 
 export function AdminPanel() {
   return (
     <div className="space-y-4">
       <SystemInfoCard />
+      <SettingsCard />
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <BackupsCard />
         <RequeueCard />

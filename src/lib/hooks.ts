@@ -466,6 +466,39 @@ export function useRequeueJob() {
   });
 }
 
+// ===== Settings (runtime-overridable: TWO_GIS_API_KEY, OSRM_BASE_URL) =====
+export interface SettingItem {
+  key: string;
+  value: string;
+  source: "db" | "env";
+  updatedAt?: string;
+  isSensitive: boolean;
+}
+
+export function useSettings() {
+  return useQuery({
+    queryKey: ["settings"],
+    queryFn: () =>
+      api.get<{ settings: SettingItem[] }>("/api/admin/settings"),
+    staleTime: 30_000,
+  });
+}
+
+export function useUpdateSetting() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { key: string; value: string }) =>
+      api.put<{ ok: boolean; key: string; source: string; updatedAt: string }>(
+        "/api/admin/settings",
+        params
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      qc.invalidateQueries({ queryKey: ["audit"] });
+    },
+  });
+}
+
 // ===== Metrics =====
 export function useMetrics(opts?: UseQueryOptions<string>) {
   return useQuery({

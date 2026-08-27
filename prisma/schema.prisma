@@ -162,3 +162,13 @@ model BackupJob {
 
   @@index([status, createdAt])
 }
+
+/// Runtime-overridable settings (key-value store).
+/// Позволяет менять настройки (например TWO_GIS_API_KEY) без redeploy.
+/// Читается in-process worker'ом и API routes через settings.ts cache.
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+}

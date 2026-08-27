@@ -100,7 +100,10 @@ export async function DELETE(
     });
     inc("session_delete_total", "Session soft-deletes", 1);
 
-    return json({ ok: true, gracePeriodDays: env().GRACE_PERIOD_DAYS }, 204, { "X-Request-Id": requestId });
+    return new Response(null, {
+      status: 204,
+      headers: { "X-Request-Id": requestId, "X-Grace-Period-Days": String(env().GRACE_PERIOD_DAYS) },
+    });
   } catch (err) {
     logger.error("Session delete error", { requestId, error: err instanceof Error ? err.message : String(err) });
     return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });

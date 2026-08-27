@@ -27,6 +27,22 @@ export async function register(): Promise<void> {
 
   // Lazy import чтобы не тащить worker-runtime в client bundle
   const { startWorkerRuntime } = await import("./lib/worker-runtime");
+  const { ensureSettingsLoaded } = await import("./lib/settings");
+
+  // Загружаем runtime-overridable settings из БД (TWO_GIS_API_KEY, OSRM_BASE_URL).
+  // Не блокирует старт worker'а если БД недоступна — fallback на env.
+  try {
+    await ensureSettingsLoaded();
+  } catch (err) {
+    console.warn(
+      JSON.stringify({
+        time: new Date().toISOString(),
+        level: "warn",
+        msg: "instrumentation: settings load failed (non-fatal)",
+        error: err instanceof Error ? err.message : String(err),
+      })
+    );
+  }
 
   try {
     startWorkerRuntime();

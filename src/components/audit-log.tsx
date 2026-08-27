@@ -103,6 +103,8 @@ export function AuditLog() {
     }
   }, [data, cursor]);
 
+  const logs = all;
+
   function exportCSV() {
     const headers = ["time", "action", "targetId", "targetType", "actorType", "actorId", "sessionId", "metadata"];
     const rows = logs.map((l) => [

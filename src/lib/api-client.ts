@@ -152,6 +152,14 @@ export const api = {
       ...opts,
     }),
 
+  put: <T = unknown>(path: string, body?: unknown, opts?: FetchOpts) =>
+    apiFetch<T>(path, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...(opts?.headers || {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      ...opts,
+    }),
+
   delete: <T = unknown>(path: string, opts?: FetchOpts) =>
     apiFetch<T>(path, { method: "DELETE", ...opts }),
 

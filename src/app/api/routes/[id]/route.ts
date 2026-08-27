@@ -67,7 +67,7 @@ export async function DELETE(
       actorType: auth.via === "cookie" ? "user" : "system",
       actorId: auth.via === "cookie" ? "owner" : "api",
     });
-    return json({ ok: true }, 204, { "X-Request-Id": requestId });
+    return new Response(null, { status: 204, headers: { "X-Request-Id": requestId } });
   } catch (err) {
     logger.error("Route delete error", { requestId, error: err instanceof Error ? err.message : String(err) });
     return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });

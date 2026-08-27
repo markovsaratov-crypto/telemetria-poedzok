@@ -24,7 +24,7 @@ import {
   Square,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useSessions, useRoutes, useBulkDeleteSessions } from "@/lib/hooks";
+import { useSessions, useRoutes, useBulkDeleteSessions, useDeleteSession } from "@/lib/hooks";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -82,6 +82,8 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
   const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
 
   const bulkDeleteMut = useBulkDeleteSessions();
+  const deleteMut = useDeleteSession();
+  const [deletingId, setDeletingId] = React.useState<string | null>(null);
 
   // Применённые фильтры
   const [applied, setApplied] = React.useState<{
@@ -212,6 +214,31 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
       setBulkMode(false);
     } catch (e) {
       toast.error("Ошибка массового удаления", { description: (e as Error).message });
+    }
+  }
+
+  async function handleQuickDelete(e: React.MouseEvent, s: SessionListItem) {
+    e.stopPropagation();
+    e.preventDefault();
+    const label = s.deviceName || s.deviceId;
+    const date = new Date(s.startTime).toLocaleDateString("ru-RU", { day: "numeric", month: "short", year: "numeric" });
+    if (!confirm(`Удалить поездку?\n\n${label} · ${date} · ${fmtNumber(s.pointCount)} точек\n\nЭто soft-delete с grace period 30 дней.`)) {
+      return;
+    }
+    setDeletingId(s.id);
+    try {
+      await deleteMut.mutateAsync(s.id);
+      toast.success("Поездка удалена", {
+        description: `${label} · grace period 30 дней, потом purge`,
+      });
+      // Если удалили текущую выбранную — сбрасываем
+      if (selectedId === s.id) {
+        onSelect("");
+      }
+    } catch (err) {
+      toast.error("Ошибка удаления", { description: (err as Error).message });
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -458,6 +485,8 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
             bulkMode={bulkMode}
             selectedIds={selectedIds}
             onToggleSelect={toggleSelect}
+            onQuickDelete={handleQuickDelete}
+            deletingId={deletingId}
           />
         ) : (
           <DetailedList
@@ -467,6 +496,8 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
             bulkMode={bulkMode}
             selectedIds={selectedIds}
             onToggleSelect={toggleSelect}
+            onQuickDelete={handleQuickDelete}
+            deletingId={deletingId}
           />
         )}
         {hasMore && (
@@ -500,6 +531,8 @@ function DetailedList({
   bulkMode,
   selectedIds,
   onToggleSelect,
+  onQuickDelete,
+  deletingId,
 }: {
   groups: { label: string; items: SessionListItem[] }[];
   selectedId: string | null;
@@ -507,6 +540,8 @@ function DetailedList({
   bulkMode?: boolean;
   selectedIds?: Set<string>;
   onToggleSelect?: (id: string) => void;
+  onQuickDelete?: (e: React.MouseEvent, s: SessionListItem) => void;
+  deletingId?: string | null;
 }) {
   return (
     <>
@@ -524,6 +559,7 @@ function DetailedList({
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ delay: Math.min(idx * 0.015, 0.3) }}
+                className={cn("group relative", deletingId === s.id && "opacity-50 pointer-events-none")}
               >
                 <button
                   onClick={() => bulkMode ? (onToggleSelect?.(s.id) ?? onSelect(s.id)) : onSelect(s.id)}
@@ -577,8 +613,30 @@ function DetailedList({
                       </div>
                     )}
                   </div>
-                  <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0 mt-1" />
+                  <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0 mt-1 group-hover:opacity-0 transition-opacity" />
                 </button>
+                {/* Quick delete button — показывается на hover */}
+                {!bulkMode && onQuickDelete && (
+                  <button
+                    onClick={(e) => onQuickDelete(e, s)}
+                    disabled={deletingId === s.id}
+                    className={cn(
+                      "absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md transition-all",
+                      "opacity-0 group-hover:opacity-100 focus:opacity-100",
+                      "bg-background/90 border border-destructive/30 hover:bg-destructive hover:text-destructive-foreground",
+                      "text-destructive shadow-sm",
+                      deletingId === s.id && "opacity-100"
+                    )}
+                    title="Удалить поездку"
+                    aria-label={`Удалить поездку ${s.deviceName || s.deviceId}`}
+                  >
+                    {deletingId === s.id ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                )}
               </motion.li>
             ))}
           </ul>
@@ -592,10 +650,14 @@ function CompactList({
   sessions,
   selectedId,
   onSelect,
+  onQuickDelete,
+  deletingId,
 }: {
   sessions: SessionListItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  onQuickDelete?: (e: React.MouseEvent, s: SessionListItem) => void;
+  deletingId?: string | null;
 }) {
   return (
     <ul className="divide-y">
@@ -606,6 +668,7 @@ function CompactList({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: Math.min(idx * 0.01, 0.2) }}
+            className={cn("group relative", deletingId === s.id && "opacity-50 pointer-events-none")}
           >
             <button
               onClick={() => onSelect(s.id)}
@@ -636,6 +699,27 @@ function CompactList({
                 {new Date(s.startTime).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" })}
               </span>
             </button>
+            {onQuickDelete && (
+              <button
+                onClick={(e) => onQuickDelete(e, s)}
+                disabled={deletingId === s.id}
+                className={cn(
+                  "absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded transition-all",
+                  "opacity-0 group-hover:opacity-100 focus:opacity-100",
+                  "bg-background/90 hover:bg-destructive hover:text-destructive-foreground",
+                  "text-destructive",
+                  deletingId === s.id && "opacity-100"
+                )}
+                title="Удалить"
+                aria-label={`Удалить ${s.deviceName || s.deviceId}`}
+              >
+                {deletingId === s.id ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Trash2 className="h-3 w-3" />
+                )}
+              </button>
+            )}
           </motion.li>
         ))}
       </AnimatePresence>

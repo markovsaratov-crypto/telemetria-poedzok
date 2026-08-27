@@ -32,6 +32,7 @@ import { SessionCompare } from "@/components/session-compare";
 import { RoutePlanner } from "@/components/route-planner";
 import { RoutesManager } from "@/components/routes-manager";
 import { CsvImport } from "@/components/csv-import";
+import { ZipImport } from "@/components/zip-import";
 import { AdminPanel } from "@/components/admin-panel";
 import { AuditLog } from "@/components/audit-log";
 import { MetricsViewer } from "@/components/metrics-viewer";
@@ -279,7 +280,8 @@ export default function Home() {
 
               <TabsContent value="import" className="mt-0">
                 <div className="max-w-3xl mx-auto">
-                  <CsvImport />
+                  <ZipImport />
+                <CsvImport />
                 </div>
               </TabsContent>
 

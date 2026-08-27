@@ -121,6 +121,32 @@ export const db = {
       const result = await libsql.execute({ sql, args: params });
       return result.rows.map(r => { const row = r as Record<string, unknown>; return { [args.by[0]]: row[args.by[0]], _count: Number(row._count) }; });
     },
+    async findFirst(args?: {
+      where?: Record<string, unknown>;
+      orderBy?: Record<string, string>;
+      select?: Record<string, boolean>;
+    }) {
+      let sql = "SELECT * FROM Session WHERE deletedAt IS NULL";
+      const params: unknown[] = [];
+      const w = args?.where || {};
+      if (w.deviceId) { sql += " AND deviceId = ?"; params.push(w.deviceId); }
+      if (w.status) { sql += " AND status = ?"; params.push(w.status); }
+      if (w.routeId) { sql += " AND routeId = ?"; params.push(w.routeId); }
+      if (w.id) { sql += " AND id = ?"; params.push(w.id); }
+      const order = args?.orderBy?.startTime === "asc" ? "ASC" : "DESC";
+      sql += ` ORDER BY startTime ${order} LIMIT 1`;
+      const result = await libsql.execute({ sql, args: params });
+      if (result.rows.length === 0) return null;
+      const row = toCamel(result.rows[0] as Record<string, unknown>);
+      if (args?.select) {
+        const filtered: Record<string, unknown> = {};
+        for (const key of Object.keys(args.select)) {
+          if (args.select[key]) filtered[key] = row[key];
+        }
+        return filtered;
+      }
+      return row;
+    },
   },
   gpsPoint: {
     async createMany(args: { data: Array<Record<string, unknown>> }) {

@@ -1199,3 +1199,425 @@ Stage Summary:
 - Cron finalizer для recording→completed больше не нужен (worker делает это сам при completion).
 - Lint: 0 ошибок, 0 warnings.
 - mini-services/worker/ остаётся для локальной разработки (опционально), но на проде не используется.
+
+---
+Task ID: AUDIT-1
+Agent: codebase-audit (general-purpose)
+Task: Production stability audit — find all bugs, "костыли", dead code, security issues, and production risks. READ-ONLY audit (no code changes).
+
+## Audit Summary
+
+Audited 38 API routes, 15 lib files, 30+ components, config files, worker runtime, and Prisma schema. Found **77 issues**: 17 CRITICAL, 29 HIGH, 27 MEDIUM, 4 LOW. The codebase has systemic problems stemming from a custom `db.ts` wrapper that silently ignores Prisma query features (`select`, `OR`, compound keys, `where.id.in`), combined with `typescript: { ignoreBuildErrors: true }` which hides all type mismatches at build time.
+
+---
+
+## CRITICAL (17) — production-breaking, data loss, security
+
+### C1. All production secrets committed to public GitHub repo
+- **File**: `render.yaml:17-29`
+- **Description**: `TURSO_AUTH_TOKEN`, `LOGIN_PASSWORD`, `SESSION_SECRET`, `API_KEY`, `INGEST_TOKEN`, `CRON_SECRET`, `ADMIN_TOKEN` are in plaintext in render.yaml, which is committed to https://github.com/markovsaratov-crypto/telemetria-poedzok. Anyone can read these and fully compromise the production deployment.
+- **Fix**: Rotate ALL secrets immediately. Move them to Render dashboard env vars (not in repo). Add `render.yaml` to `.gitignore` or use `sync: false` for secret keys.
+
+### C2. Hardcoded default secrets in env.ts
+- **File**: `src/lib/env.ts:6-11`
+- **Description**: `LOGIN_PASSWORD` defaults to `"change-me-please-32-chars-minimum-aaaaaa"`, `SESSION_SECRET` to `"super-secret-session-key-32-chars-minimum"`, etc. If env vars are missing (e.g., misconfigured deploy), the app silently runs with publicly-known secrets. The worklog even documents this test password.
+- **Fix**: Remove all defaults for secrets. Fail fast (throw) if any secret is missing in production (`NODE_ENV === "production"`).
+
+### C3. `input` is undefined — every 401 crashes the client
+- **File**: `src/lib/api-client.ts:90`
+- **Description**: `const url = typeof input === "string" ? input : (input as Request).url || "";` — `input` is never declared in scope. `typeof input` returns `"undefined"` (no throw), but the ternary evaluates `(input as Request).url` which throws `ReferenceError: input is not defined`. This fires on EVERY 401 response from ANY endpoint. The `onUnauthorized` handler never runs, so expired sessions show stale data instead of redirecting to login. Login with wrong password shows "Неизвестная ошибка" instead of "Неверный пароль".
+- **Fix**: Replace `input` with `path` (the function parameter): `if (!path.includes("/api/auth/me") && onUnauthorized) { onUnauthorized(); }`
+
+### C4. `db.session.findUnique` ignores `select` — 3 routes always return 500
+- **File**: `src/lib/db.ts:68-89`; affected routes: `src/app/api/sessions/[id]/stats/route.ts:32-45`, `src/app/api/sessions/batch/route.ts:26-51`, `src/app/api/plan/[sessionId]/route.ts:18-28`
+- **Description**: `findUnique` only checks `args.include?.gpsPoints` / `args.include?.route` / `args.include?.trafficJobs`. It does NOT support `select`. These three routes pass `select: { ..., gpsPoints: { orderBy, select } }`. Since `args.include` is undefined, relations are never loaded. `session.gpsPoints` is undefined → `session.gpsPoints.map(...)` throws `TypeError: Cannot read properties of undefined (reading 'map')`. All three endpoints always return 500.
+- **Fix**: Add `select` support to `findUnique`, OR change routes to use `include` instead of `select`.
+
+### C5. Idempotency broken — duplicate ingests return 500
+- **File**: `src/lib/idempotency.ts:5-8` calls `db.session.findUnique({ where: { deviceId_clientId: { deviceId, clientId } } })`, but `src/lib/db.ts:68` only supports `where: { id: string }`.
+- **Description**: `args.where.id` is `undefined`. SQL becomes `WHERE id = NULL` → no match → `findExistingSession` returns `null`. Duplicate ingest (same deviceId+clientId) passes the check, tries INSERT, hits `UNIQUE(deviceId, clientId)` constraint → 500 error. The idempotency guarantee (§6.7) is completely broken.
+- **Fix**: Add compound-key support to `findUnique`, or use raw SQL: `SELECT id FROM Session WHERE deviceId = ? AND clientId = ? AND deletedAt IS NULL`.
+
+### C6. Bulk delete destroys WRONG sessions
+- **File**: `src/app/api/sessions/bulk-delete/route.ts:32-38`; `src/lib/db.ts:397-438`
+- **Description**: `db.session.findMany({ where: { id: { in: ids }, deletedAt: null } })` — the `where.id.in` filter is NOT supported by the findMany override (only `deviceId`, `status`, `routeId`, `startTime`, `endTime`, `deletedAt` are handled). The query returns the 20 most recent non-deleted sessions (default `take=20`), regardless of the requested `ids`. Then `updateMany` soft-deletes those 20 wrong sessions. An admin trying to delete sessions A, B, C actually deletes the 20 most recent sessions X, Y, Z, ...
+- **Fix**: Add `where.id.in` support to findMany, or use raw SQL `WHERE id IN (...)`.
+
+### C7. `db.$transaction` is fake — no atomicity
+- **File**: `src/lib/db.ts:347-349`
+- **Description**: `$transaction: async (fn) => fn(db)` — just calls the function with the same `db` object, no `BEGIN`/`COMMIT`/`ROLLBACK`. The ingest route's `db.$transaction(async (tx) => { session.create + gpsPoint.createMany + trafficJob.create + session.update })` is NOT atomic. If gpsPoint insert fails (e.g., timeout mid-batch), the session exists with partial points and no traffic job.
+- **Fix**: Use libsql's `batch()` API for atomic multi-statement transactions, or wrap in `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`.
+
+### C8. `gpsPoint.createMany` is sequential N+1 — ingest times out
+- **File**: `src/lib/db.ts:152-159`
+- **Description**: Loops through `args.data` and runs individual `INSERT` for each point. For a 1000-point ingest (spec max), that's 1000 sequential SQL statements inside a `writeLock(pLimit(1))`. On Turso (50ms RTT), this takes 50+ seconds → Render Free 60s timeout → 500 error. Also, `createMany` doesn't add `id` (unlike `session.create` which adds `randomUUID()`), so each INSERT may fail with `NOT NULL constraint failed: GpsPoint.id` depending on schema.
+- **Fix**: Use `libsql.batch()` for atomic multi-insert, or build a single `INSERT INTO GpsPoint VALUES (?,?,...),(?,?,...)` with all rows. Also add `id: randomUUID()` to each point.
+
+### C9. Backup always fails — missing db methods
+- **File**: `src/lib/backup.ts:22,25`; `src/lib/db.ts`
+- **Description**: `db.routeCache.findMany()` and `db.exportJob.findMany()` are called but DON'T EXIST in db.ts. `routeCache` only has `findUnique` and `upsert`. `exportJob` only has `findUnique` and `create`. Both calls throw `TypeError: db.routeCache.findMany is not a function`. The catch block marks the BackupJob as failed and returns 500. Every backup attempt fails.
+- **Fix**: Add `findMany` methods to `routeCache` and `exportJob` in db.ts, or remove them from the backup dump.
+
+### C10. Share tokens in-memory only — lost on every cold start
+- **File**: `src/app/api/sessions/[id]/share/route.ts:13`
+- **Description**: `const shareStore = new Map<string, ...>()`. On Render Free, the server sleeps after 15 min inactivity and cold-starts on every redeploy. All share tokens are lost. Users create a share link, send it, and the recipient gets "Invalid or expired token" because the Map is empty after restart. Also: expired tokens are never evicted → memory leak.
+- **Fix**: Store share tokens in the DB (new `ShareToken` model or reuse `Setting` table).
+
+### C11. Share GET endpoint is NOT public — middleware blocks it
+- **File**: `src/middleware.ts:13,92-122`; `src/app/api/sessions/[id]/share/route.ts:87-143`
+- **Description**: The worklog says "Без авторизации (публичный endpoint)", but `/api/sessions/[id]/share` is NOT in `PUBLIC_PATHS`. The middleware requires Bearer or cookie for all `/api/*` paths (except the explicit public list). So unauthenticated share-link recipients get 401 from middleware before reaching the route handler. Share links are completely broken.
+- **Fix**: Add `/api/sessions/[id]/share` to `PUBLIC_PATHS` when `?token=` query param is present, or create a separate public path like `/api/shared/[token]`.
+
+### C12. Prisma schema vs runtime DB file mismatch
+- **File**: `prisma/schema.prisma:9` (`url = "file:./db/local.db"`); `.env:1` (`DATABASE_URL=file:/home/z/my-project/db/custom.db`); `src/lib/db.ts:19` (`file:./db/custom.db`)
+- **Description**: `prisma db push` uses the schema's `url` → resolves to `prisma/db/local.db` (relative to schema file). The app uses `DATABASE_URL` → `db/custom.db`. These are DIFFERENT files. Schema changes (e.g., `notes`/`tags` columns added in Task 12) go to `prisma/db/local.db`, NOT the runtime `db/custom.db`. The app then queries columns that don't exist → `SQLITE_ERROR: no such column: notes`.
+- **Fix**: Change schema to `url = env("DATABASE_URL")`. Run `prisma db push` with the correct `DATABASE_URL` before starting the app.
+
+### C13. `typescript: { ignoreBuildErrors: true }` — all type errors silently shipped
+- **File**: `next.config.ts:4`
+- **Description**: This is why bugs C4, C5, C6, C9 weren't caught at build time. TypeScript would normally flag `select` on a method that only accepts `include`, `where: { deviceId_clientId: ... }` on a method that only accepts `where: { id }`, etc. But `ignoreBuildErrors: true` silently swallows all type errors. The worklog's "lint: 0 errors" is misleading — ESLint passes but `tsc --noEmit` would fail.
+- **Fix**: Remove `ignoreBuildErrors: true`. Fix all TypeScript errors. Add `tsc --noEmit` to CI.
+
+### C14. No `prisma db push` in build — schema changes never applied to Turso
+- **File**: `render.yaml:7` (`buildCommand: npm install && DATABASE_URL="file:./db/local.db" npm run build`); `package.json:7` (`"build": "prisma generate && next build"`)
+- **Description**: The build runs `prisma generate` (regenerates client types) but NOT `prisma db push` (applies schema to DB). So new columns/tables added in schema.prisma are never created in the Turso DB. The `notes` and `tags` fields added in Task 12 would not exist in production Turso unless manually pushed. Queries referencing these columns fail at runtime.
+- **Fix**: Add `prisma db push --accept-data-loss` to the build command, using the production `DATABASE_URL`.
+
+### C15. Search returns ALL sessions — `OR` filter ignored
+- **File**: `src/app/api/sessions/search/route.ts:23-47`; `src/lib/db.ts:397-438`
+- **Description**: The search query uses `where: { OR: [{ deviceId: { contains: q } }, { deviceName: { contains: q } }, ...] }`. The findMany override doesn't handle `OR` or `deviceName.contains` / `notes.contains` / `tags.contains`. The `OR` is silently ignored, and the query returns the 20 most recent non-deleted sessions regardless of the search query. The frontend's `matchFields` is computed client-side, so non-matching sessions appear in search results.
+- **Fix**: Add `OR` support to findMany, or use raw SQL with `WHERE deviceId LIKE ? OR deviceName LIKE ? OR notes LIKE ? OR tags LIKE ?`.
+
+### C16. Async exports never complete — frontend polls forever
+- **File**: `src/app/api/sessions/[id]/export/route.ts:39-57` creates `ExportJob` with `status="pending"`; no worker processes it.
+- **Description**: The in-process worker only handles `TrafficJob`, not `ExportJob`. The `/api/exports/[jobId]` route returns 202 "pending" forever. The frontend's `usePollExport` hook polls every 1.5s indefinitely — infinite network requests, never resolves. Sessions with >5000 points can never be exported.
+- **Fix**: Either process ExportJobs in the worker-runtime, or remove the async path and always export synchronously (with a larger timeout), or implement a dedicated export worker.
+
+### C17. SensorLogger sessions stuck in 'recording' forever
+- **File**: `src/app/api/ingest/sensorlogger/route.ts:120-126` (creates session with `status='recording'`); `finalizeSession()` only called from `/api/cron/finalize-sessions` which has no scheduled caller.
+- **Description**: SensorLogger creates sessions with `status='recording'` and never finalizes them. The `finalizeSession` function (which creates a TrafficJob and sets status='completed') is only called from `/api/cron/finalize-sessions`, but no cron job triggers that endpoint. The in-process worker only picks up TrafficJobs, and no TrafficJob is created for SensorLogger sessions until `finalizeSession` runs. So SensorLogger sessions stay in 'recording' forever and never get traffic data.
+- **Fix**: Call `finalizeSession` from the worker-runtime's poll cycle (detect stale 'recording' sessions), or add a cron job that calls `/api/cron/finalize-sessions`.
+
+---
+
+## HIGH (29) — significant bugs, security issues, performance
+
+### H1. Timing-unsafe token comparison in sensorlogger and cron routes
+- **Files**: `src/app/api/ingest/sensorlogger/route.ts:157-158`, `src/app/api/cron/finalize-sessions/route.ts:41-44`
+- **Description**: `bearer === e.INGEST_TOKEN` uses regular `===` string comparison, vulnerable to timing attacks. The auth.ts `safeEqual` function exists but isn't used here.
+- **Fix**: Use `authenticateBearer(bearer, "ingest")` / `authenticateBearer(bearer, "cron")` from auth.ts.
+
+### H2. `safeEqual` leaks password/token length
+- **File**: `src/lib/auth.ts:42-47`
+- **Description**: `if (bufA.length !== bufB.length) return false;` — returns immediately if lengths differ, leaking the password length to timing attackers. An attacker can determine the password length by measuring response times.
+- **Fix**: Hash both inputs (SHA-256) before comparison, or pad to fixed length before `timingSafeEqual`.
+
+### H3. CORS allows any origin with credentials
+- **File**: `src/lib/http-utils.ts:15,23`
+- **Description**: `const origin = request.headers.get("origin") || "*"` reflects ANY origin back as `Access-Control-Allow-Origin`, combined with `Access-Control-Allow-Credentials: true`. Any website can make credentialed requests to the API, reading responses. This is a critical CORS misconfiguration.
+- **Fix**: Whitelist allowed origins (e.g., only the production URL and localhost). Don't reflect arbitrary origins with credentials.
+
+### H4. Cookie auth check is substring match
+- **File**: `src/middleware.ts:113,118`
+- **Description**: `cookie.includes(SESSION_COOKIE_NAME)` checks if "telem_session" appears ANYWHERE in the cookie header. An attacker could set `evil=telem_session` or `telem_session_expired=foo` and pass this check. The actual cookie value is never verified at middleware level (only at route handler level via `verifySessionCookieFromRequest`). Rate limits are applied incorrectly.
+- **Fix**: Parse cookies properly and check for the specific cookie's existence.
+
+### H5. Rate limit shared across all cookie users
+- **File**: `src/middleware.ts:38-42`
+- **Description**: For scopes `plan`, `audit`, `admin:heavy`, the rate limit key uses `tokenPart` from the Bearer header. Cookie-authenticated requests have no Bearer → all share the `"no-token"` bucket. So 5 cookie users hitting `/api/plan` share a single 5/60s bucket. One user's requests count against all others.
+- **Fix**: Use the session cookie value (or sessionId) as the rate limit key for cookie-authenticated requests.
+
+### H6. Cursor pagination broken — same sessions on every page
+- **File**: `src/lib/db.ts:430` (`AND id != ?`); affected: `src/app/api/sessions/route.ts:31-52`, `src/app/api/audit/route.ts:27-36`
+- **Description**: The cursor is the last item's ID. On the next page, the query uses `WHERE id != cursor` which excludes ONE id but doesn't paginate by time. The same sessions (minus one) are returned on every page. "Load more" shows duplicates.
+- **Fix**: Use `WHERE startTime < ? OR (startTime = ? AND id < ?) ORDER BY startTime DESC, id DESC` for proper cursor pagination.
+
+### H7. `/api/worker/poll` returns wrong jobs — `where.id.in` not supported
+- **File**: `src/app/api/worker/poll/route.ts:40-64`; `src/lib/db.ts:189-205`
+- **Description**: After claiming job IDs via `$queryRaw`, the route calls `db.trafficJob.findMany({ where: { id: { in: ids } } })`. The findMany override only handles `where.status`, NOT `where.id.in`. Returns 50 random traffic jobs (default `take=50`), not the claimed ones. Also, `include.session.select.gpsPoints` is not supported — `j.session.gpsPoints` is undefined → `.map(...)` throws TypeError. The mini-services/worker is completely broken.
+- **Fix**: Add `where.id.in` support, or use raw SQL `WHERE id IN (...)`. Add gpsPoints loading to the session include.
+
+### H8. `cacheHash` uses weak non-cryptographic hash
+- **File**: `src/lib/cache.ts:29-33`
+- **Description**: `((h << 5) - h + charCode) | 0` — 32-bit hash. Different coordinates can collide, returning wrong cached routes. With many routes, collisions are likely.
+- **Fix**: Use `crypto.createHash('sha256').update(key).digest('hex').slice(0,16)` or a proper 64-bit hash.
+
+### H9. `row.expiresAt > new Date()` always false — persistent cache never hits
+- **File**: `src/lib/cache.ts:52`
+- **Description**: `row.expiresAt` is a string (ISO format from libsql). `new Date()` is a Date object. The `>` operator converts Date to number (timestamp) via `valueOf()`, then converts the string to number → `NaN`. `NaN > timestamp` is always `false`. Cache entries are ALWAYS considered expired. Only the 5-minute in-memory LRU works; the 24-hour SQLite cache is effectively disabled. Every route request hits 2ГИС/OSRM instead of using cached results.
+- **Fix**: `new Date(row.expiresAt) > new Date()` or `Number(new Date(row.expiresAt)) > Date.now()`.
+
+### H10. Worker `routeRequest` timeout leaks — promise continues after timeout
+- **File**: `src/lib/worker-runtime.ts:304-309`
+- **Description**: `Promise.race([routeRequest(...), new Promise((_, reject) => setTimeout(() => reject(...), 8000))])`. When the timeout fires, `routeRequest` continues running in the background (no `AbortController`). If it later rejects, it becomes an unhandled promise rejection. The `setTimeout` is never cleared if `routeRequest` resolves first — keeps the event loop alive.
+- **Fix**: Use `AbortController` with `signal` passed to `fetch`. Clear the timeout in a `finally` block.
+
+### H11. Worker SIGTERM/SIGINT listeners accumulate
+- **File**: `src/lib/worker-runtime.ts:409-410`
+- **Description**: `process.on("SIGTERM", ...)` and `process.on("SIGINT", ...)` are registered every time `startWorkerRuntime()` is called. The `globalThis` guard prevents this normally, but in HMR/dev mode where the module is re-imported, listeners can accumulate. They're never removed.
+- **Fix**: Use `process.once()` and store references for removal, or check if listeners are already registered.
+
+### H12. Worker runtime fields never updated — dead metrics
+- **File**: `src/lib/worker-runtime.ts:41-43,358`
+- **Description**: `totalProcessed`, `totalFailed`, `inFlight`, `runningJobs` are initialized but NEVER updated. `inFlight: new Set()` is never `.add()`'d to. The `/api/worker/health` endpoint always reports `inFlight: 0, runningJobs: 0`.
+- **Fix**: Increment `totalProcessed`/`totalFailed` in `completeJob`. Add/remove job IDs from `inFlight` in `processOneJob`.
+
+### H13. Stuck job reclaim race condition
+- **File**: `src/lib/worker-runtime.ts:105-141`
+- **Description**: The reclaim step sets `status='pending'` for jobs with `lockedAt > 60s`, then the claim step sets `status='running'` for a new worker. If the original worker is still alive (just slow), it calls `completeJob` and overwrites the new worker's result. Two workers process the same job.
+- **Fix**: Check `lockedBy === workerId` before writing results, or use a version/epoch field.
+
+### H14. Backup writes to `/tmp` — ephemeral filesystem on Render Free
+- **File**: `src/lib/backup.ts:33-36`; `render.yaml:58` (`BACKUP_STORAGE_DIR=/tmp/backups`)
+- **Description**: Render Free has an EPHEMERAL filesystem. `/tmp/backups` is wiped on every cold start and redeploy. Backups disappear immediately. The file path returned in the API response is useless.
+- **Fix**: Store backups in Turso DB (as a blob), or use an external storage service (S3, Cloudinary, etc.).
+
+### H15. Backup loads entire DB into memory — OOM risk
+- **File**: `src/lib/backup.ts:17-26`
+- **Description**: `db.session.findMany({ include: { gpsPoints: true } })` loads ALL sessions + ALL gpsPoints into a single JS object. With 1000 sessions × 1000 points = 1M GPS points, this would use 500MB+ of RAM. Render Free has 512MB RAM limit → OOM crash.
+- **Fix**: Stream the backup to a file in chunks, or paginate the query.
+
+### H16. ZIP import N+1 sequential INSERT — times out
+- **File**: `src/app/api/import/zip/route.ts:131-139`
+- **Description**: Same as C8 — loops through points and runs individual INSERT for each. A 10000-point ZIP (common for SensorLogger) = 10000 sequential INSERTs → 8+ minutes on Turso → timeout.
+- **Fix**: Use `libsql.batch()` or build a single multi-row INSERT.
+
+### H17. GPX export throws TypeError — `session.startTime.toISOString()`
+- **File**: `src/lib/export.ts:29`
+- **Description**: `session.startTime` from db.ts is a STRING (libsql returns ISO strings), not a Date object. `string.toISOString()` throws TypeError. GPX export always fails. The route casts `session as never` to bypass TypeScript (which would've caught this if `ignoreBuildErrors` were false).
+- **Fix**: `new Date(session.startTime).toISOString()`.
+
+### H18. GPX export uses `p.ele` instead of `p.altitude`
+- **File**: `src/lib/export.ts:19`
+- **Description**: `p.ele != null ? \`<ele>${p.altitude}</ele>\`` — checks `p.ele` (undefined, GpsPoint has no `ele` field) but uses `p.altitude`. The condition is always false, so altitude is never included in GPX output.
+- **Fix**: `p.altitude != null ? \`<ele>${p.altitude}</ele>\``.
+
+### H19. In-memory rate limiter lost on every cold start
+- **File**: `src/lib/rate-limit.ts:15-59`
+- **Description**: Render Free sleeps after 15 min inactivity. On cold start, all rate limit buckets are reset. An attacker can wait for cold start and flood the API without any rate limiting. The keep-alive cron (every 10 min) helps keep the server warm but doesn't survive deploys.
+- **Fix**: Use Turso DB or Upstash Redis for rate limit state.
+
+### H20. In-memory metrics lost on cold start
+- **File**: `src/lib/metrics.ts:15-16`
+- **Description**: Prometheus counters reset to 0 on every cold start/redeploy. Prometheus scraping sees wildly fluctuating counters. `rate()` calculations are meaningless.
+- **Fix**: Use Turso DB to persist counter state, or accept the limitation and use `gauge` instead of `counter` for cold-start-safe metrics.
+
+### H21. In-memory circuit breaker lost on cold start
+- **File**: `src/lib/routing/circuit-breaker.ts:9`
+- **Description**: If 2ГИС is down, the circuit never opens because cold starts reset the failure count. Every request tries 2ГИС first (8s timeout) before falling back to OSRM.
+- **Fix**: Persist circuit state in Turso DB or use a longer-lived external store.
+
+### H22. `/health` hardcodes `worker: "ok"` — doesn't check actual state
+- **File**: `src/app/health/route.ts:23`
+- **Description**: Always reports `worker: "ok"` regardless of whether the in-process worker is running. The `getWorkerRuntime()` function exists but isn't called. Health check is misleading.
+- **Fix**: `worker: rt && !rt.shuttingDown ? "ok" : "degraded"`.
+
+### H23. `db.session.findMany` default `take=20` — stats/dashboard data truncated
+- **File**: `src/lib/db.ts:407`; affected: `src/app/api/stats/route.ts:36-40,67-71`
+- **Description**: The stats route calls `findMany` without `take` for 7-day and 84-day activity. Default `take=20` returns only 20 sessions. The `perDay` sparkline and `heatmapSessions` are computed from only 20 sessions, not all sessions in the range. Dashboard shows misleading activity data.
+- **Fix**: Pass `take: 10000` (or remove the limit) for stats queries.
+
+### H24. `admin/jobs` returns wrong `total`
+- **File**: `src/app/api/admin/jobs/route.ts:49`
+- **Description**: `total: jobs.length` — returns the count of returned jobs (capped at `limit`), not the total count of matching jobs. Frontend thinks there are only 50 jobs even if there are 1000.
+- **Fix**: Run a separate `COUNT(*)` query for the total, or remove `total` from the response.
+
+### H25. `db.route.findMany` ignores `include._count` — route list never shows session counts
+- **File**: `src/app/api/routes/route.ts:16-19`; `src/lib/db.ts:248-252`
+- **Description**: `findMany()` takes NO arguments (signature is `async findMany()`). The `include: { _count: { select: { sessions: true } } }` is completely ignored. The response has no `_count` field. Frontend's `RouteItem._count?.sessions` is always undefined.
+- **Fix**: Add argument support to `route.findMany`, including a subquery for session counts.
+
+### H26. `package.json` start script is broken
+- **File**: `package.json:8` (`"start": "node .next/standalone/server.js"`)
+- **Description**: Uses standalone server output, but `next.config.ts` doesn't set `output: "standalone"`. The `.next/standalone/server.js` file doesn't exist after `next build`. The render.yaml uses `npx next start` instead (which works), so this is dead code. But if someone runs `npm start`, it fails.
+- **Fix**: Either add `output: "standalone"` to next.config.ts and use the standalone server, or change the start script to `next start`.
+
+### H27. `getClientIP` trusts X-Forwarded-For blindly
+- **File**: `src/lib/http-utils.ts:53-54`
+- **Description**: `xff.split(",")[0].trim()` takes the LEFTMOST IP from X-Forwarded-For. An attacker can spoof this header to bypass IP-based rate limits. Render's proxy chain may have multiple hops.
+- **Fix**: Use the rightmost untrusted IP, or configure trusted proxies and walk right-to-left.
+
+### H28. `secure: false` for cookies — can be sent over HTTP
+- **File**: `src/lib/auth.ts:53,63`
+- **Description**: Cookies are set without `Secure` flag. This was a Render workaround (proxy TLS), but means cookies could be sent over HTTP if the origin is accessed directly. If someone hits the Render internal URL (without TLS), cookies leak.
+- **Fix**: Use `secure: request.headers.get("x-forwarded-proto") === "https"` to dynamically set Secure based on the proxy protocol.
+
+### H29. `admin/restore` is a stub — never actually restores
+- **File**: `src/app/api/admin/restore/route.ts:31-32`
+- **Description**: Returns 202 "pending" with `message: "Restore queued. Run scripts/restore-backup.ts manually."` But `scripts/restore-backup.ts` doesn't exist. The restore button in the UI does nothing.
+- **Fix**: Implement actual restore logic, or remove the button and mark as "not implemented".
+
+---
+
+## MEDIUM (27) — minor bugs, inconsistencies, code quality
+
+### M1. `updateMany` has dead code
+- **File**: `src/lib/db.ts:108-109`
+- `conditions` variable computed but never used. The actual SQL uses `IN (placeholders)`.
+
+### M2. `originalFindMany` and `originalCount` captured but never used
+- **File**: `src/lib/db.ts:397,441`
+- Dead variables. The overrides replace the methods entirely without calling the originals.
+
+### M3. `sameSite: "lax"` instead of spec's "strict"
+- **File**: `src/lib/auth.ts:54`
+- Contract deviation from spec §6.1 (SameSite=Strict). Lax allows cross-site navigation requests.
+
+### M4. Cookie name `telem_session` not `__Host-telem_session`
+- **File**: `src/lib/auth.ts:8`
+- Render workaround. Without `__Host-` prefix, cookie is not bound to a specific host. Subdomain attacks possible.
+
+### M5. `?token=` query param for ingest — tokens leak
+- **File**: `src/middleware.ts:96-98`
+- Query-param tokens appear in server logs, referrer headers, browser history, CDN edge logs.
+
+### M6. CSP allows `unsafe-eval` and `unsafe-inline`
+- **File**: `src/lib/http-utils.ts:41`
+- `script-src 'self' 'unsafe-inline' 'unsafe-eval'` — XSS risk. Needed for Next.js dev, but should be restricted in production.
+
+### M7. `/health` leaks information
+- **File**: `src/app/health/route.ts:19-30`
+- Public endpoint leaks `version`, `targetLoadRpm`, `rateLimitMaxIngest`, `circuits`, `rateLimiter` stats.
+
+### M8. `/api/metrics` is public — leaks counts
+- **File**: `src/middleware.ts:13`
+- Public endpoint leaks session counts, traffic job counts, rate limiter buckets.
+
+### M9. Prometheus label format invalid
+- **File**: `src/lib/metrics.ts:46`
+- `${c.name}{${label}}` produces `ingest_total{ingest} 5`. Prometheus labels need `key="value"` format: `ingest_total{source="ingest"} 5`. Prometheus would fail to parse.
+
+### M10. `writeAudit` metadata double-stringified
+- **File**: `src/app/api/admin/settings/route.ts:81`
+- `metadata: JSON.stringify({...})` — but `writeAudit` in audit.ts:23 already does `JSON.stringify(input.metadata)`. Double-stringified. Audit-log.tsx does `JSON.parse()` once → gets a string, not an object.
+
+### M11. Footer says `__Host-telem_session` but actual cookie is `telem_session`
+- **File**: `src/app/page.tsx:315`
+- Misleading UI documentation.
+
+### M12. `handleLogout` reloads page
+- **File**: `src/app/page.tsx:109`
+- `setTimeout(() => window.location.reload(), 300)` — workaround instead of React state update. Should just invalidate auth query.
+
+### M13. `vercel.json` is dead config
+- **File**: `vercel.json`
+- App deployed on Render, not Vercel. Dead file.
+
+### M14. `Caddyfile` is dead config
+- **File**: `Caddyfile`
+- Local dev reverse proxy only. Not used on Render.
+
+### M15. `mini-services/worker/` is dead code on production
+- **File**: `mini-services/worker/`
+- In-process worker replaced it (Task 17). Also broken (H7 — poll route doesn't load gpsPoints). Should be deleted or moved to `dev-tools/`.
+
+### M16. `contracts.ts` is dead code
+- **File**: `src/lib/contracts.ts`
+- Never imported anywhere. DI interfaces that were never used.
+
+### M17. `retention.ts` `runRetention` is dead code
+- **File**: `src/lib/retention.ts`
+- Exported but never called. No retention cron exists.
+
+### M18. `/api/cron/finalize-sessions` has no scheduled caller
+- **File**: `src/app/api/cron/finalize-sessions/route.ts`
+- Dead endpoint. No cron job calls it. SensorLogger sessions stuck (C17).
+
+### M19. Many unused dependencies in package.json
+- **File**: `package.json:13-92`
+- `@dnd-kit/*`, `@mdxeditor/editor`, `next-auth`, `next-intl`, `react-day-picker`, `react-hook-form`, `react-markdown`, `react-syntax-highlighter`, `recharts`, `uuid`, `zustand`, `z-ai-web-dev-sdk` — bloat build and increase cold-start time.
+
+### M20. LRU eviction is FIFO
+- **File**: `src/lib/cache.ts:55-58,67-70`; `src/lib/rate-limit.ts:28-31`
+- `keys().next().value` returns oldest INSERTED key, not least recently used. Frequently-used buckets can be evicted.
+
+### M21. `assertCapacity` is dead code
+- **File**: `src/lib/env.ts:111-127`
+- Never called. Returns capacity warnings that are never enforced or displayed.
+
+### M22. `$queryRaw` type generic is misleading
+- **File**: `src/lib/db.ts:341-346`
+- Generic type `<T>` is ignored at runtime. Returns `Rows[]` (Record<string, unknown>[]), not the typed result.
+
+### M23. Unused exports from auth.ts
+- **File**: `src/lib/auth.ts:161`
+- `COOKIE_TTL_SEC` and `getClientIP` are exported but never imported from auth.ts (getClientIP is imported from http-utils).
+
+### M24. Unused `Prisma` import in worker/poll
+- **File**: `src/app/api/worker/poll/route.ts:9`
+- `import { Prisma } from "@prisma/client"` — only used in a comment.
+
+### M25. `db.session.findFirst` partially implemented
+- **File**: `src/lib/db.ts:124-149`
+- Supports `select` (filters columns after query), but the select filtering is manual and doesn't handle relations.
+
+### M26. Mobile page duplicates screens
+- **File**: `src/app/m/page.tsx:43-54`
+- `tab === "map"` and `tab === "trips"` both render `SessionListScreen`. Placeholder duplication.
+
+### M27. `logout` returns 200 instead of spec's 204
+- **File**: `src/app/api/auth/logout/route.ts:8-11`
+- Returns `{ ok: true }` with status 200. Spec says 204. Safer (avoids 204+body bug) but contract deviation.
+
+---
+
+## LOW (4) — style, minor issues
+
+### L1. Footer text mentions "Prisma" but app uses direct libsql
+- **File**: `src/app/page.tsx:307`
+- `Cookie: __Host-telem_session · HMAC-SHA256` and `Next.js 16 · Prisma · SQLite` — both misleading. App uses libsql directly, not Prisma client. Cookie is `telem_session`, not `__Host-telem_session`.
+
+### L2. `redis_backend` env var is misleading
+- **File**: `src/lib/rate-limit.ts:62-67`
+- `RedisRateLimiter` class is a stub that delegates to `memLimiter`. Setting `RATE_LIMIT_BACKEND=redis` does nothing.
+
+### L3. `BACKUP_VERIFICATION_ENABLED` default is string "true"
+- **File**: `src/lib/env.ts:41`
+- Compared as `env().BACKUP_VERIFICATION_ENABLED === "true"` — string comparison, not boolean. Works but fragile.
+
+### L4. `EXPORT_CLEANUP_CRON_UTC` is never used
+- **File**: `src/lib/env.ts:38`
+- Env var defined but no cleanup cron exists. Dead config.
+
+---
+
+## Cross-cutting Root Causes
+
+1. **`next.config.ts: ignoreBuildErrors: true`** (C13) — This single setting allowed all the `select` vs `include` type mismatches (C4, C5, C6, C9, C15, H7, H23, H25) to ship to production without being caught at build time. **This is the #1 root cause.**
+
+2. **Custom `db.ts` wrapper silently ignores unsupported Prisma features** — `select`, `OR`, compound keys, `where.id.in`, `include._count` are all silently dropped. The caller thinks the query worked, but the filter/selection was ignored. This causes data corruption (C6), wrong results (C15), and crashes (C4, C5, H7).
+
+3. **`db.$transaction` is fake** (C7) — No atomicity for multi-step operations. Combined with N+1 sequential inserts (C8, H16), this means ingest/import operations are both slow AND non-atomic.
+
+4. **In-memory state on Render Free** — Rate limits (H19), metrics (H20), circuit breaker (H21), share tokens (C10) all reset on every cold start. The keep-alive cron helps but doesn't survive deploys.
+
+5. **Secrets in render.yaml** (C1) — Committed to public GitHub. Must rotate immediately.
+
+---
+
+## Recommended Priority Actions
+
+1. **IMMEDIATE**: Rotate all production secrets (C1). Remove secrets from render.yaml.
+2. **IMMEDIATE**: Fix `api-client.ts:90` `input` bug (C3) — every 401 crashes the client.
+3. **IMMEDIATE**: Remove `typescript: { ignoreBuildErrors: true }` (C13) and fix all type errors.
+4. **IMMEDIATE**: Fix `db.session.findUnique` to support `select` (C4) — 3 endpoints return 500.
+5. **IMMEDIATE**: Fix bulk-delete `where.id.in` (C6) — data loss bug.
+6. **HIGH**: Fix `findExistingSession` compound key (C5) — idempotency broken.
+7. **HIGH**: Add `findMany` to `routeCache` and `exportJob` (C9) — backups fail.
+8. **HIGH**: Fix schema/DB mismatch (C12) — `url = env("DATABASE_URL")`.
+9. **HIGH**: Add `prisma db push` to build (C14).
+10. **HIGH**: Fix share endpoint to be public (C11) or store tokens in DB (C10).
+11. **HIGH**: Fix cache expiry comparison (H9) — persistent cache disabled.
+12. **HIGH**: Fix GPX export TypeError (H17).
+13. **HIGH**: Add ExportJob worker or remove async path (C16).
+14. **HIGH**: Fix SensorLogger session finalization (C17).
+15. **MEDIUM**: Clean up dead code (M13-M18, M21-M24).
+
+---
+
+Stage Summary:
+- Audited 38 API routes, 15 lib files, 30+ components, config files, worker runtime, Prisma schema.
+- Found 77 issues: 17 CRITICAL, 29 HIGH, 27 MEDIUM, 4 LOW.
+- Root causes: (1) `ignoreBuildErrors: true` hides type mismatches, (2) custom `db.ts` silently ignores unsupported Prisma features, (3) fake `$transaction`, (4) in-memory state on Render Free, (5) secrets in public repo.
+- 3 API endpoints always return 500 (stats, batch, plan/[sessionId]). 1 endpoint deletes wrong sessions (bulk-delete). Backups always fail. Share links don't work. Async exports never complete. SensorLogger sessions stuck forever.
+- NO code changes were made (read-only audit). All findings documented above with file:line, severity, description, and suggested fix.

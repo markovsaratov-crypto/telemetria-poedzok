@@ -1119,3 +1119,34 @@ Created: 2026-08-27
 URL: https://telemetria-poedzok.onrender.com/api/keepalive
 Schedule: every 10 minutes
 Purpose: prevent Render free tier from sleeping
+
+---
+Task ID: DEPLOY-2
+Agent: orchestrator
+Task: ZIP import + keep-alive + Render production fixes
+
+Deploy URL: https://telemetria-poedzok.onrender.com
+Status: LIVE (health=ok, db=ok, login works)
+
+What was fixed:
+1. package.json — restored all 78 dependencies (python script broke it)
+2. tailwindcss/postcss — moved from devDependencies to dependencies
+3. db.ts — direct libsql client (no Prisma engine URL validation issues)
+4. env.ts — lenient validation with defaults (no crash on missing env vars)
+5. auth.ts — cookie name "telem_session" (no __Host- prefix), secure: false (Render proxy TLS)
+6. api-client.ts — 401 from /api/auth/me doesn't trigger "session expired" handler
+7. page.tsx — 401 handler invalidates auth query instead of page reload
+8. db.ts — added missing methods (gpsPoint.count, session.aggregate, groupBy, etc.)
+9. middleware.ts — 100MB payload limit for /api/import/zip, public /api/keepalive
+10. render.yaml — all env vars inline, next start instead of standalone
+
+New features:
+- POST /api/import/zip — ZIP archive import (SensorLogger format)
+- GET /api/keepalive — public endpoint for keep-alive pings
+- ZipImport component — drag&drop ZIP upload with progress
+- Keep-alive cron job (every 10 min) to prevent Render free tier sleep
+
+SensorLogger ZIP format:
+- Location.csv: time (ns), latitude, longitude, altitude, speed, bearing, accuracy
+- Metadata.csv: device name, device id, recording time, timezone
+- Auto-detects columns, converts ns→ms timestamps, filters -1 null values, gap filtering

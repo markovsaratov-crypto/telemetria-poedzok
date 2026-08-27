@@ -16,10 +16,10 @@ interface BottomNavProps {
 }
 
 const TABS: { id: MobileTab; label: string; icon: React.ReactNode }[] = [
-  { id: "trips", label: "Поездки", icon: <List className="h-5 w-5" /> },
-  { id: "map", label: "Карта", icon: <Map className="h-5 w-5" /> },
-  { id: "analytics", label: "Аналитика", icon: <BarChart3 className="h-5 w-5" /> },
-  { id: "routes", label: "Маршруты", icon: <Route className="h-5 w-5" /> },
+  { id: "analytics", label: "Аналитика", icon: <BarChart3 className="h-6 w-6" /> },
+  { id: "trips", label: "Поездки", icon: <List className="h-6 w-6" /> },
+  { id: "map", label: "Карта", icon: <Map className="h-6 w-6" /> },
+  { id: "routes", label: "Маршруты", icon: <Route className="h-6 w-6" /> },
 ];
 
 export function BottomNav({ active, onChange }: BottomNavProps) {
@@ -46,7 +46,7 @@ export function BottomNav({ active, onChange }: BottomNavProps) {
               >
                 {tab.icon}
               </motion.div>
-              <span className="text-[10px] font-medium">{tab.label}</span>
+              <span className="text-xs font-medium">{tab.label}</span>
               {isActive && (
                 <motion.div
                   layoutId="bottomNavIndicator"

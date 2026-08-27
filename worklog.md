@@ -1150,3 +1150,52 @@ SensorLogger ZIP format:
 - Location.csv: time (ns), latitude, longitude, altitude, speed, bearing, accuracy
 - Metadata.csv: device name, device id, recording time, timezone
 - Auto-detects columns, converts ns→ms timestamps, filters -1 null values, gap filtering
+
+---
+Task ID: 17
+Agent: orchestrator (main)
+Task: Запустить worker автоматически и без костылей (Render Free tier — 1 web service only).
+
+Problem:
+- На Render Free tier можно запустить только 1 web-сервис.
+- mini-services/worker/ (отдельный Bun-процесс на :3001) никогда не запускался на Render — только локально.
+- Результат: 23 TrafficJob висели в pending, 0 в running. Сессии не переходили в status='completed'.
+- /api/cron/finalize-sessions тоже не вызывался (нет scheduled caller).
+
+Solution: in-process worker через Next.js 16 official instrumentation.ts hook.
+
+Architecture (без костылей):
+1. src/instrumentation.ts — Next.js автоматически вызывает register() при старте сервера.
+   Guard: пропускает Edge Runtime (typeof process.versions?.node check) и phase-production-build.
+2. src/lib/worker-runtime.ts — in-process worker:
+   - ПРЯМОЙ доступ к БД через libsql (db.ts), НЕ через HTTP API.
+   - Poll-loop каждые WORKER_POLL_INTERVAL_MS (5 сек default).
+   - Atomic claim: UPDATE TrafficJob SET status='running' WHERE id IN (SELECT ... pending) RETURNING id, sessionId, attempts.
+   - Загружает session.gpsPoints, строит маршрут через routeRequest() (2ГИС→OSRM→haversine chain).
+   - Обновляет TrafficJob.result + Session.status='completed'.
+   - При ошибке: requeue с exponential backoff (2s, 4s) если attempts<3, иначе status='dead'.
+   - Reclaim stuck running jobs (lockedAt > 60s) — resilience против crash/deploy.
+   - p-limit(WORKER_MAX_CONCURRENCY=5) для параллельной обработки батча.
+   - Идемпотентно через globalThis.__telemetriaWorkerRuntime guard (HMR-safe).
+   - SIGTERM/SIGINT graceful shutdown.
+3. /api/worker/health — добавлен блок inProcessWorker: { startedAt, uptimeSec, inFlight, pollIntervalMs, shuttingDown }.
+
+Files:
+- src/instrumentation.ts (NEW, 51 строк) — Next.js 16 instrumentation hook.
+- src/lib/worker-runtime.ts (NEW, 430 строк) — in-process worker runtime.
+- src/app/api/worker/health/route.ts (MODIFIED) — добавлен inProcessWorker блок.
+
+Verification:
+- Local: worker стартовал за 410ms после `next dev`. Reclaim'ил 2 stuck running jobs, обработал оба через haversine (OSRM упал — fallback сработал). 4/4 jobs completed.
+- Production (Render): push to GitHub → autoDeploy. Через ~4 минуты health endpoint показал:
+  pendingJobs: 0 (было 23!), runningJobs: 0, inProcessWorker.startedAt, uptimeSec: 95.
+  Все 23 pending jobs обработаны за ~95 секунд.
+- Все сессии на проде теперь status='completed'.
+
+Stage Summary:
+- Worker теперь работает автоматически на Render Free tier БЕЗ отдельного сервиса.
+- 23 зависших pending jobs обработаны.
+- Stuck running jobs (от прошлых crash/deploy) автоматически reclaim'ятся.
+- Cron finalizer для recording→completed больше не нужен (worker делает это сам при completion).
+- Lint: 0 ошибок, 0 warnings.
+- mini-services/worker/ остаётся для локальной разработки (опционально), но на проде не используется.

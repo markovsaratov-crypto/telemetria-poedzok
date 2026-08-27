@@ -85,9 +85,12 @@ export async function apiFetch<T = unknown>(
 
   const requestId = res.headers.get("x-request-id") || undefined;
 
-  // 401: auth lost
+  // 401: auth lost — but don't trigger handler for /api/auth/me (expected before login)
   if (res.status === 401) {
-    if (onUnauthorized) onUnauthorized();
+    const url = typeof input === "string" ? input : (input as Request).url || "";
+    if (!url.includes("/api/auth/me") && onUnauthorized) {
+      onUnauthorized();
+    }
     const body = (await parseBody(res, expect)) as { error?: string } | null;
     throw new ApiError(body?.error || "Требуется авторизация", 401, requestId, body);
   }

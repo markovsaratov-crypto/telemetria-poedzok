@@ -55,17 +55,17 @@ export function MetricTile({ label, value, unit, deviation, status = "neutral", 
       )}
     >
       {/* Value */}
-      <div className={cn("text-2xl font-bold tabular-nums leading-none", STATUS_TEXT[status])}>
+      <div className={cn("text-3xl font-bold tabular-nums leading-none", STATUS_TEXT[status])}>
         {value ?? "—"}
-        {unit && <span className="text-xs font-normal text-muted-foreground ml-0.5">{unit}</span>}
+        {unit && <span className="text-sm font-normal text-muted-foreground ml-0.5">{unit}</span>}
       </div>
       {/* Label */}
-      <div className="text-[11px] text-muted-foreground mt-1.5 text-center leading-tight">
+      <div className="text-[13px] text-muted-foreground mt-1.5 text-center leading-tight">
         {label}
       </div>
       {/* Deviation */}
       {deviation != null && (
-        <div className={cn("text-[10px] font-medium tabular-nums mt-0.5", devColor)}>
+        <div className={cn("text-[12px] font-medium tabular-nums mt-0.5", devColor)}>
           {deviation > 0 ? "+" : ""}{deviation.toFixed(0)}%
         </div>
       )}

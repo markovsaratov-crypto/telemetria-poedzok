@@ -57,15 +57,15 @@ export default function Home() {
   const [helpOpen, setHelpOpen] = React.useState(false);
   const [searchOpen, setSearchOpen] = React.useState(false);
 
-  // Принудительный сброс auth-кэша при 401 из любого запроса.
+  // Принудительный сброс auth-кэша при 401 из любого запроса (кроме /api/auth/me).
   React.useEffect(() => {
     setUnauthorizedHandler(() => {
       if (typeof window !== "undefined") {
-        toast.error("Сессия истекла", { description: "Требуется повторный вход" });
-        setTimeout(() => window.location.reload(), 800);
+        // Don't reload — just invalidate auth query so LoginForm shows
+        queryClient.invalidateQueries({ queryKey: ["auth"] });
       }
     });
-  }, []);
+  }, [queryClient]);
 
   // Cmd+K / Ctrl+K — открыть command palette
   // "?" — показать справку по shortcuts

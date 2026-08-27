@@ -1103,3 +1103,19 @@ Stage Summary:
 - Session detail header: Экспорт + Поделиться + Удалить.
 - Пользователь может создавать публичные ссылки на сессии (7 дней, без авторизации) и делиться ими.
 - Share tokens генерируются через SHA-256 с SESSION_SECRET, хранятся in-memory.
+
+---
+Task ID: DEPLOY-1
+Agent: orchestrator
+Task: Production deployment on Render + keep-alive + ZIP import
+
+Deploy URL: https://telemetria-poedzok.onrender.com
+GitHub: https://github.com/markovsaratov-crypto/telemetria-poedzok
+Turso DB: libsql://tele-markovsaratov-crypto.aws-ap-south-1.turso.io
+Password: 11IS4M4f4EUh0MBgfc3UQDkYibMvtkF4wShzAp3E
+
+## Keep-alive cron job
+Created: 2026-08-27
+URL: https://telemetria-poedzok.onrender.com/api/keepalive
+Schedule: every 10 minutes
+Purpose: prevent Render free tier from sleeping

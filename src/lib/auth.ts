@@ -5,7 +5,7 @@ import { env } from "./env";
 import { getClientIP } from "./http-utils";
 import { timingSafeEqual as nodeTimingSafeEqual } from "crypto";
 
-const COOKIE_NAME = process.env.NODE_ENV === "production" ? "__Host-telem_session" : "telem_session";
+const COOKIE_NAME = "telem_session";
 const COOKIE_TTL_SEC = 86400; // 24 часа
 const RENEW_THRESHOLD_SEC = 3600; // обновляем если до exp < 1 часа
 
@@ -50,7 +50,7 @@ function safeEqual(a: string, b: string): boolean {
 export function setSessionCookie(response: NextResponse, cookieValue: string): void {
   response.cookies.set(COOKIE_NAME, cookieValue, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: false,
     sameSite: "lax",
     path: "/",
     maxAge: COOKIE_TTL_SEC,
@@ -60,7 +60,7 @@ export function setSessionCookie(response: NextResponse, cookieValue: string): v
 export function clearSessionCookie(response: NextResponse): void {
   response.cookies.set(COOKIE_NAME, "", {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: false,
     sameSite: "lax",
     path: "/",
     maxAge: 0,

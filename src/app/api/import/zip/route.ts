@@ -61,8 +61,7 @@ function parseZip(buffer: Buffer): Map<string, Buffer> {
       // Stored (no compression)
       files.set(fileName, buffer.subarray(dataOffset, dataOffset + uncompressedSize));
     } else if (compressionMethod === 8) {
-      // Deflate — use Node.js zlib
-      import { inflateSync } from "zlib";
+      // Deflate — use Node.js zlib (inflateSync imported at top of file)
       const compressed = buffer.subarray(dataOffset, dataOffset + compressedSize);
       files.set(fileName, inflateSync(compressed));
     }

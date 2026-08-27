@@ -52,8 +52,10 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   try {
     // 0. payload-size guard (до чтения body, §2.4)
+    // Skip for ZIP imports (large files expected)
+    const isZipImport = pathname === "/api/import/zip";
     const cl = Number(request.headers.get("content-length") ?? 0);
-    const maxBytes = env().MAX_PAYLOAD_BYTES;
+    const maxBytes = isZipImport ? 100 * 1024 * 1024 : env().MAX_PAYLOAD_BYTES; // 100MB for ZIP, 256KB default
     if (cl > maxBytes) {
       return json({ error: "Payload too large", limit: maxBytes }, 413, { "X-Request-Id": requestId });
     }

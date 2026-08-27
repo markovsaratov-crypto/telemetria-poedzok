@@ -46,10 +46,10 @@ export async function POST(request: NextRequest) {
     let metadataCsv = "";
     for (const entry of zip.getEntries()) {
       const lower = entry.entryName.toLowerCase();
-      if (lower.includes("location") && lower.endsWith(".csv")) {
+      if (lower === "location.csv" || (lower.startsWith("location") && lower.endsWith(".csv"))) {
         locationCsv = entry.getData().toString("utf8");
       }
-      if (lower.includes("metadata") && lower.endsWith(".csv")) {
+      if (lower === "metadata.csv" || (lower.startsWith("metadata") && lower.endsWith(".csv"))) {
         metadataCsv = entry.getData().toString("utf8");
       }
     }

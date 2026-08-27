@@ -2,6 +2,7 @@
 // Uses @libsql/client directly for all database operations.
 // Prisma is used only for type generation (schema.prisma).
 import { createClient, type Client } from "@libsql/client";
+import { randomUUID } from "crypto";
 
 const globalForDb = globalThis as unknown as {
   libsqlClient: Client | undefined;
@@ -87,8 +88,9 @@ export const db = {
       return session;
     },
     async create(args: { data: Record<string, unknown> }) {
-      const keys = Object.keys(args.data);
-      const values = Object.values(args.data);
+      const data = { id: randomUUID(), ...args.data };
+      const keys = Object.keys(data);
+      const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
       const result = await libsql.execute({ sql: `INSERT INTO Session (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values });
       return toCamel(result.rows[0] as Record<string, unknown>);
@@ -136,8 +138,9 @@ export const db = {
   },
   trafficJob: {
     async create(args: { data: Record<string, unknown> }) {
-      const keys = Object.keys(args.data);
-      const values = Object.values(args.data);
+      const data = { id: randomUUID(), ...args.data };
+      const keys = Object.keys(data);
+      const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
       const result = await libsql.execute({ sql: `INSERT INTO TrafficJob (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values });
       return toCamel(result.rows[0] as Record<string, unknown>);
@@ -183,8 +186,9 @@ export const db = {
   },
   auditLog: {
     async create(args: { data: Record<string, unknown> }) {
-      const keys = Object.keys(args.data);
-      const values = Object.values(args.data);
+      const data = { id: randomUUID(), ...args.data };
+      const keys = Object.keys(data);
+      const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
       await libsql.execute({ sql: `INSERT INTO AuditLog (${keys.join(", ")}) VALUES (${placeholders})`, args: values });
     },
@@ -222,8 +226,9 @@ export const db = {
       return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
     },
     async create(args: { data: Record<string, unknown> }) {
-      const keys = Object.keys(args.data);
-      const values = Object.values(args.data);
+      const data = { id: randomUUID(), ...args.data };
+      const keys = Object.keys(data);
+      const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
       const result = await libsql.execute({ sql: `INSERT INTO Route (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values });
       return toCamel(result.rows[0] as Record<string, unknown>);
@@ -272,8 +277,9 @@ export const db = {
       return job;
     },
     async create(args: { data: Record<string, unknown> }) {
-      const keys = Object.keys(args.data);
-      const values = Object.values(args.data);
+      const data = { id: randomUUID(), ...args.data };
+      const keys = Object.keys(data);
+      const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
       const result = await libsql.execute({ sql: `INSERT INTO ExportJob (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values });
       return toCamel(result.rows[0] as Record<string, unknown>);
@@ -281,8 +287,9 @@ export const db = {
   },
   backupJob: {
     async create(args: { data: Record<string, unknown> }) {
-      const keys = Object.keys(args.data);
-      const values = Object.values(args.data);
+      const data = { id: randomUUID(), ...args.data };
+      const keys = Object.keys(data);
+      const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
       const result = await libsql.execute({ sql: `INSERT INTO BackupJob (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values });
       return toCamel(result.rows[0] as Record<string, unknown>);

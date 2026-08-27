@@ -11,14 +11,12 @@ const SESSION_COOKIE_NAME = "telem_session";
 
 // Эндпоинты без авторизации
 const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics"];
-// Эндпоинты с особым auth scope
-const INGEST_PATHS = ["/api/ingest"];
 const ADMIN_PATHS = ["/api/admin/"];
 const WORKER_PATHS = ["/api/worker/"];
 
 function rateLimitForPath(pathname: string): { limit: number; windowSec: number; scope: string } {
   const e = env();
-  if (pathname === "/api/ingest") return { limit: e.RATE_LIMIT_MAX_INGEST, windowSec: 60, scope: "ingest" };
+  if (pathname === "/api/ingest" || pathname.startsWith("/api/ingest/")) return { limit: e.RATE_LIMIT_MAX_INGEST, windowSec: 60, scope: "ingest" };
   if (pathname === "/api/auth/login") return { limit: e.RATE_LIMIT_MAX_AUTH, windowSec: 60, scope: "auth:login" };
   if (pathname === "/api/plan") return { limit: e.RATE_LIMIT_MAX_PLAN, windowSec: 60, scope: "plan" };
   if (pathname === "/api/admin/backup" || pathname === "/api/admin/restore") return { limit: e.RATE_LIMIT_MAX_ADMIN, windowSec: 3600, scope: "admin:heavy" };
@@ -94,22 +92,30 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     if (!isPublic && pathname.startsWith("/api/")) {
       const auth = request.headers.get("authorization") || "";
       const cookie = request.headers.get("cookie") || "";
+      // ?token= query param — альтернатива Bearer header для ingest/cron (SensorLogger, cron jobs)
+      const queryToken = request.nextUrl.searchParams.get("token") || "";
+      const hasBearer = /^Bearer\s+\S{32,}$/i.test(auth);
+      const hasQueryToken = queryToken.length >= 32;
 
-      if (INGEST_PATHS.includes(pathname)) {
-        if (!/^Bearer\s+\S{32,}$/i.test(auth)) {
-          return json({ error: "Unauthorized", reason: "INGEST_TOKEN required" }, 401, { "X-Request-Id": requestId });
+      if (pathname === "/api/ingest" || pathname.startsWith("/api/ingest/")) {
+        if (!hasBearer && !hasQueryToken) {
+          return json({ error: "Unauthorized", reason: "INGEST_TOKEN required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
+        }
+      } else if (pathname.startsWith("/api/cron/")) {
+        if (!hasBearer && !hasQueryToken) {
+          return json({ error: "Unauthorized", reason: "CRON_SECRET required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
         }
       } else if (WORKER_PATHS.some((p) => pathname.startsWith(p))) {
-        if (!/^Bearer\s+\S{32,}$/i.test(auth)) {
+        if (!hasBearer) {
           return json({ error: "Unauthorized", reason: "CRON_SECRET required" }, 401, { "X-Request-Id": requestId });
         }
       } else if (ADMIN_PATHS.some((p) => pathname.startsWith(p))) {
-        if (!/^Bearer\s+\S{32,}$/i.test(auth) && !cookie.includes(SESSION_COOKIE_NAME)) {
+        if (!hasBearer && !cookie.includes(SESSION_COOKIE_NAME)) {
           return json({ error: "Unauthorized", reason: "ADMIN_TOKEN or cookie required" }, 401, { "X-Request-Id": requestId });
         }
       } else {
         // default api scope: bearer или cookie
-        if (!/^Bearer\s+\S{32,}$/i.test(auth) && !cookie.includes(SESSION_COOKIE_NAME)) {
+        if (!hasBearer && !cookie.includes(SESSION_COOKIE_NAME)) {
           return json({ error: "Unauthorized" }, 401, { "X-Request-Id": requestId });
         }
       }

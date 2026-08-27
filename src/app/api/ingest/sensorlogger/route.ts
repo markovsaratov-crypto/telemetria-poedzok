@@ -1,8 +1,23 @@
-// POST /api/ingest/sensorlogger — адаптер для SensorLogger HTTP Push (iOS app).
-// Принимает нативный формат SensorLogger: JSON-массив сенсорных батчей с вложенной location.
+// POST /api/ingest/sensorlogger — адаптер для SensorLogger HTTP Push (iOS/Android app).
+// Документация формата: https://github.com/tszheichoi/awesome-sensor-logger/blob/main/PUSHING.md
+//
+// Тело запроса (нативный формат SensorLogger):
+//   {
+//     "messageId": 0,
+//     "sessionId": "identifier",      ← ID записи на устройстве
+//     "deviceId": "identifier",        ← ID устройства
+//     "userId": "identifier" (optional),
+//     "payload": [
+//       { "name": "location", "time": 1698501145514000000,
+//         "values": { "latitude": 51.54, "longitude": 46.0, "speed": 12.5,
+//                     "altitude": 80, "bearing": 180, "horizontalAccuracy": 5 } },
+//       { "name": "accelerometer", "time": ..., "values": { "x":..., "y":..., "z":... } },
+//       ...
+//     ]
+//   }
+//
 // Auth: Authorization: Bearer <INGEST_TOKEN>  ИЛИ  ?token=<INGEST_TOKEN>
-// Query: ?deviceId=<required>&deviceName=<optional>
-// Корреляция сессий: батчи с одним deviceId в пределах 60с друг от друга = одна сессия.
+// Батчи с одним (deviceId, sessionId) = одна сессия в БД.
 import { NextRequest } from "next/server";
 import { libsql } from "@/lib/db";
 import { extractBearer } from "@/lib/auth";
@@ -12,35 +27,49 @@ import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import { randomUUID } from "crypto";
 
-const SESSION_GAP_MS = 60_000; // 60с gap = новая сессия
+interface LocationValues {
+  latitude?: number;
+  longitude?: number;
+  speed?: number;
+  altitude?: number;
+  altitudeAboveMeanSeaLevel?: number;
+  bearing?: number;
+  heading?: number;
+  course?: number;
+  horizontalAccuracy?: number;
+  verticalAccuracy?: number;
+  speedAccuracy?: number;
+  bearingAccuracy?: number;
+}
 
-interface RawPoint {
+interface SensorPayloadItem {
+  name?: string;
   time?: number;
   timestamp?: number;
-  location?: {
-    latitude?: number;
-    longitude?: number;
-    speed?: number;
-    altitude?: number;
-    horizontalAccuracy?: number;
-    verticalAccuracy?: number;
-    course?: number;
-    bearing?: number;
-    heading?: number;
-  };
-  // Плоские fallback-поля
+  values?: LocationValues & Record<string, unknown>;
+  // Плоский fallback (не стандарт, но перестраховка)
   latitude?: number;
-  lat?: number;
   longitude?: number;
+  lat?: number;
   lon?: number;
   lng?: number;
   speed?: number;
   altitude?: number;
-  horizontalAccuracy?: number;
-  accuracy?: number;
-  course?: number;
   bearing?: number;
   heading?: number;
+  course?: number;
+  horizontalAccuracy?: number;
+  accuracy?: number;
+}
+
+interface SensorLoggerBody {
+  messageId?: number;
+  sessionId?: string;
+  deviceId?: string;
+  userId?: string;
+  payload?: SensorPayloadItem[];
+  // Fallback на случай если кто-то шлёт чистый массив
+  points?: SensorPayloadItem[];
 }
 
 interface NormalizedPoint {
@@ -53,22 +82,25 @@ interface NormalizedPoint {
   timestampMs: number;
 }
 
-function extractPoint(raw: RawPoint): NormalizedPoint | null {
-  const loc = raw.location || {};
-  const lat = raw.latitude ?? raw.lat ?? loc.latitude;
-  const lon = raw.longitude ?? raw.lon ?? raw.lng ?? loc.longitude;
+function extractPoint(item: SensorPayloadItem): NormalizedPoint | null {
+  // Только location-сенсор несёт GPS-координаты. Пропускаем accelerometer/gyro/etc.
+  if (item.name && item.name !== "location") return null;
+
+  const v = item.values || {};
+  const lat = item.latitude ?? item.lat ?? v.latitude;
+  const lon = item.longitude ?? item.lon ?? v.lng ?? v.longitude;
   if (lat == null || lon == null || isNaN(Number(lat)) || isNaN(Number(lon))) return null;
 
-  const tsRaw = raw.time ?? raw.timestamp;
+  const tsRaw = item.time ?? item.timestamp;
   if (tsRaw == null) return null;
   const ts = Number(tsRaw);
-  // нс → мс, мс → мс, с → мс
+  // SensorLogger всегда шлёт time в наносекундах UTC. Но для устойчивости:
   const timestampMs = ts > 1e15 ? Math.floor(ts / 1e6) : ts > 1e12 ? ts : ts > 1e9 ? ts * 1000 : Date.now();
 
-  const speed = raw.speed ?? loc.speed ?? null;
-  const altitude = raw.altitude ?? loc.altitude ?? null;
-  const accuracy = raw.horizontalAccuracy ?? raw.accuracy ?? loc.horizontalAccuracy ?? null;
-  const bearing = raw.course ?? raw.bearing ?? raw.heading ?? loc.course ?? loc.bearing ?? loc.heading ?? null;
+  const speed = item.speed ?? v.speed ?? null;
+  const altitude = item.altitude ?? v.altitude ?? v.altitudeAboveMeanSeaLevel ?? null;
+  const accuracy = item.horizontalAccuracy ?? item.accuracy ?? v.horizontalAccuracy ?? null;
+  const bearing = item.bearing ?? item.heading ?? item.course ?? v.bearing ?? v.heading ?? v.course ?? null;
 
   return {
     lat: Number(lat),
@@ -81,14 +113,14 @@ function extractPoint(raw: RawPoint): NormalizedPoint | null {
   };
 }
 
-async function createRecordingSession(deviceId: string, deviceName: string, firstTsMs: number): Promise<string> {
+async function createRecordingSession(deviceId: string, deviceName: string, clientId: string, firstTsMs: number): Promise<string> {
   const id = randomUUID();
   const now = new Date().toISOString();
   const startTime = new Date(firstTsMs).toISOString();
   await libsql.execute({
     sql: `INSERT INTO Session (id, deviceId, clientId, deviceName, startTime, endTime, pointCount, payloadBytes, status, createdAt, updatedAt)
           VALUES (?, ?, ?, ?, ?, ?, 0, 0, 'recording', ?, ?)`,
-    args: [id, deviceId, randomUUID(), deviceName, startTime, startTime, now, now],
+    args: [id, deviceId, clientId, deviceName, startTime, startTime, now, now],
   });
   return id;
 }
@@ -99,19 +131,16 @@ async function finalizeSession(sessionId: string): Promise<void> {
     sql: `UPDATE Session SET status = 'completed', updatedAt = ? WHERE id = ? AND status = 'recording'`,
     args: [now, sessionId],
   });
-  // Создаём TrafficJob для Worker (2ГИС → OSRM → haversine)
   const jobId = randomUUID();
   await libsql.execute({
     sql: `INSERT INTO TrafficJob (id, sessionId, status, priority, attempts, createdAt, updatedAt)
           VALUES (?, ?, 'pending', 0, 0, ?, ?)`,
     args: [jobId, sessionId, now, now],
-  }).catch(() => {
-    // TrafficJob уже мог быть создан — игнорируем дубль
-  });
+  }).catch(() => null);
   await libsql.execute({
     sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
     args: [jobId, now, sessionId],
-  });
+  }).catch(() => null);
   logger.info("Session finalized", { sessionId, trafficJobId: jobId });
 }
 
@@ -135,55 +164,62 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. deviceId из query (обязательный)
-    const deviceId = url.searchParams.get("deviceId");
-    if (!deviceId) {
-      return json(
-        { error: "deviceId query param required. Example: ?deviceId=iphone-15-pro" },
-        400,
-        { "X-Request-Id": requestId }
-      );
-    }
-    const deviceName = url.searchParams.get("deviceName") || "SensorLogger";
-
-    // 3. Parse body — массив (SensorLogger) или объект с points (наш формат)
-    const body = await request.json().catch(() => null);
+    // 2. Parse body
+    const body = await request.json().catch(() => null) as SensorLoggerBody | SensorPayloadItem[] | null;
     if (!body) {
       return json({ error: "Invalid JSON body" }, 400, { "X-Request-Id": requestId });
     }
-    const items: RawPoint[] = Array.isArray(body)
-      ? body
-      : Array.isArray((body as { points?: unknown[] }).points)
-        ? (body as { points: RawPoint[] }).points
-        : [body as RawPoint];
-    if (items.length === 0) {
-      // SensorLogger "Test Push" шлёт пустой/минимальный body — считаем тест успешным
-      return json({ ok: true, test: true, message: "SensorLogger push test passed. Ready to receive GPS data.", deviceId, deviceName }, 200, { "X-Request-Id": requestId });
+
+    // Нормализуем к единому виду: либо body.payload, либо body.points, либо сам body — массив
+    let items: SensorPayloadItem[];
+    let slDeviceId: string | undefined;
+    let slSessionId: string | undefined;
+    let slMessageId: number | undefined;
+
+    if (Array.isArray(body)) {
+      // Чистый массив точек (не стандарт SensorLogger, но поддержка)
+      items = body;
+    } else {
+      items = body.payload ?? body.points ?? [];
+      slDeviceId = body.deviceId;
+      slSessionId = body.sessionId;
+      slMessageId = body.messageId;
     }
 
-    // 4. Нормализация точек
+    if (items.length === 0) {
+      // SensorLogger "Test Push" шлёт пустой/минимальный body
+      return json(
+        { ok: true, test: true, message: "SensorLogger push test passed. Ready to receive GPS data." },
+        200,
+        { "X-Request-Id": requestId }
+      );
+    }
+
+    // 3. Нормализация точек (фильтруем только location-сенсор)
     const points = items
       .map(extractPoint)
       .filter((p): p is NormalizedPoint => p !== null);
     if (points.length === 0) {
-      // Нет GPS-данных в батче, но формат валидный — считаем тестом
+      // Батч без location-данных (только accelerometer/gyro и т.п.) — отвечаем 200, ничего не пишем
       return json(
-        { ok: true, test: true, message: "No GPS points extracted from batch (missing location data). Push test passed.", deviceId, deviceName },
+        { ok: true, accepted: 0, message: "No location readings in payload (only non-GPS sensors). Nothing to ingest.", deviceId: slDeviceId, sessionId: slSessionId },
         200,
         { "X-Request-Id": requestId }
       );
     }
     points.sort((a, b) => a.timestampMs - b.timestampMs);
 
-    // 5. Корреляция сессий: ищем активную recording-сессию для этого deviceId.
-    // Gap-проверка по updatedAt (реальное время последнего батча), НЕ по endTime
-    // (endTime — это время последней точки из данных, может быть в прошлом при replay/тестах).
-    const now = Date.now();
+    // 4. deviceId: из тела SensorLogger, или из query, или fallback
+    const deviceId = slDeviceId || url.searchParams.get("deviceId") || "sensorlogger-unknown";
+    const deviceName = url.searchParams.get("deviceName") || "SensorLogger";
+    const clientId = slSessionId || randomUUID(); // clientId в нашей схеме = sessionId SensorLogger
+
+    // 5. Корреляция сессий: ищем активную recording-сессию для (deviceId, clientId)
     const recent = await libsql.execute({
       sql: `SELECT id, updatedAt FROM Session
-            WHERE deviceId = ? AND status = 'recording' AND deletedAt IS NULL
+            WHERE deviceId = ? AND clientId = ? AND status = 'recording' AND deletedAt IS NULL
             ORDER BY updatedAt DESC LIMIT 1`,
-      args: [deviceId],
+      args: [deviceId, clientId],
     });
 
     let sessionId: string;
@@ -191,22 +227,13 @@ export async function POST(request: NextRequest) {
 
     if (recent.rows.length > 0) {
       const row = recent.rows[0] as Record<string, unknown>;
-      const lastUpdatedAt = new Date(row.updatedAt as string).getTime();
-      if (now - lastUpdatedAt < SESSION_GAP_MS) {
-        // Продолжаем ту же сессию
-        sessionId = row.id as string;
-      } else {
-        // Прошло > 60с — финализируем старую, создаём новую
-        await finalizeSession(row.id as string);
-        sessionId = await createRecordingSession(deviceId, deviceName, points[0].timestampMs);
-        isNewSession = true;
-      }
+      sessionId = row.id as string;
     } else {
-      sessionId = await createRecordingSession(deviceId, deviceName, points[0].timestampMs);
+      sessionId = await createRecordingSession(deviceId, deviceName, clientId, points[0].timestampMs);
       isNewSession = true;
     }
 
-    // 6. Вставка GPS-точек (batch по 50)
+    // 6. Вставка GPS-точек
     const payloadBytes = Buffer.byteLength(JSON.stringify(body));
     for (let i = 0; i < points.length; i += 50) {
       const batch = points.slice(i, i + 50);
@@ -232,8 +259,9 @@ export async function POST(request: NextRequest) {
     logger.info("SensorLogger ingest", {
       requestId,
       sessionId,
-      deviceId,
-      deviceName,
+      slDeviceId: deviceId,
+      slSessionId: clientId,
+      slMessageId,
       points: points.length,
       newSession: isNewSession,
       durationMs: Date.now() - start,
@@ -266,7 +294,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// GET — для проверки "Test Push" в SensorLogger (если он шлёт GET на тест)
+// GET — для проверки "Test Push" в SensorLogger
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
   const queryToken = url.searchParams.get("token");
@@ -282,9 +310,8 @@ export async function GET(request: NextRequest) {
     ok: true,
     endpoint: "/api/ingest/sensorlogger",
     method: "POST",
-    format: "JSON array of { time, location: { latitude, longitude, speed, altitude, horizontalAccuracy, course } }",
+    format: "SensorLogger native: { messageId, sessionId, deviceId, payload: [{ name:'location', time, values:{latitude,longitude,speed,altitude,bearing,horizontalAccuracy} }] }",
     auth: "Authorization: Bearer <INGEST_TOKEN> OR ?token=<INGEST_TOKEN>",
-    requiredParams: ["deviceId"],
-    optionalParams: ["deviceName"],
+    note: "deviceId is taken from request body. No query params required.",
   });
 }

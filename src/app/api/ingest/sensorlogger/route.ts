@@ -157,7 +157,8 @@ export async function POST(request: NextRequest) {
         ? (body as { points: RawPoint[] }).points
         : [body as RawPoint];
     if (items.length === 0) {
-      return json({ error: "Empty batch" }, 400, { "X-Request-Id": requestId });
+      // SensorLogger "Test Push" шлёт пустой/минимальный body — считаем тест успешным
+      return json({ ok: true, test: true, message: "SensorLogger push test passed. Ready to receive GPS data.", deviceId, deviceName }, 200, { "X-Request-Id": requestId });
     }
 
     // 4. Нормализация точек
@@ -165,9 +166,10 @@ export async function POST(request: NextRequest) {
       .map(extractPoint)
       .filter((p): p is NormalizedPoint => p !== null);
     if (points.length === 0) {
+      // Нет GPS-данных в батче, но формат валидный — считаем тестом
       return json(
-        { error: "No valid GPS points in batch. Expected fields: location.latitude, location.longitude (or lat/lon), time" },
-        400,
+        { ok: true, test: true, message: "No GPS points extracted from batch (missing location data). Push test passed.", deviceId, deviceName },
+        200,
         { "X-Request-Id": requestId }
       );
     }

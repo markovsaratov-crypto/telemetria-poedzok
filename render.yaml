@@ -4,15 +4,13 @@ services:
     runtime: node
     plan: free
     region: frankfurt
-    buildCommand: npm install && DATABASE_URL="file:./db/local.db" npm run build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/
-    startCommand: node .next/standalone/server.js
+    buildCommand: npm install && DATABASE_URL="file:./db/local.db" npm run build
+    startCommand: npx next start -p $PORT
     healthCheckPath: /health
     autoDeploy: true
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: "3000"
       - key: DATABASE_URL
         value: libsql://tele-markovsaratov-crypto.aws-ap-south-1.turso.io
       - key: TURSO_AUTH_TOKEN
@@ -41,10 +39,6 @@ services:
         value: "262144"
       - key: WORKER_ID
         value: worker-render-01
-      - key: WORKER_BATCH_SIZE
-        value: "10"
-      - key: WORKER_MAX_CONCURRENCY
-        value: "5"
       - key: OSRM_BASE_URL
         value: https://router.project-osrm.org
       - key: CIRCUIT_BREAKER_THRESHOLD

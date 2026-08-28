@@ -1,13 +1,14 @@
 "use client";
 
 // src/components/mobile/Analytics/AnalyticsScreen.tsx
-// ТЗ §2.5 + ттз.docx: Экран 3 — Аналитика
-// Структура: KPI tiles (6) + Скоростной профиль + План-факт/поведение + Трафик + Переключатель режимов
+// ТЗ §2.5: Экран 3 — Аналитика
+// Real metrics from /api/stats (aggregate) + /api/sessions/[id]/stats (per-trip detail)
+// + /api/sessions/[id] for traffic (plan distance/duration).
 
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { BarChart3, FileText, ChevronDown, Clock, Gauge, Leaf, Target, Timer, AlertTriangle, TrendingUp, TrendingDown, TrafficCone } from "lucide-react";
-import { useStats, useRoutes, useSessions, useSessionStats } from "@/lib/hooks";
+import { BarChart3, FileText, Clock, Gauge, Activity, Timer, AlertTriangle, TrafficCone, Route as RouteIcon, TrendingUp, MapPin } from "lucide-react";
+import { useStats, useRoutes, useSessions, useSessionStats, useSession, useAggregateStats, useSpeedDistribution } from "@/lib/hooks";
 import { MetricTile } from "../shared/MetricTile";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -21,10 +22,47 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
   const { data: stats, isLoading: statsLoading } = useStats();
   const { data: sessionsData } = useSessions({ limit: 20 });
   const { data: sessionStats, isLoading: sessionStatsLoading } = useSessionStats(selectedSession);
+  const { data: sessionDetail } = useSession(selectedSession);
   const { data: routesData } = useRoutes();
+  const { data: aggregateStats } = useAggregateStats();
+  const { data: speedDist } = useSpeedDistribution();
 
   const sessions = sessionsData?.sessions || [];
-  const currentStats = mode === "aggregate" ? stats : sessionStats;
+
+  // Aggregate KPIs from /api/stats
+  const aggKpis = {
+    duration: aggregateStats?.totalDurationSec ?? 0,
+    distance: aggregateStats?.totalDistanceM ?? 0,
+    avgSpeed: aggregateStats?.avgSpeedMs ?? null,
+    maxSpeed: speedDist?.maxSpeedMs ?? null,
+    movingTime: 0,
+    idleTime: 0,
+  };
+
+  // Per-trip KPIs from /api/sessions/[id]/stats
+  const tripStats = sessionStats
+    ? {
+        duration: sessionStats.duration || 0,
+        distance: sessionStats.distance || 0,
+        avgSpeed: sessionStats.avgSpeed,
+        maxSpeed: sessionStats.maxSpeed,
+        movingTime: sessionStats.movingTime || 0,
+        idleTime: sessionStats.idleTime || 0,
+      }
+    : null;
+
+  // Plan-vs-fact: extract planned distance/duration from session.traffic (TrafficJob result)
+  const traffic = (sessionDetail as any)?.traffic as {
+    status?: string;
+    distanceM?: number;
+    durationSec?: number;
+    provider?: string;
+    trafficFetched?: boolean;
+  } | undefined;
+  const plannedDistance = traffic?.distanceM ?? null;
+  const plannedDuration = traffic?.durationSec ?? null;
+
+  const currentStats = mode === "aggregate" ? aggKpis : tripStats;
 
   return (
     <div className="flex flex-col h-full pb-16">
@@ -88,7 +126,7 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
           </div>
         ) : currentStats ? (
           <>
-            {/* === Блок 1: KPI плитки (6 шт, 3 в ряд) === */}
+            {/* === Блок 1: KPI плитки (6 шт, 3 в ряд) — REAL METRICS === */}
             <div>
               <h2 className="text-sm font-semibold mb-3 text-muted-foreground">KPI</h2>
               <div className="grid grid-cols-3 gap-2">
@@ -104,43 +142,60 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
                 />
                 <MetricTile
                   label="Ср. скорость"
-                  value={(currentStats as any).avgSpeed ? Math.round((currentStats as any).avgSpeed * 3.6) : "—"}
+                  value={(currentStats as any).avgSpeed ? ((currentStats as any).avgSpeed * 3.6).toFixed(1) : "—"}
                   unit="км/ч"
                 />
+                {/* REAL: Макс. скорость */}
                 <MetricTile
-                  label="EcoScore"
-                  value={(currentStats as any).ecoScore ?? "—"}
+                  label="Макс. скорость"
+                  value={(currentStats as any).maxSpeed ? Math.round((currentStats as any).maxSpeed * 3.6) : "—"}
+                  unit="км/ч"
                   status={
-                    (currentStats as any).ecoScore >= 80 ? "success"
-                    : (currentStats as any).ecoScore >= 60 ? "warning"
-                    : "error"
-                  }
-                />
-                <MetricTile
-                  label="Отклонение"
-                  value={(currentStats as any).deviation ? `${(currentStats as any).deviation > 0 ? "+" : ""}${(currentStats as any).deviation.toFixed(0)}%` : "—"}
-                  status={
-                    Math.abs((currentStats as any).deviation || 0) > 10 ? "error"
-                    : Math.abs((currentStats as any).deviation || 0) > 5 ? "warning"
+                    (currentStats as any).maxSpeed == null ? "neutral"
+                    : (currentStats as any).maxSpeed * 3.6 > 110 ? "error"
+                    : (currentStats as any).maxSpeed * 3.6 > 60 ? "warning"
                     : "success"
                   }
                 />
+                {/* REAL: В движении (movingTime) */}
                 <MetricTile
-                  label="В пробках"
-                  value={(currentStats as any).timeInTraffic ? Math.round((currentStats as any).timeInTraffic / 60) : "—"}
+                  label="В движении"
+                  value={(currentStats as any).movingTime ? Math.round((currentStats as any).movingTime / 60) : "—"}
                   unit="мин"
+                  status={
+                    (currentStats as any).movingTime == null ? "neutral"
+                    : (currentStats as any).movingTime > 600 ? "success"
+                    : "neutral"
+                  }
+                />
+                {/* REAL: Остановки (idleTime) */}
+                <MetricTile
+                  label="Остановки"
+                  value={(currentStats as any).idleTime ? Math.round((currentStats as any).idleTime / 60) : "—"}
+                  unit="мин"
+                  status={
+                    (currentStats as any).idleTime == null ? "neutral"
+                    : (currentStats as any).idleTime > 600 ? "error"
+                    : (currentStats as any).idleTime > 180 ? "warning"
+                    : "success"
+                  }
                 />
               </div>
             </div>
 
-            {/* === Блок 2: Скоростной профиль === */}
-            <SpeedProfileBlock stats={currentStats as any} />
+            {/* === Блок 2: Скоростной профиль (horizontal bullet chart) === */}
+            <SpeedProfileBlock stats={currentStats as any} speedDist={speedDist} />
 
-            {/* === Блок 3: План-факт и поведение (2 колонки) === */}
-            <PlanFactBehaviorBlock stats={currentStats as any} />
+            {/* === Блок 3: План-факт и поведение (2 колонки) — REAL plan-fact === */}
+            <PlanFactBehaviorBlock
+              stats={currentStats as any}
+              plannedDistance={plannedDistance}
+              plannedDuration={plannedDuration}
+              trafficProvider={traffic?.provider ?? null}
+            />
 
-            {/* === Блок 4: Трафик и заторы (только если есть traffic) === */}
-            {(currentStats as any).trafficFetched && <TrafficBlock stats={currentStats as any} />}
+            {/* === Блок 4: Трафик и заторы === */}
+            {traffic?.trafficFetched && <TrafficBlock stats={currentStats as any} traffic={traffic} />}
 
             {/* === Топ маршрутов (aggregate mode only) === */}
             {mode === "aggregate" && routesData?.routes && routesData.routes.length > 0 && (
@@ -170,51 +225,82 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
   );
 }
 
-// === Блок 2: Скоростной профиль ===
-function SpeedProfileBlock({ stats }: { stats: any }) {
+// === Блок 2: Скоростной профиль — horizontal bullet chart ===
+function SpeedProfileBlock({ stats, speedDist }: { stats: any; speedDist: any }) {
   const [showDetail, setShowDetail] = React.useState(false);
-  const maxSpeed = stats?.maxSpeed ? Math.round(stats.maxSpeed * 3.6) : 0;
-  const avgSpeed = stats?.avgSpeed ? Math.round(stats.avgSpeed * 3.6) : 0;
+  const maxSpeedMs = stats?.maxSpeed ?? speedDist?.maxSpeedMs ?? 0;
+  const maxSpeedKmh = Math.round(maxSpeedMs * 3.6);
+  const avgSpeedMs = stats?.avgSpeed ?? speedDist?.avgSpeedMs ?? 0;
+  const avgSpeedKmh = avgSpeedMs != null ? (avgSpeedMs * 3.6).toFixed(1) : "—";
 
-  // Mini histogram (4 buckets)
-  const buckets = [
-    { label: "0-20", value: 30, color: "oklch(0.70 0.20 350)" },
-    { label: "20-40", value: 45, color: "oklch(0.80 0.15 85)" },
-    { label: "40-60", value: 20, color: "oklch(0.70 0.17 50)" },
-    { label: "60+", value: 5, color: "oklch(0.65 0.18 145)" },
-  ];
-  const maxBucket = Math.max(...buckets.map(b => b.value));
+  // Horizontal bullet chart: avg speed as a thin line on a 0..max+20% bar
+  const barMax = Math.max(maxSpeedKmh + 20, 60);
+  const avgPct = avgSpeedMs != null ? Math.min(100, ((avgSpeedMs * 3.6) / barMax) * 100) : 0;
+  const maxPct = Math.min(100, (maxSpeedKmh / barMax) * 100);
+
+  // Distribution buckets (from server or fallback 4 buckets)
+  const buckets = speedDist?.buckets?.length
+    ? speedDist.buckets
+    : [
+        { label: "0-20", count: 0, percent: 0 },
+        { label: "20-40", count: 0, percent: 0 },
+        { label: "40-60", count: 0, percent: 0 },
+        { label: "60+", count: 0, percent: 0 },
+      ];
+  const maxBucket = Math.max(...buckets.map((b: any) => b.count), 1);
 
   return (
     <div>
       <h2 className="text-sm font-semibold mb-3 text-muted-foreground">Скоростной профиль</h2>
       <div className="bg-card border rounded-xl p-4 space-y-3">
-        {/* Mini histogram */}
+        {/* Horizontal bullet chart */}
         <button onClick={() => setShowDetail(!showDetail)} className="w-full">
-          <div className="flex items-end justify-between gap-2 h-16">
-            {buckets.map((b, i) => (
-              <div key={i} className="flex-1 flex flex-col items-center gap-1">
-                <div
-                  className="w-full rounded-t-md transition-all"
-                  style={{ height: `${(b.value / maxBucket) * 100}%`, backgroundColor: b.color, minHeight: "4px" }}
-                />
-                <span className="text-[9px] text-muted-foreground">{b.label}</span>
+          {/* Horizontal bars per bucket (small) */}
+          <div className="space-y-1.5 mb-3">
+            {buckets.map((b: any, i: number) => (
+              <div key={i} className="flex items-center gap-2">
+                <span className="text-[10px] text-muted-foreground w-10 text-right shrink-0">{b.label}</span>
+                <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden relative">
+                  <div
+                    className="h-full rounded-full transition-all"
+                    style={{
+                      width: `${(b.count / maxBucket) * 100}%`,
+                      backgroundColor: i === 0 ? "oklch(0.70 0.20 350)"
+                        : i === 1 ? "oklch(0.80 0.15 85)"
+                        : i === 2 ? "oklch(0.70 0.17 50)"
+                        : "oklch(0.65 0.18 145)",
+                    }}
+                  />
+                </div>
+                <span className="text-[9px] text-muted-foreground tabular-nums w-10 shrink-0">{b.percent}%</span>
               </div>
             ))}
           </div>
-        </button>
 
-        {/* Stats */}
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-2xl font-bold tabular-nums">{avgSpeed}<span className="text-xs font-normal text-muted-foreground ml-1">км/ч</span></div>
-            <div className="text-[10px] text-muted-foreground">Медианная скорость</div>
+          {/* Bullet chart: avg speed vs max speed */}
+          <div className="pt-2 border-t">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] text-muted-foreground">Ср. vs Макс</span>
+              <span className="text-[10px] text-muted-foreground tabular-nums">{barMax} км/ч</span>
+            </div>
+            <div className="relative h-3 bg-muted rounded-full overflow-hidden">
+              {/* max bar */}
+              <div
+                className="absolute inset-y-0 left-0 bg-amber-500/40 rounded-l-full"
+                style={{ width: `${maxPct}%` }}
+              />
+              {/* avg line (bullet) */}
+              <div
+                className="absolute inset-y-0 w-0.5 bg-emerald-600"
+                style={{ left: `${avgPct}%` }}
+              />
+            </div>
+            <div className="flex items-center justify-between mt-1 text-[10px]">
+              <span className="text-emerald-600 dark:text-emerald-400">ср {avgSpeedKmh} км/ч</span>
+              <span className="text-amber-600 dark:text-amber-400">макс {maxSpeedKmh} км/ч</span>
+            </div>
           </div>
-          <div className="text-right">
-            <div className="text-sm font-medium tabular-nums">{maxSpeed} км/ч</div>
-            <div className="text-[10px] text-muted-foreground">Макс. скорость</div>
-          </div>
-        </div>
+        </button>
 
         {/* Detail (expandable) */}
         <AnimatePresence>
@@ -227,12 +313,12 @@ function SpeedProfileBlock({ stats }: { stats: any }) {
             >
               <div className="pt-3 border-t space-y-1">
                 <div className="flex justify-between text-xs">
-                  <span className="text-muted-foreground">Станд. отклонение:</span>
-                  <span className="font-medium tabular-nums">{stats?.speedStdDev ? Math.round(stats.speedStdDev * 3.6) : "—"} км/ч</span>
+                  <span className="text-muted-foreground">Всего точек со скоростью:</span>
+                  <span className="font-medium tabular-nums">{speedDist?.total ?? "—"}</span>
                 </div>
                 <div className="flex justify-between text-xs">
-                  <span className="text-muted-foreground">Крейсерское время:</span>
-                  <span className="font-medium tabular-nums">{stats?.timeAtCruise ? Math.round(stats.timeAtCruise / 60) : "—"} мин</span>
+                  <span className="text-muted-foreground">Макс. скорость:</span>
+                  <span className="font-medium tabular-nums">{maxSpeedKmh} км/ч</span>
                 </div>
               </div>
             </motion.div>
@@ -243,17 +329,71 @@ function SpeedProfileBlock({ stats }: { stats: any }) {
   );
 }
 
-// === Блок 3: План-факт и поведение ===
-function PlanFactBehaviorBlock({ stats }: { stats: any }) {
+// === Блок 3: План-факт и поведение — REAL plan-fact data ===
+function PlanFactBehaviorBlock({
+  stats,
+  plannedDistance,
+  plannedDuration,
+  trafficProvider,
+}: {
+  stats: any;
+  plannedDistance: number | null;
+  plannedDuration: number | null;
+  trafficProvider: string | null;
+}) {
+  // Actual distance/duration from session stats
+  const factDistance = stats?.distance ?? null;
+  const factDuration = stats?.duration ?? null;
+
+  // Deviations
+  const distanceDeviation =
+    plannedDistance != null && factDistance != null && plannedDistance > 0
+      ? ((factDistance - plannedDistance) / plannedDistance) * 100
+      : null;
+  const timeDeviation =
+    plannedDuration != null && factDuration != null && plannedDuration > 0
+      ? ((factDuration - plannedDuration) / plannedDuration) * 100
+      : null;
+
   const leftItems = [
-    { label: "Отклон. дистанции", value: stats?.distanceDeviation, unit: "%", type: "deviation" as const },
-    { label: "Отклон. скорости", value: stats?.speedDeviation, unit: "%", type: "deviation" as const },
-    { label: "Потери из-за пробок", value: stats?.timeLostToTraffic ? Math.round(stats.timeLostToTraffic / 60) : null, unit: "мин", type: "neutral" as const },
+    {
+      label: "План дистанция",
+      value: plannedDistance != null ? (plannedDistance / 1000).toFixed(2) : null,
+      unit: "км",
+      type: "neutral" as const,
+    },
+    {
+      label: "Факт дистанция",
+      value: factDistance != null ? (factDistance / 1000).toFixed(2) : null,
+      unit: "км",
+      type: "neutral" as const,
+    },
+    {
+      label: "Отклон. по времени",
+      value: timeDeviation,
+      unit: "%",
+      type: "deviation" as const,
+    },
   ];
   const rightItems = [
-    { label: "Резкие торможения", value: stats?.harshBrakingCount ?? null, unit: "шт", type: "count" as const, threshold: 3 },
-    { label: "Резкие разгоны", value: stats?.harshAccelCount ?? null, unit: "шт", type: "count" as const, threshold: 3 },
-    { label: "Индекс плавности", value: stats?.speedVariation ? Math.round(100 - stats.speedVariation / 10) : null, unit: "/100", type: "score" as const },
+    {
+      label: "Отклон. по дистанции",
+      value: distanceDeviation,
+      unit: "%",
+      type: "deviation" as const,
+    },
+    {
+      label: "В движении",
+      value: stats?.movingTime ? Math.round(stats.movingTime / 60) : null,
+      unit: "мин",
+      type: "neutral" as const,
+    },
+    {
+      label: "Провайдер маршрута",
+      value: trafficProvider ?? null,
+      unit: "",
+      type: "neutral" as const,
+    },
   ];
 
   return (
@@ -266,14 +406,16 @@ function PlanFactBehaviorBlock({ stats }: { stats: any }) {
             <div key={i} className={cn(
               "p-3 rounded-xl border",
               item.type === "deviation" && item.value != null
-                ? Math.abs(item.value) > 10 ? "bg-[oklch(0.95_0.05_25)] dark:bg-[oklch(0.25_0.05_25)]"
+                ? Math.abs(item.value) > 15 ? "bg-[oklch(0.95_0.05_25)] dark:bg-[oklch(0.25_0.05_25)]"
                 : Math.abs(item.value) > 5 ? "bg-[oklch(0.95_0.05_85)] dark:bg-[oklch(0.25_0.05_85)]"
                 : "bg-[oklch(0.95_0.05_145)] dark:bg-[oklch(0.25_0.05_145)]"
                 : "bg-card"
             )}>
               <div className="text-[11px] text-muted-foreground">{item.label}</div>
               <div className="text-lg font-bold tabular-nums">
-                {item.value != null ? `${item.value > 0 ? "+" : ""}${item.value}${item.unit}` : "—"}
+                {item.value != null
+                  ? `${item.value > 0 && item.type === "deviation" ? "+" : ""}${typeof item.value === "number" ? item.value.toFixed(item.type === "deviation" ? 0 : 2) : item.value}${item.unit}`
+                  : "—"}
               </div>
             </div>
           ))}
@@ -283,13 +425,17 @@ function PlanFactBehaviorBlock({ stats }: { stats: any }) {
           {rightItems.map((item, i) => (
             <div key={i} className={cn(
               "p-3 rounded-xl border",
-              item.type === "count" && item.value != null && item.value > (item.threshold || 3)
-                ? "bg-[oklch(0.95_0.05_25)] dark:bg-[oklch(0.25_0.05_25)]"
+              item.type === "deviation" && item.value != null
+                ? Math.abs(item.value) > 15 ? "bg-[oklch(0.95_0.05_25)] dark:bg-[oklch(0.25_0.05_25)]"
+                : Math.abs(item.value) > 5 ? "bg-[oklch(0.95_0.05_85)] dark:bg-[oklch(0.25_0.05_85)]"
+                : "bg-[oklch(0.95_0.05_145)] dark:bg-[oklch(0.25_0.05_145)]"
                 : "bg-card"
             )}>
               <div className="text-[11px] text-muted-foreground">{item.label}</div>
-              <div className="text-lg font-bold tabular-nums">
-                {item.value != null ? `${item.value}${item.unit}` : "—"}
+              <div className="text-lg font-bold tabular-nums truncate">
+                {item.value != null
+                  ? `${item.value > 0 && item.type === "deviation" ? "+" : ""}${typeof item.value === "number" ? item.value.toFixed(item.type === "deviation" ? 0 : 2) : item.value}${item.unit}`
+                  : "—"}
               </div>
             </div>
           ))}
@@ -300,7 +446,10 @@ function PlanFactBehaviorBlock({ stats }: { stats: any }) {
 }
 
 // === Блок 4: Трафик и заторы ===
-function TrafficBlock({ stats }: { stats: any }) {
+function TrafficBlock({ stats, traffic }: { stats: any; traffic: any }) {
+  const movingTime = stats?.movingTime ?? 0;
+  const idleTime = stats?.idleTime ?? 0;
+  const congestionPct = movingTime + idleTime > 0 ? (idleTime / (movingTime + idleTime)) * 100 : 0;
   return (
     <div>
       <h2 className="text-sm font-semibold mb-3 text-muted-foreground flex items-center gap-1.5">
@@ -308,24 +457,30 @@ function TrafficBlock({ stats }: { stats: any }) {
       </h2>
       <div className="bg-card border rounded-xl p-4 space-y-2">
         <div className="flex justify-between text-xs py-1 border-b border-border/40">
-          <span className="text-muted-foreground">Пробочные сегменты</span>
-          <span className="font-medium tabular-nums">{stats.congestedSegments || 0} из {stats.totalSegments || 0}</span>
+          <span className="text-muted-foreground">Провайдер</span>
+          <span className="font-medium">{traffic?.provider || "—"}</span>
         </div>
         <div className="flex justify-between text-xs py-1 border-b border-border/40">
-          <span className="text-muted-foreground">Время в заторах</span>
+          <span className="text-muted-foreground">Плановая дистанция</span>
           <span className="font-medium tabular-nums">
-            {stats.timeInCongestion ? Math.round(stats.timeInCongestion / 60) : 0} мин
+            {traffic?.distanceM ? `${(traffic.distanceM / 1000).toFixed(2)} км` : "—"}
+          </span>
+        </div>
+        <div className="flex justify-between text-xs py-1 border-b border-border/40">
+          <span className="text-muted-foreground">Плановое время</span>
+          <span className="font-medium tabular-nums">
+            {traffic?.durationSec ? `${Math.round(traffic.durationSec / 60)} мин` : "—"}
+          </span>
+        </div>
+        <div className="flex justify-between text-xs py-1">
+          <span className="text-muted-foreground">Время в остановках</span>
+          <span className="font-medium tabular-nums">
+            {idleTime > 0 ? Math.round(idleTime / 60) : 0} мин
             <span className="text-muted-foreground ml-1">
-              ({stats.movingTime ? Math.round((stats.timeInCongestion / stats.movingTime) * 100) : 0}%)
+              ({Math.round(congestionPct)}%)
             </span>
           </span>
         </div>
-        {stats.avgTrafficSpeed && (
-          <div className="flex justify-between text-xs py-1">
-            <span className="text-muted-foreground">Ср. скорость с пробками</span>
-            <span className="font-medium tabular-nums">{Math.round(stats.avgTrafficSpeed)} км/ч</span>
-          </div>
-        )}
       </div>
     </div>
   );

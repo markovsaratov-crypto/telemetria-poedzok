@@ -43,6 +43,8 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { fmtDate, fmtBytes, fmtNumber } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { SettingsCard } from "@/components/settings-card";
+import { GitHubBackupCard } from "@/components/github-backup-card";
 
 export function AdminPanel() {
   return (
@@ -51,6 +53,10 @@ export function AdminPanel() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <BackupsCard />
         <RequeueCard />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <SettingsCard />
+        <GitHubBackupCard />
       </div>
     </div>
   );

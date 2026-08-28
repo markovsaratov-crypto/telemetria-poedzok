@@ -1,10 +1,10 @@
 "use client";
 
-// src/components/speed-histogram.tsx — гистограмма распределения скоростей.
+// src/components/speed-histogram.tsx — horizontal bullet chart of speed distribution.
 
 import * as React from "react";
 import { motion } from "framer-motion";
-import { BarChart3 } from "lucide-react";
+import { BarChart3, Gauge } from "lucide-react";
 
 interface SpeedHistogramProps {
   points: Array<{ speed?: number | null }>;
@@ -22,12 +22,16 @@ const BUCKETS = [
 ];
 
 export function SpeedHistogram({ points, height = 100 }: SpeedHistogramProps) {
-  const buckets = React.useMemo(() => {
+  const { buckets, total, avgKmh, maxKmh } = React.useMemo(() => {
     const counts = BUCKETS.map(() => 0);
     let total = 0;
+    let speedSum = 0;
+    let maxMs = 0;
     for (const p of points) {
       if (p.speed == null || p.speed < 0) continue;
       const kmh = p.speed * 3.6; // m/s → km/h
+      speedSum += p.speed;
+      if (p.speed > maxMs) maxMs = p.speed;
       for (let i = 0; i < BUCKETS.length; i++) {
         if (kmh >= BUCKETS[i].min && kmh < BUCKETS[i].max) {
           counts[i]++;
@@ -36,10 +40,16 @@ export function SpeedHistogram({ points, height = 100 }: SpeedHistogramProps) {
         }
       }
     }
-    return { counts, total };
+    const avgMs = total > 0 ? speedSum / total : 0;
+    return {
+      buckets: counts,
+      total,
+      avgKmh: avgMs * 3.6,
+      maxKmh: maxMs * 3.6,
+    };
   }, [points]);
 
-  if (buckets.total === 0) {
+  if (total === 0) {
     return (
       <div
         className="flex items-center justify-center text-xs text-muted-foreground gap-1.5 rounded-lg bg-muted/40"
@@ -51,12 +61,14 @@ export function SpeedHistogram({ points, height = 100 }: SpeedHistogramProps) {
     );
   }
 
-  const maxCount = Math.max(...buckets.counts, 1);
-  const chartH = height - 20; // space for labels
-  const barW = 100 / BUCKETS.length;
+  const maxCount = Math.max(...buckets, 1);
 
-  // Find dominant bucket
-  const dominantIdx = buckets.counts.indexOf(maxCount);
+  // Bullet chart: avg speed line + max speed bar across the 0..(maxKmh+20) range
+  const bulletMax = Math.max(maxKmh + 20, 60);
+  const avgPct = Math.min(100, (avgKmh / bulletMax) * 100);
+  const maxPct = Math.min(100, (maxKmh / bulletMax) * 100);
+
+  const dominantIdx = buckets.indexOf(maxCount);
 
   return (
     <div className="space-y-2">
@@ -66,68 +78,62 @@ export function SpeedHistogram({ points, height = 100 }: SpeedHistogramProps) {
           Распределение скоростей
         </span>
         <span className="font-mono text-muted-foreground">
-          {buckets.total} точек · пик: <span className="text-primary font-semibold">{BUCKETS[dominantIdx].label} км/ч</span>
+          {total} точек · пик: <span className="text-primary font-semibold">{BUCKETS[dominantIdx].label} км/ч</span>
         </span>
       </div>
-      <svg
-        viewBox={`0 0 100 ${height}`}
-        className="w-full"
-        preserveAspectRatio="none"
-        style={{ height }}
-      >
-        {buckets.counts.map((count, i) => {
-          const h = (count / maxCount) * chartH;
-          const y = chartH - h;
-          const x = i * barW + 1;
-          const w = barW - 2;
-          const pct = buckets.total > 0 ? (count / buckets.total) * 100 : 0;
+
+      {/* Horizontal bars per bucket */}
+      <div className="space-y-1">
+        {BUCKETS.map((b, i) => {
+          const count = buckets[i];
+          const pct = (count / maxCount) * 100;
+          const sharePct = total > 0 ? (count / total) * 100 : 0;
           return (
-            <g key={i}>
-              <motion.rect
-                x={x}
-                y={y}
-                width={w}
-                height={h}
-                fill={BUCKETS[i].color}
-                opacity={i === dominantIdx ? 0.9 : 0.6}
-                rx="0.5"
-                initial={{ height: 0, y: chartH }}
-                animate={{ height: h, y: y }}
-                transition={{ delay: i * 0.05, duration: 0.4, ease: "easeOut" }}
-              />
-              {pct > 5 && (
-                <text
-                  x={x + w / 2}
-                  y={y - 1}
-                  fontSize="2.5"
-                  fill="oklch(0.4 0.01 165)"
-                  textAnchor="middle"
-                  className="font-mono"
-                >
-                  {pct.toFixed(0)}%
-                </text>
-              )}
-            </g>
+            <div key={i} className="flex items-center gap-2">
+              <span className="text-[9px] text-muted-foreground w-9 text-right shrink-0">{b.label}</span>
+              <div className="flex-1 h-2.5 bg-muted rounded-full overflow-hidden relative">
+                <motion.div
+                  className="h-full rounded-full"
+                  style={{ backgroundColor: b.color }}
+                  initial={{ width: 0 }}
+                  animate={{ width: `${pct}%` }}
+                  transition={{ delay: i * 0.05, duration: 0.4, ease: "easeOut" }}
+                />
+              </div>
+              <span className="text-[9px] text-muted-foreground tabular-nums w-10 shrink-0 text-right">
+                {sharePct.toFixed(0)}%
+              </span>
+            </div>
           );
         })}
-        {/* X-axis labels */}
-        {BUCKETS.map((b, i) => (
-          <text
-            key={i}
-            x={i * barW + barW / 2}
-            y={height - 2}
-            fontSize="3"
-            fill="oklch(0.5 0.01 165)"
-            textAnchor="middle"
-            className="font-mono"
-          >
-            {b.label}
-          </text>
-        ))}
-      </svg>
-      <div className="flex items-center justify-between text-[9px] text-muted-foreground">
-        <span>км/ч</span>
-        <span>точек в диапазоне</span>
+      </div>
+
+      {/* Bullet chart: avg vs max */}
+      <div className="pt-2 border-t">
+        <div className="flex items-center justify-between mb-1 text-[10px] text-muted-foreground">
+          <span className="flex items-center gap-1">
+            <Gauge className="h-3 w-3" /> Ср. vs Макс
+          </span>
+          <span className="tabular-nums">{Math.round(bulletMax)} км/ч</span>
+        </div>
+        <div className="relative h-3 bg-muted rounded-full overflow-hidden">
+          <motion.div
+            className="absolute inset-y-0 left-0 bg-amber-500/40 rounded-l-full"
+            initial={{ width: 0 }}
+            animate={{ width: `${maxPct}%` }}
+            transition={{ duration: 0.5, ease: "easeOut" }}
+          />
+          <motion.div
+            className="absolute inset-y-0 w-0.5 bg-emerald-600"
+            initial={{ left: 0 }}
+            animate={{ left: `${avgPct}%` }}
+            transition={{ duration: 0.5, ease: "easeOut", delay: 0.1 }}
+          />
+        </div>
+        <div className="flex items-center justify-between mt-1 text-[10px]">
+          <span className="text-emerald-600 dark:text-emerald-400">ср {avgKmh.toFixed(1)} км/ч</span>
+          <span className="text-amber-600 dark:text-amber-400">макс {maxKmh.toFixed(1)} км/ч</span>
+        </div>
       </div>
     </div>
   );

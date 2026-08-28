@@ -10,7 +10,7 @@ import { inc } from "@/lib/metrics";
 const SESSION_COOKIE_NAME = "telem_session";
 
 // Эндпоинты без авторизации
-const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics"];
+const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics"];
 const ADMIN_PATHS = ["/api/admin/"];
 const WORKER_PATHS = ["/api/worker/"];
 

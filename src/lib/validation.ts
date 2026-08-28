@@ -23,7 +23,13 @@ export const zIngestBody = z.object({
 });
 
 export const zLoginBody = z.object({
+  email: z.string().email().optional(),
   password: z.string().min(1),
+});
+
+export const zRegisterBody = z.object({
+  email: z.string().email().min(3).max(255),
+  password: z.string().min(8).max(128),
 });
 
 export const zPlanBody = z.object({

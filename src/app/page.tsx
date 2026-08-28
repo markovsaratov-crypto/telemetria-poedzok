@@ -29,7 +29,6 @@ import { DashboardOverview } from "@/components/dashboard-overview";
 import { SessionsList } from "@/components/sessions-list";
 import { SessionDetail } from "@/components/session-detail";
 import { SessionCompare } from "@/components/session-compare";
-import { RoutePlanner } from "@/components/route-planner";
 import { RoutesManager } from "@/components/routes-manager";
 import { CsvImport } from "@/components/csv-import";
 import { ZipImport } from "@/components/zip-import";
@@ -216,7 +215,7 @@ export default function Home() {
             </TabsTrigger>
             <TabsTrigger value="sessions" className="gap-1.5">
               <Map className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Сессии</span>
+              <span className="hidden sm:inline">Поездки</span>
               <kbd className="hidden lg:inline ml-1 opacity-50">2</kbd>
             </TabsTrigger>
             <TabsTrigger value="routes" className="gap-1.5">
@@ -274,7 +273,6 @@ export default function Home() {
               </TabsContent>
 
               <TabsContent value="routes" className="mt-0 space-y-4">
-                <RoutePlanner />
                 <RoutesManager />
               </TabsContent>
 

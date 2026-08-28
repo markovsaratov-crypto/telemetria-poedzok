@@ -479,3 +479,158 @@ export function useMetrics(opts?: UseQueryOptions<string>) {
     ...opts,
   });
 }
+
+// ===== Reverse geocoding =====
+export function useReverseGeocode(lat: number | null, lon: number | null) {
+  return useQuery({
+    queryKey: ["geocode", lat, lon],
+    queryFn: async () => {
+      if (lat == null || lon == null) return null;
+      const qs = `?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
+      return api.get<{ address: string; cachedAt?: string; cached: boolean }>(
+        `/api/geocode/reverse${qs}`
+      );
+    },
+    enabled: lat != null && lon != null,
+    staleTime: Infinity, // cached server-side
+    retry: 1,
+  });
+}
+
+// ===== Batch session stats (start/dest coords, distance, duration) =====
+export interface BatchStatItem {
+  id: string;
+  deviceId: string;
+  deviceName: string | null;
+  startTime: string;
+  endTime: string | null;
+  startLat: number | null;
+  startLon: number | null;
+  destLat: number | null;
+  destLon: number | null;
+  distanceM: number;
+  durationSec: number;
+  pointCount: number;
+}
+
+export function useBatchStats(ids: string[]) {
+  return useQuery({
+    queryKey: ["batch-stats", ids],
+    queryFn: () =>
+      api.post<{ sessions: BatchStatItem[]; total: number }>("/api/sessions/batch-stats", { ids }),
+    enabled: ids.length > 0,
+    staleTime: 60_000,
+  });
+}
+
+// ===== Aggregate stats (totalDistance, totalDuration, avgSpeed) =====
+export interface AggregateStats {
+  totalDistanceM: number;
+  totalDistanceKm: number;
+  totalDurationSec: number;
+  totalDurationMin: number;
+  avgSpeedMs: number | null;
+  avgSpeedKmh: number | null;
+  jobCount: number;
+  validCount: number;
+}
+
+export function useAggregateStats() {
+  return useQuery({
+    queryKey: ["aggregate-stats"],
+    queryFn: () => api.get<AggregateStats>("/api/stats/aggregate"),
+    staleTime: 60_000,
+  });
+}
+
+// ===== Speed distribution =====
+export interface SpeedBucket {
+  label: string;
+  minKmh: number;
+  maxKmh: number | null;
+  count: number;
+  percent: number;
+}
+export interface SpeedDistribution {
+  buckets: SpeedBucket[];
+  total: number;
+  avgSpeedMs: number | null;
+  avgSpeedKmh: number | null;
+  maxSpeedMs: number;
+  maxSpeedKmh: number;
+  maxBucketCount: number;
+}
+
+export function useSpeedDistribution() {
+  return useQuery({
+    queryKey: ["speed-distribution"],
+    queryFn: () => api.get<SpeedDistribution>("/api/stats/speed-distribution"),
+    staleTime: 60_000,
+  });
+}
+
+// ===== Admin settings =====
+export interface SettingItem {
+  key: string;
+  value: string;
+  source: "db" | "env";
+  updatedAt?: string;
+  isSensitive: boolean;
+}
+
+export function useSettings() {
+  return useQuery({
+    queryKey: ["admin-settings"],
+    queryFn: () => api.get<{ settings: SettingItem[] }>("/api/admin/settings"),
+    staleTime: 30_000,
+  });
+}
+
+export function useUpdateSetting() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { key: string; value: string }) =>
+      api.put<{ ok: boolean; key: string; value: string }>("/api/admin/settings", params),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-settings"] }),
+  });
+}
+
+// ===== GitHub backups =====
+export interface GitHubBackupItem {
+  backupId: string;
+  releaseId: number;
+  tagName: string;
+  name: string;
+  createdAt: string;
+  assetUrl: string;
+  assetSize: number;
+  checksum: string | null;
+}
+
+export function useGitHubBackups() {
+  return useQuery({
+    queryKey: ["github-backups"],
+    queryFn: () =>
+      api.get<{ configured: boolean; backups: GitHubBackupItem[]; message?: string }>(
+        "/api/admin/backup/github"
+      ),
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+export function useCreateGitHubBackup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      api.post<{
+        backupId: string;
+        releaseId: number;
+        releaseUrl: string;
+        assetUrl: string;
+        assetSize: number;
+        checksum: string;
+      }>("/api/admin/backup/github"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["github-backups"] }),
+  });
+}

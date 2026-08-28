@@ -1,7 +1,7 @@
 "use client";
 
-// src/components/session-compare.tsx — сравнение до 4 сессий на одной карте.
-// Выбор через multi-select из списка сессий.
+// src/components/session-compare.tsx — сравнение до 4 поездок на одной карте.
+// Выбор через multi-select из списка поездок.
 
 import * as React from "react";
 import dynamic from "next/dynamic";
@@ -112,10 +112,10 @@ export function SessionCompare() {
           <div>
             <CardTitle className="flex items-center gap-2 text-base">
               <GitCompare className="h-4 w-4 text-primary" />
-              Сравнение сессий
+              Сравнение поездок
             </CardTitle>
             <CardDescription className="text-xs mt-1">
-              Наложите до 4 сессий на одну карту для анализа
+              Наложите до 4 поездок на одну карту для анализа
             </CardDescription>
           </div>
           <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
@@ -131,12 +131,12 @@ export function SessionCompare() {
             </PopoverTrigger>
             <PopoverContent className="w-80 p-0" align="end">
               <div className="border-b px-3 py-2 text-xs font-medium text-muted-foreground">
-                Выберите сессию ({selectedIds.length}/4)
+                Выберите поездку ({selectedIds.length}/4)
               </div>
               <div className="max-h-72 overflow-y-auto scroll-telem">
                 {availableForPick.length === 0 ? (
                   <div className="p-4 text-center text-xs text-muted-foreground">
-                    Нет доступных сессий
+                    Нет доступных поездок
                   </div>
                 ) : (
                   availableForPick.map((s) => (
@@ -169,9 +169,9 @@ export function SessionCompare() {
           <div className="h-[280px] rounded-lg border border-dashed flex items-center justify-center text-sm text-muted-foreground">
             <div className="text-center space-y-2">
               <GitCompare className="h-8 w-8 mx-auto opacity-30" />
-              <div>Выберите сессии для сравнения</div>
+              <div>Выберите поездки для сравнения</div>
               <Button size="sm" variant="outline" onClick={() => setPickerOpen(true)}>
-                <Plus className="h-3.5 w-3.5" /> Добавить сессию
+                <Plus className="h-3.5 w-3.5" /> Добавить поездку
               </Button>
             </div>
           </div>

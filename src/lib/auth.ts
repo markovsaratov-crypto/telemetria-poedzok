@@ -1,19 +1,31 @@
-// src/lib/auth.ts — single-user авторизация (§6.1).
+// src/lib/auth.ts — multi-user авторизация ON TOP of existing single-user.
 // Блокер №3 FIX: /api/auth/login — LOGIN_PASSWORD timing-safe, stateless HMAC cookie.
+// Multi-user (RESTORE-ALL): bcrypt-hashed per-user accounts + per-user apiKey.
 import { NextRequest, NextResponse } from "next/server";
 import { env } from "./env";
 import { getClientIP } from "./http-utils";
 import { timingSafeEqual as nodeTimingSafeEqual } from "crypto";
+import { userDb, type UserRow } from "./user-db";
+import bcrypt from "bcryptjs";
 
 const COOKIE_NAME = "telem_session";
 const COOKIE_TTL_SEC = 86400; // 24 часа
 const RENEW_THRESHOLD_SEC = 3600; // обновляем если до exp < 1 часа
 
-interface CookiePayload {
+// Multi-user cookie payload: either legacy owner OR per-user.
+interface OwnerPayload {
   sub: "owner";
-  iat: number; // sec
-  exp: number; // sec
+  iat: number;
+  exp: number;
 }
+interface UserPayload {
+  userId: string;
+  email: string;
+  role: string;
+  iat: number;
+  exp: number;
+}
+type CookiePayload = OwnerPayload | UserPayload;
 
 function b64urlEncode(s: string): string {
   return Buffer.from(s, "utf8").toString("base64url");
@@ -46,6 +58,15 @@ function safeEqual(a: string, b: string): boolean {
   return nodeTimingSafeEqual(bufA, bufB);
 }
 
+// === Multi-user: bcrypt password helpers ===
+export async function hashPassword(plain: string): Promise<string> {
+  return bcrypt.hash(plain, 10);
+}
+
+export async function verifyPasswordHash(plain: string, hash: string): Promise<boolean> {
+  return bcrypt.compare(plain, hash);
+}
+
 // Установка cookie в response (вместо next/headers cookies())
 export function setSessionCookie(response: NextResponse, cookieValue: string): void {
   response.cookies.set(COOKIE_NAME, cookieValue, {
@@ -67,13 +88,14 @@ export function clearSessionCookie(response: NextResponse): void {
   });
 }
 
+// === Legacy single-user cookie issue ===
 export async function issueSessionCookie(): Promise<{
   sessionId: string;
   expiresAt: string;
   cookieValue: string;
 }> {
   const now = Math.floor(Date.now() / 1000);
-  const payload: CookiePayload = {
+  const payload: OwnerPayload = {
     sub: "owner",
     iat: now,
     exp: now + COOKIE_TTL_SEC,
@@ -89,9 +111,39 @@ export async function issueSessionCookie(): Promise<{
   };
 }
 
+// === Multi-user cookie issue ===
+export async function issueUserCookie(user: UserRow): Promise<{
+  sessionId: string;
+  expiresAt: string;
+  cookieValue: string;
+  user: { id: string; email: string; role: string };
+}> {
+  const now = Math.floor(Date.now() / 1000);
+  const payload: UserPayload = {
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    iat: now,
+    exp: now + COOKIE_TTL_SEC,
+  };
+  const payloadStr = b64urlEncode(JSON.stringify(payload));
+  const sig = await hmacSign(payloadStr);
+  const cookieValue = `${payloadStr}.${sig}`;
+  const sessionId = `sess_${payloadStr.slice(0, 16)}`;
+  return {
+    sessionId,
+    expiresAt: new Date(payload.exp * 1000).toISOString(),
+    cookieValue,
+    user: { id: user.id, email: user.email, role: user.role },
+  };
+}
+
 export async function verifySessionCookieFromRequest(
   request: NextRequest
-): Promise<{ ok: true; payload: CookiePayload; needsRenewal: boolean } | { ok: false }> {
+): Promise<
+  | { ok: true; payload: CookiePayload; needsRenewal: boolean; user?: UserRow | null }
+  | { ok: false }
+> {
   const raw = request.cookies.get(COOKIE_NAME)?.value;
   if (!raw) return { ok: false };
 
@@ -107,16 +159,26 @@ export async function verifySessionCookieFromRequest(
   } catch {
     return { ok: false };
   }
-  if (payload.sub !== "owner") return { ok: false };
 
   const now = Math.floor(Date.now() / 1000);
   if (payload.exp < now) return { ok: false };
 
   const needsRenewal = payload.exp - now < RENEW_THRESHOLD_SEC;
+
+  // For user payload: fetch latest user (so revoked/changed role is reflected)
+  if ("userId" in payload) {
+    const user = await userDb.findById(payload.userId);
+    if (!user) return { ok: false };
+    return { ok: true, payload, needsRenewal, user };
+  }
+
+  // Legacy owner payload
+  if (payload.sub !== "owner") return { ok: false };
   return { ok: true, payload, needsRenewal };
 }
 
 // Timing-safe сравнение пароля (§6.1, защита от timing-атак)
+// Single-user legacy fallback (LOGIN_PASSWORD env).
 export async function verifyPassword(input: string): Promise<boolean> {
   const expected = env().LOGIN_PASSWORD;
   return safeEqual(input, expected);
@@ -140,22 +202,85 @@ export function authenticateBearer(token: string | null, scope: BearerScope): bo
   return safeEqual(token, expected);
 }
 
-// Комбинированная авторизация: cookie ИЛИ bearer
+// === Multi-user helpers ===
+
+// Extract userId from request: works for both user cookie and legacy owner cookie.
+export async function getUserIdFromRequest(
+  request: NextRequest
+): Promise<string | null> {
+  const session = await verifySessionCookieFromRequest(request);
+  if (!session.ok) return null;
+  if ("userId" in session.payload) return session.payload.userId;
+  return null; // legacy owner — no userId
+}
+
+// Get role: user role for multi-user, "owner" for legacy.
+export async function getUserRoleFromRequest(
+  request: NextRequest
+): Promise<string | null> {
+  const session = await verifySessionCookieFromRequest(request);
+  if (!session.ok) return null;
+  if ("userId" in session.payload) return session.payload.role;
+  if (session.payload.sub === "owner") return "owner";
+  return null;
+}
+
+// Require any authenticated user (cookie or bearer). Throws HTTP response on failure.
+export type AuthResult =
+  | { ok: true; via: "cookie" | "bearer"; userId: string | null; role: string }
+  | { ok: false; reason: string };
+
+// Комбинированная авторизация: cookie ИЛИ bearer.
+// Bearer API_KEY (legacy) AND per-user apiKey both accepted for scope=api.
 export async function authorizeRequest(
   request: NextRequest,
   scope: BearerScope = "api"
-): Promise<{ ok: true; via: "cookie" | "bearer" } | { ok: false; reason: string }> {
-  // 1. Bearer
+): Promise<AuthResult> {
+  // 1. Bearer: legacy API_KEY/ADMIN_TOKEN OR per-user apiKey
   const bearer = extractBearer(request);
-  if (bearer && authenticateBearer(bearer, scope)) {
-    return { ok: true, via: "bearer" };
+  if (bearer) {
+    // Legacy env-based bearer (any scope)
+    if (authenticateBearer(bearer, scope)) {
+      return { ok: true, via: "bearer", userId: null, role: scope === "admin" ? "admin" : "api" };
+    }
+    // Per-user apiKey (scope=api only)
+    if (scope === "api") {
+      const u = await userDb.findByApiKey(bearer);
+      if (u) {
+        return { ok: true, via: "bearer", userId: u.id, role: u.role };
+      }
+    }
   }
   // 2. Cookie (только для scope=api/admin — веб-клиент)
   if (scope === "api" || scope === "admin") {
     const session = await verifySessionCookieFromRequest(request);
-    if (session.ok) return { ok: true, via: "cookie" };
+    if (session.ok) {
+      let role: string;
+      let userId: string | null;
+      if ("userId" in session.payload) {
+        role = session.payload.role;
+        userId = session.payload.userId;
+      } else {
+        role = "owner";
+        userId = null;
+      }
+      // For admin scope: owner role OR user role==="admin" allowed.
+      if (scope === "admin" && role !== "owner" && role !== "admin") {
+        return { ok: false, reason: "Forbidden: admin role required" };
+      }
+      return { ok: true, via: "cookie", userId, role };
+    }
   }
   return { ok: false, reason: "Unauthorized" };
+}
+
+// Convenience wrappers for routes that need to enforce user/admin.
+export async function requireUser(request: NextRequest): Promise<AuthResult> {
+  return authorizeRequest(request, "api");
+}
+
+export async function requireAdmin(request: NextRequest): Promise<AuthResult> {
+  return authorizeRequest(request, "admin");
 }
 
 export { COOKIE_NAME, COOKIE_TTL_SEC, getClientIP };

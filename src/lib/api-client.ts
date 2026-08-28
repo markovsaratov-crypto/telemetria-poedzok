@@ -87,7 +87,6 @@ export async function apiFetch<T = unknown>(
 
   // 401: auth lost — but don't trigger handler for /api/auth/me (expected before login)
   if (res.status === 401) {
-    const url = typeof input === "string" ? input : (input as Request).url || "";
     if (!url.includes("/api/auth/me") && onUnauthorized) {
       onUnauthorized();
     }
@@ -147,6 +146,14 @@ export const api = {
   patch: <T = unknown>(path: string, body?: unknown, opts?: FetchOpts) =>
     apiFetch<T>(path, {
       method: "PATCH",
+      headers: { "Content-Type": "application/json", ...(opts?.headers || {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      ...opts,
+    }),
+
+  put: <T = unknown>(path: string, body?: unknown, opts?: FetchOpts) =>
+    apiFetch<T>(path, {
+      method: "PUT",
       headers: { "Content-Type": "application/json", ...(opts?.headers || {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
       ...opts,

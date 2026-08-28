@@ -8,18 +8,61 @@ import { useAuth } from "@/lib/hooks";
 import { BottomNav, type MobileTab } from "@/components/mobile/shared/BottomNav";
 import { SessionListScreen } from "@/components/mobile/SessionList/SessionListScreen";
 import { AnalyticsScreen } from "@/components/mobile/Analytics/AnalyticsScreen";
-import { RoutesScreen } from "@/components/mobile/Routes/RoutesScreen";
 
-// Dynamic import to avoid SSR issues with Leaflet
+// Dynamic imports to avoid SSR issues with Leaflet (ssr:false).
+const MapScreen = dynamic(
+  () => import("@/components/mobile/Map/MapScreen").then((m) => m.MapScreen),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">
+        Загрузка карты…
+      </div>
+    ),
+  }
+);
+
+const RoutesScreen = dynamic(
+  () => import("@/components/mobile/Routes/RoutesScreen").then((m) => m.RoutesScreen),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">
+        Загрузка…
+      </div>
+    ),
+  }
+);
+
 const SessionDetailScreen = dynamic(
-  () => import("@/components/mobile/SessionDetail/SessionDetailScreen").then(m => m.SessionDetailScreen),
-  { ssr: false, loading: () => <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Загрузка...</div> }
+  () => import("@/components/mobile/SessionDetail/SessionDetailScreen").then((m) => m.SessionDetailScreen),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">
+        Загрузка…
+      </div>
+    ),
+  }
+);
+
+const AdminScreen = dynamic(
+  () => import("@/components/mobile/Admin/AdminScreen").then((m) => m.AdminScreen),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">
+        Загрузка…
+      </div>
+    ),
+  }
 );
 
 export default function MobilePage() {
   const auth = useAuth();
   const [tab, setTab] = React.useState<MobileTab>("analytics");
   const [selectedSession, setSelectedSession] = React.useState<string | null>(null);
+  const [showAdmin, setShowAdmin] = React.useState(false);
 
   const isAuthenticated = auth.data?.authenticated === true;
 
@@ -38,19 +81,30 @@ export default function MobilePage() {
     );
   }
 
+  if (showAdmin) {
+    return (
+      <div className="min-h-screen bg-background">
+        <AdminScreen
+          onBack={() => setShowAdmin(false)}
+          onLogout={() => {
+            setShowAdmin(false);
+            setTimeout(() => window.location.reload(), 200);
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-background">
       {tab === "trips" && (
         <SessionListScreen
           onSessionTap={(id) => setSelectedSession(id)}
-          onSettingsTap={() => {}}
+          onSettingsTap={() => setShowAdmin(true)}
         />
       )}
       {tab === "map" && (
-        <SessionListScreen
-          onSessionTap={(id) => setSelectedSession(id)}
-          onSettingsTap={() => {}}
-        />
+        <MapScreen onSessionTap={(id) => setSelectedSession(id)} />
       )}
       {tab === "analytics" && <AnalyticsScreen />}
       {tab === "routes" && <RoutesScreen />}

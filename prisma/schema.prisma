@@ -1,15 +1,25 @@
-// Telemetria поездок — Prisma schema v2.6
-generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
+// Telemetria поездок — Prisma schema v3.0 (multi-user)
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         String   @default("user")
+  apiKey       String   @unique @default(cuid())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  sessions     Session[]
+  routes       Route[]
+  auditLogs    AuditLog[]
+  @@index([role])
 }
 
 datasource db {
   provider = "sqlite"
-  url      = "file:./db/local.db"
+  url      = env("DATABASE_URL")
 }
 
 model Session {
+  userId       String?
   id           String    @id @default(cuid())
   deviceId     String
   clientId     String?
@@ -28,6 +38,7 @@ model Session {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
+  user         User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
   route       Route?       @relation(fields: [routeId], references: [id], onDelete: SetNull)
   gpsPoints   GpsPoint[]
   trafficJobs TrafficJob[]
@@ -60,6 +71,7 @@ model GpsPoint {
 
 model Route {
   id          String   @id @default(cuid())
+  userId      String?
   name        String
   description String?
   startLat    Float
@@ -69,8 +81,11 @@ model Route {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   sessions    Session[]
   routeCaches RouteCache[]
+
+  @@index([userId])
 }
 
 model RouteCache {
@@ -110,6 +125,7 @@ model TrafficJob {
 
 model AuditLog {
   id         String   @id @default(cuid())
+  userId     String?
   action     String
   targetId   String
   targetType String
@@ -119,12 +135,14 @@ model AuditLog {
   sessionId  String?
   createdAt  DateTime @default(now())
 
-  session Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  session    Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
 
   @@index([action, createdAt])
   @@index([targetId, targetType])
   @@index([actorType, actorId])
   @@index([sessionId])
+  @@index([userId])
 }
 
 model ExportJob {
@@ -161,4 +179,11 @@ model BackupJob {
   error        String?
 
   @@index([status, createdAt])
+}
+
+model Setting {
+  key        String   @id
+  value      String
+  updatedAt  DateTime @default(now()) @updatedAt
+  updatedBy  String?
 }

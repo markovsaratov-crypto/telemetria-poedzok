@@ -27,13 +27,8 @@ interface SharedPayload {
   expiresAt: string;
 }
 
-function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * 6371000 * Math.asin(Math.sqrt(a));
-}
+// P2-14: канонический гаверсинус — src/lib/geo.ts (была локальная копия)
+import { haversineM } from "@/lib/geo";
 
 function fmtDuration(sec: number): string {
   if (!Number.isFinite(sec) || sec <= 0) return "—";

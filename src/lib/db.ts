@@ -488,10 +488,92 @@ export const db = {
     const result = await libsql.execute({ sql, args: values });
     return result.rows;
   },
+  // P2-14: ЧЕСТНАЯ транзакция через libsql.transaction (раньше $transaction просто
+  // вызывал fn(db) — атомарности не было: сбой между INSERT сессии и пакетом точек
+  // оставлял «висячую» сессию без точек). Транзакционный объект поддерживает
+  // generic create/createMany для известных таблиц; неподдерживаемые вызовы
+  // падают ГРОМКО (а не молча выполняются вне транзакции).
   $transaction: async <T>(fn: (tx: typeof db) => Promise<T>): Promise<T> => {
-    return fn(db);
+    const txClient = await libsql.transaction("write");
+    try {
+      const out = await fn(makeTxExecutor(txClient) as unknown as typeof db);
+      await txClient.commit();
+      return out;
+    } catch (err) {
+      try {
+        await txClient.rollback();
+      } catch {
+        // транзакция уже откатана/закрыта — не маскируем исходную ошибку
+      }
+      throw err;
+    }
   },
 };
+
+// Таблицы, доступные внутри $transaction: model → нужен ли updatedAt при create
+const TX_TABLES: Record<string, { updatedAt: boolean }> = {
+  Session: { updatedAt: true },
+  TrafficJob: { updatedAt: true },
+  Route: { updatedAt: true },
+  ExportJob: { updatedAt: true },
+  GpsPoint: { updatedAt: false },
+  AuditLog: { updatedAt: false },
+};
+
+type LibsqlTransaction = Awaited<ReturnType<Client["transaction"]>>;
+
+// Транзакционный исполнитель: session.create / gpsPoint.createMany и т.п.,
+// но каждый execute идёт через tx (одна атомарная единица работы).
+function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
+  return new Proxy({}, {
+    get(_target, modelRaw: string | symbol) {
+      const model = String(modelRaw);
+      const table = model.charAt(0).toUpperCase() + model.slice(1);
+      const meta = TX_TABLES[table];
+      return {
+        async create(args: { data: Record<string, unknown> }) {
+          if (!meta) throw new Error(`tx.${model}.create: таблица ${table} не поддерживается в транзакции`);
+          const now = new Date().toISOString();
+          const data = {
+            id: randomUUID(),
+            createdAt: now,
+            ...(meta.updatedAt ? { updatedAt: now } : {}),
+            ...pruneUndefined(args.data),
+          };
+          const keys = Object.keys(data);
+          const values = Object.values(data);
+          const placeholders = keys.map(() => "?").join(", ");
+          const result = await tx.execute({ sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values });
+          return toCamel(result.rows[0] as Record<string, unknown>);
+        },
+        async createMany(args: { data: Array<Record<string, unknown>> }) {
+          if (!meta) throw new Error(`tx.${model}.createMany: таблица ${table} не поддерживается в транзакции`);
+          let count = 0;
+          for (const item of args.data) {
+            const data = { id: randomUUID(), ...pruneUndefined(item) };
+            const keys = Object.keys(data);
+            const values = Object.values(data).map((v) => (v === undefined ? null : v));
+            const placeholders = keys.map(() => "?").join(", ");
+            await tx.execute({ sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders})`, args: values });
+            count += 1;
+          }
+          return { count };
+        },
+        async update(args: { where: { id: string }; data: Record<string, unknown> }) {
+          if (!meta) throw new Error(`tx.${model}.update: таблица ${table} не поддерживается в транзакции`);
+          const data: Record<string, unknown> = { ...pruneUndefined(args.data) };
+          if (meta.updatedAt) data.updatedAt = new Date().toISOString();
+          const keys = Object.keys(data);
+          if (keys.length === 0) return null;
+          const setSql = keys.map((k) => `${k} = ?`).join(", ");
+          const values = [...Object.values(data), args.where.id];
+          const result = await tx.execute({ sql: `UPDATE ${table} SET ${setSql} WHERE id = ? RETURNING *`, args: values });
+          return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
+        },
+      };
+    },
+  });
+}
 
 // Additional methods needed by API routes
 

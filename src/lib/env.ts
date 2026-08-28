@@ -46,6 +46,8 @@ const schema = z.object({
   TARGET_LOAD_RPM: z.coerce.number().int().positive().default(100),
   NODE_ENV: z.string().default("development"),
   APP_VERSION: z.string().default("2.6.0"),
+  // P2-16: вебхук Slack для алертов §14.4 (пусто — только журнал и /api/admin/alerts)
+  SLACK_WEBHOOK_URL: z.string().default(""),
 });
 
 export type Env = z.infer<typeof schema>;

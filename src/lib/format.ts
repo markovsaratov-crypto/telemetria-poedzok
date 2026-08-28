@@ -68,22 +68,9 @@ export function avgSpeed(
   return Math.round((sum / withSpeed.length) * 3.6 * 10) / 10; // м/с → км/ч
 }
 
-// Расстояние между двумя точками (haversine, метры)
-export function haversine(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number
-): number {
-  const R = 6371000;
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(a));
-}
+// P2-14: канонический гаверсинус вынесен в src/lib/geo.ts (было 6 идентичных копий).
+import { haversineM as haversine } from "./geo";
+export { haversine };
 
 // Суммарная длина трека (метры)
 export function trackDistance(

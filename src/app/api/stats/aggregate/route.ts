@@ -5,6 +5,7 @@ import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
+import { trackLatency } from "@/lib/latency"; // P2-16
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,11 @@ export async function GET(request: NextRequest) {
   try {
     const auth = await authorizeRequest(request, "api");
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
+
+    // P2-13: учитываем только задачи ЖИВЫХ сессий — раньше mobile-KPI считал
+    // soft-deleted сессии (36 vs 6 на экранах десктопа и мобильного)
+    const aliveSessions = await db.session.findMany({ where: { deletedAt: null }, take: 10000 });
+    const aliveIds = new Set(aliveSessions.map((s: Record<string, unknown>) => String(s.id)));
 
     // Find all completed TrafficJobs with a result
     const jobs = await db.trafficJob.findMany({
@@ -26,6 +32,7 @@ export async function GET(request: NextRequest) {
     let validCount = 0;
 
     for (const job of jobs) {
+      if (!aliveIds.has(String(job.sessionId))) continue; // P2-13: soft-deleted вне KPI
       jobCount++;
       if (!job.result) continue;
       try {
@@ -50,6 +57,8 @@ export async function GET(request: NextRequest) {
       totalDurationSec > 0
         ? totalDistanceM / totalDurationSec // m/s
         : null;
+
+    trackLatency(request); // P2-16: api_latency_p95
 
     return json(
       {

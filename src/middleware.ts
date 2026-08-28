@@ -145,7 +145,16 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     }
 
     // 4. Security headers + requestId
-    const response = NextResponse.next();
+    // P2-16: прокидываем время старта в Node-роуты (edge → node канал).
+    // Роуты вызывают trackLatency(request) и пополняют окно api_latency_p95 (§14.4).
+    let response: NextResponse;
+    if (pathname.startsWith("/api/")) {
+      const forwardHeaders = new Headers(request.headers);
+      forwardHeaders.set("x-start-epoch-ms", String(Date.now()));
+      response = NextResponse.next({ request: { headers: forwardHeaders } });
+    } else {
+      response = NextResponse.next();
+    }
     setSecurityHeaders(response);
     response.headers.set("X-Request-Id", requestId);
 

@@ -16,18 +16,20 @@ export function toGPX(session: SessionWithPoints): string {
       const attrs = [
         `<trkpt lat="${p.lat}" lon="${p.lon}">`,
         `  <time>${fmtIso(t)}</time>`,
-        p.ele != null ? `  <ele>${p.altitude}</ele>` : "",
+        p.altitude != null ? `  <ele>${p.altitude}</ele>` : "", // P1-8: было p.ele (всегда undefined → ele не писался)
         p.speed != null ? `  <extensions><speed>${p.speed}</speed></extensions>` : "",
         `</trkpt>`,
       ].filter(Boolean);
       return attrs.join("\n");
     })
     .join("\n");
+  // P1-8: startTime из обёртки приходит числом (эпоха мс) — toISOString() на числе падал (500 на GPX)
+  const startIso = fmtIso(Number(session.startTime));
   return `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="Telemetria v2.6" xmlns="http://www.topografix.com/GPX/1/1">
   <metadata>
-    <name>Сессия ${session.deviceId} — ${session.startTime.toISOString()}</name>
-    <time>${session.startTime.toISOString()}</time>
+    <name>Сессия ${session.deviceId} — ${startIso}</name>
+    <time>${startIso}</time>
   </metadata>
   <trk>
     <name>${session.deviceId}</name>

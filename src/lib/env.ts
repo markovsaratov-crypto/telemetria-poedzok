@@ -15,6 +15,7 @@ const schema = z.object({
   RATE_LIMIT_MAX_PLAN: z.coerce.number().int().positive().default(5),
   RATE_LIMIT_MAX_AUDIT: z.coerce.number().int().positive().default(60),
   RATE_LIMIT_MAX_ADMIN: z.coerce.number().int().positive().default(1),
+  RATE_LIMIT_MAX_REQUEUE: z.coerce.number().int().positive().default(10), // P1-11: спека §7.3
   RATE_LIMIT_BACKEND: z.enum(["redis", "memory"]).default("memory"),
   MAX_PAYLOAD_BYTES: z.coerce.number().int().positive().default(262144),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
@@ -72,6 +73,7 @@ export function env(): Env {
       RATE_LIMIT_MAX_PLAN: Number(process.env.RATE_LIMIT_MAX_PLAN) || 5,
       RATE_LIMIT_MAX_AUDIT: Number(process.env.RATE_LIMIT_MAX_AUDIT) || 60,
       RATE_LIMIT_MAX_ADMIN: Number(process.env.RATE_LIMIT_MAX_ADMIN) || 1,
+      RATE_LIMIT_MAX_REQUEUE: Number(process.env.RATE_LIMIT_MAX_REQUEUE) || 10, // P1-11
       RATE_LIMIT_BACKEND: (process.env.RATE_LIMIT_BACKEND as "redis" | "memory") || "memory",
       MAX_PAYLOAD_BYTES: Number(process.env.MAX_PAYLOAD_BYTES) || 262144,
       WORKER_POLL_INTERVAL_MS: Number(process.env.WORKER_POLL_INTERVAL_MS) || 5000,

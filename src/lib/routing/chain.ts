@@ -10,8 +10,9 @@ import { checkCircuit, recordFailure, recordSuccess } from "./circuit-breaker";
 export interface RouteSegment {
   lat: number;
   lon: number;
-  distanceM?: number;
-  durationSec?: number;
+  distanceM?: number; // P1-7: длина сегмента (м) — от провайдера
+  durationSec?: number; // P1-7: время сегмента (с) — от провайдера
+  planSpeedKmh?: number; // P1-7: плановая скорость сегмента (км/ч)
   trafficSpeedKmh?: number;
   trafficDurationSec?: number;
   trafficSource?: string;
@@ -27,6 +28,11 @@ export interface RouteResult {
   cached?: boolean;
   trafficFetched?: boolean;
   trafficUtc?: string;
+  // P1-7: план-фактные поля результата (§6.1/§6.4 методологии)
+  planDistanceM?: number | null; // план без трафика (OSRM/haversine); для 2ГИС null
+  planDurationSec?: number | null;
+  trafficDistanceM?: number | null; // с учётом пробок (2ГИС)
+  trafficDurationSec?: number | null;
 }
 
 const EARTH_R = 6371000;
@@ -87,22 +93,46 @@ async function route2Gis(
     const hasTraffic = (route.algorithm || "").includes("traffic");
 
     // Extract polyline from maneuvers
+    // P1-7: per-segment дистанция/время — манёвр содержит outcoming_path {distance, duration, geometry[]};
+    // значения пути распределяем по его координатам пропорционально.
     const segments: RouteSegment[] = [];
     const polyline: [number, number][] = [];
     const maneuvers = route.maneuvers || [];
     for (const m of maneuvers) {
-      const paths = m.outcoming_path?.geometry || [];
-      for (const g of paths) {
-        if (g.selection) {
-          // Parse LINESTRING(lon1 lat1, lon2 lat2, ...)
-          const coords = g.selection.replace("LINESTRING(", "").replace(")", "").split(",");
-          for (const c of coords) {
-            const [lon, lat] = c.trim().split(" ").map(Number);
-            if (!isNaN(lat) && !isNaN(lon)) {
-              polyline.push([lat, lon]);
-              segments.push({ lat, lon });
+      const paths = m.outcoming_path || [];
+      for (const path of paths) {
+        const pathDistance = Number(path.distance) || 0;
+        const pathDuration = Number(path.duration) || 0;
+        const geometry = path.geometry || [];
+        const pathCoords: [number, number][] = [];
+        for (const g of geometry) {
+          if (g.selection) {
+            // Parse LINESTRING(lon1 lat1, lon2 lat2, ...)
+            const coords = g.selection.replace("LINESTRING(", "").replace(")", "").split(",");
+            for (const c of coords) {
+              const [lon, lat] = c.trim().split(" ").map(Number);
+              if (!isNaN(lat) && !isNaN(lon)) {
+                pathCoords.push([lat, lon]);
+              }
             }
           }
+        }
+        const n = pathCoords.length;
+        if (n === 0) continue;
+        const perDist = n > 0 ? pathDistance / n : 0;
+        const perDur = n > 0 ? pathDuration / n : 0;
+        for (const [lat, lon] of pathCoords) {
+          polyline.push([lat, lon]);
+          segments.push({
+            lat,
+            lon,
+            distanceM: Math.round(perDist * 100) / 100,
+            durationSec: Math.round(perDur * 100) / 100,
+            planSpeedKmh: perDur > 0 ? Math.round((perDist / perDur) * 3.6 * 10) / 10 : undefined,
+            trafficSpeedKmh: perDur > 0 ? Math.round((perDist / perDur) * 3.6 * 10) / 10 : undefined,
+            trafficSource: "2gis",
+            trafficUtc: undefined,
+          });
         }
       }
     }
@@ -115,6 +145,11 @@ async function route2Gis(
       segments,
       trafficFetched: true,
       trafficUtc: new Date().toISOString(),
+      // 2ГИС даёт время с пробками; свободный поток отдельно не отдаёт → план = null
+      planDistanceM: null,
+      planDurationSec: null,
+      trafficDistanceM: distanceM,
+      trafficDurationSec: durationSec,
     };
   } catch (err) {
     recordFailure("2gis");
@@ -147,6 +182,7 @@ async function routeOsrm(
     const coords: [number, number][] = (r.geometry?.coordinates || []).map(
       (c: [number, number]) => [c[1], c[0]]
     );
+    // P1-7: OSRM — свободный поток (без пробок) → сегменты без трафика, план = результат
     const segments: RouteSegment[] = coords.map(([lat, lon]) => ({ lat, lon }));
     recordSuccess("osrm");
     return {
@@ -156,6 +192,10 @@ async function routeOsrm(
       polyline: coords,
       segments,
       trafficFetched: false,
+      planDistanceM: r.distance || 0,
+      planDurationSec: r.duration || 0,
+      trafficDistanceM: null,
+      trafficDurationSec: null,
     };
   } catch (err) {
     recordFailure("osrm");
@@ -183,6 +223,10 @@ function routeHaversine(
     polyline,
     segments: [{ lat: startLat, lon: startLon }, { lat: endLat, lon: endLon }],
     trafficFetched: false,
+    planDistanceM: distanceM,
+    planDurationSec: durationSec,
+    trafficDistanceM: null,
+    trafficDurationSec: null,
   };
 }
 

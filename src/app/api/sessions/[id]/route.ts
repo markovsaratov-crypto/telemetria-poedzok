@@ -100,7 +100,8 @@ export async function DELETE(
     });
     inc("session_delete_total", "Session soft-deletes", 1);
 
-    return json({ ok: true, gracePeriodDays: env().GRACE_PERIOD_DAYS }, 204, { "X-Request-Id": requestId });
+    // P1-8: было 204 с телом — Response-конструктор Next.js падал → 500 после УСПЕШНОГО soft-delete
+    return json({ ok: true, gracePeriodDays: env().GRACE_PERIOD_DAYS }, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Session delete error", { requestId, error: err instanceof Error ? err.message : String(err) });
     return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });

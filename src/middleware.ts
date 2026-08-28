@@ -12,7 +12,9 @@ import { sessionCookieName } from "@/lib/cookie-name"; // P0-5: __Host- преф
 const SESSION_COOKIE_NAME = sessionCookieName();
 
 // Эндпоинты без авторизации
-const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics"];
+const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics", "/api/share"]; // P1-9: /api/share — публичный по спеке
+// GET /api/sessions/<id>/share?token= — публичный доступ по спеке (матрица §7); P1-9
+const SHARE_GET_RE = /^\/api\/sessions\/[^/]+\/share$/;
 const ADMIN_PATHS = ["/api/admin/"];
 const WORKER_PATHS = ["/api/worker/"];
 
@@ -22,6 +24,7 @@ function rateLimitForPath(pathname: string): { limit: number; windowSec: number;
   if (pathname === "/api/auth/login") return { limit: e.RATE_LIMIT_MAX_AUTH, windowSec: 60, scope: "auth:login" };
   if (pathname === "/api/plan") return { limit: e.RATE_LIMIT_MAX_PLAN, windowSec: 60, scope: "plan" };
   if (pathname === "/api/admin/backup" || pathname === "/api/admin/restore") return { limit: e.RATE_LIMIT_MAX_ADMIN, windowSec: 3600, scope: "admin:heavy" };
+  if (pathname === "/api/admin/requeue") return { limit: e.RATE_LIMIT_MAX_REQUEUE, windowSec: 60, scope: "admin:requeue" }; // P1-11: спека §7.3 — 10/мин
   if (pathname === "/api/audit") return { limit: e.RATE_LIMIT_MAX_AUDIT, windowSec: 60, scope: "audit" };
   if (pathname.startsWith("/api/")) return { limit: e.RATE_LIMIT_MAX_DEFAULT, windowSec: 60, scope: "default" };
   return { limit: 0, windowSec: 60, scope: "none" };
@@ -37,7 +40,7 @@ function rateLimitKey(scope: string, request: NextRequest): string {
   if (scope === "auth:login") {
     return rlKey(scope, ip);
   }
-  if (scope === "plan" || scope === "audit" || scope === "admin:heavy") {
+  if (scope === "plan" || scope === "audit" || scope === "admin:heavy" || scope === "admin:requeue") {
     const auth = request.headers.get("authorization") || "no-token";
     const tokenPart = auth.replace(/^Bearer\s+/i, "").slice(0, 16);
     return rlKey(scope, tokenPart);
@@ -96,7 +99,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
     // 3. Auth (кроме public) — P0-3: обязательна проверка ЗНАЧЕНИЙ токенов (timing-safe),
     // а не только формата: ранее любой Bearer ≥32 символов проходил гейт.
-    const isPublic = PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"));
+    const isPublic = PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"))
+      // P1-9: GET share по токену — публичный (сам роут проверяет подпись и срок токена)
+      || (SHARE_GET_RE.test(pathname) && request.method === "GET");
     if (!isPublic && pathname.startsWith("/api/")) {
       const authHeader = request.headers.get("authorization") || "";
       const cookie = request.headers.get("cookie") || "";

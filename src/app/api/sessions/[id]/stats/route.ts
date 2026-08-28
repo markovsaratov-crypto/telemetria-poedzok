@@ -1,23 +1,111 @@
 // GET /api/sessions/[id]/stats — детальная статистика по сессии.
-// Возвращает: distance, duration, avgSpeed, maxSpeed, avgAltitude, elevationGain/loss, movingTime, idleTime.
+// Возвращает: distance, duration, avgSpeed, maxSpeed, avgAltitude, elevationGain/loss, movingTime, idleTime
+// + P1-6: methodology (метрики методологии v2.6) + P1-7: route (план-факт и трафик из TrafficJob).
 import { NextRequest } from "next/server";
-import { db } from "@/lib/db";
+import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { haversine } from "@/lib/routing/chain";
+import { computeMethodologyMetrics, haversineM } from "@/lib/metrics-methodology";
 
-const EARTH_R = 6371000;
-
-function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * EARTH_R * Math.asin(Math.sqrt(a));
+// P1-7: план-фактные отклонения и трафик-блок из результата ворчера (§6.3/§6.6/§6.7/§6.8 методологии)
+interface RoutePlanFact {
+  provider: string | null;
+  planDistanceM: number | null;
+  planDurationSec: number | null;
+  trafficFetched: boolean;
+  trafficDurationSec: number | null;
+  timeLostToTrafficSec: number | null;
+  durationDeviationPct: number | null;
+  distanceDeviationPct: number | null;
+  speedDeviationPct: number | null;
 }
+
+async function computePlanFact(
+  sessionId: string,
+  actualDistanceM: number,
+  actualDurationSec: number,
+  actualAvgSpeed: number | null
+): Promise<RoutePlanFact> {
+  const empty: RoutePlanFact = {
+    provider: null,
+    planDistanceM: null,
+    planDurationSec: null,
+    trafficFetched: false,
+    trafficDurationSec: null,
+    timeLostToTrafficSec: null,
+    durationDeviationPct: null,
+    distanceDeviationPct: null,
+    speedDeviationPct: null,
+  };
+  try {
+    const res = await libsql.execute({
+      sql: "SELECT status, result FROM TrafficJob WHERE sessionId = ? AND status = 'completed' ORDER BY updatedAt DESC LIMIT 1",
+      args: [sessionId],
+    });
+    if (res.rows.length === 0) return empty;
+    const row = res.rows[0] as Record<string, unknown>;
+    if (!row.result) return empty;
+    let parsed: any;
+    try { parsed = JSON.parse(String(row.result)); } catch { return empty; }
+    if (!parsed || typeof parsed !== "object") return empty;
+    const provider = parsed.provider ? String(parsed.provider) : null;
+
+    // План: дистанция провайдера — всегда плановая (геометрия маршрута).
+    // Время: для OSRM — свободный поток (план); для 2ГИС total_duration включает пробки →
+    // план по времени считаем по базовой линии гаверсинус/40 км/ч (§3.2), трафик — от 2ГИС.
+    const distM = Number(parsed.distanceM) || null;
+    const durS = Number(parsed.durationSec) || null;
+    const trafficFetched = !!parsed.trafficFetched;
+    const planDistanceM = distM;
+    let planDurationSec = trafficFetched ? null : durS;
+    let trafficDurationSec = trafficFetched ? durS : null;
+    let timeLostToTrafficSec: number | null = null;
+
+    if (trafficFetched && durS && distM) {
+      const direct =
+        Array.isArray(parsed.segments) && parsed.segments.length >= 2
+          ? haversineM(parsed.segments[0].lat, parsed.segments[0].lon, parsed.segments[parsed.segments.length - 1].lat, parsed.segments[parsed.segments.length - 1].lon)
+          : null;
+      if (direct && direct > 1) {
+        const baselineDur = Math.round((direct / 1000 / 40) * 3600); // гаверсинус @ 40 км/ч
+        planDurationSec = baselineDur;
+        timeLostToTrafficSec = durS - baselineDur; // §6.8
+      }
+    }
+
+    const pct = (actual: number, plan: number) =>
+      plan > 0 ? Math.round(((actual - plan) / plan) * 1000) / 10 : null;
+
+    let speedDeviationPct: number | null = null;
+    if (actualAvgSpeed != null && planDistanceM && planDurationSec && planDurationSec > 0) {
+      const planSpeed = planDistanceM / planDurationSec;
+      speedDeviationPct = planSpeed > 0 ? Math.round(((actualAvgSpeed - planSpeed) / planSpeed) * 1000) / 10 : null;
+    }
+    // §6.7: если план по времени недоступен (2ГИС-трафик) — скорость плана = дистанция плана / трафик-время
+    if (speedDeviationPct == null && actualAvgSpeed != null && planDistanceM && trafficDurationSec && trafficDurationSec > 0) {
+      const trafficSpeed = planDistanceM / trafficDurationSec;
+      speedDeviationPct = trafficSpeed > 0 ? Math.round(((actualAvgSpeed - trafficSpeed) / trafficSpeed) * 1000) / 10 : null;
+    }
+
+    return {
+      provider,
+      planDistanceM: planDistanceM ? Math.round(planDistanceM) : null,
+      planDurationSec,
+      trafficFetched,
+      trafficDurationSec,
+      timeLostToTrafficSec: timeLostToTrafficSec != null ? Math.round(timeLostToTrafficSec) : null,
+      durationDeviationPct: planDurationSec ? pct(actualDurationSec, planDurationSec) : null,
+      distanceDeviationPct: planDistanceM ? pct(actualDistanceM, planDistanceM) : null,
+      speedDeviationPct,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+const EARTH_R = 6371000; // (оставлено для совместимости сигнатур; расчёт — в metrics-methodology)
+void EARTH_R;
 
 export async function GET(
   request: NextRequest,
@@ -126,6 +214,11 @@ export async function GET(
       maxLon: Math.max(...lons),
     };
 
+    // P1-6: метрики методологии (разделы 5, 7, 8.2, 11)
+    const methodology = computeMethodologyMetrics(points, distance, durationSec);
+    // P1-7: план-факт из завершённого TrafficJob
+    const route = await computePlanFact(id, distance, durationSec, avgSpeed);
+
     return json(
       {
         sessionId: id,
@@ -142,6 +235,8 @@ export async function GET(
         bbox,
         startTime: session.startTime,
         endTime: session.endTime,
+        methodology,
+        route,
       },
       200,
       { "X-Request-Id": requestId }

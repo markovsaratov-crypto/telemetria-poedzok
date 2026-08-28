@@ -2,6 +2,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export function json(body: unknown, status = 200, headers?: Record<string, string>) {
+  // P1-8: 204 не допускает тела — Next.js Response конструктор падал
+  // («Invalid response status code 204»), превращая успешный DELETE в 500.
+  if (status === 204) {
+    const h = new Headers(headers);
+    h.set("X-Body-Empty", "1");
+    return new NextResponse(null, { status: 204, headers: h });
+  }
   return NextResponse.json(body, {
     status,
     headers: {

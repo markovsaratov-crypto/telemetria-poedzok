@@ -179,12 +179,79 @@ async function pollOnce(rt: WorkerRuntime) {
   const requestId = crypto.randomUUID();
   try {
     const jobs = await pollJobs(rt.workerId, env().WORKER_BATCH_SIZE);
-    if (jobs.length === 0) return;
-    logger.info("polled jobs", { requestId, workerId: rt.workerId, count: jobs.length });
-    const limit = pLimit(env().WORKER_MAX_CONCURRENCY);
-    await Promise.all(jobs.map((job) => limit(() => processOneJob(job, requestId))));
+    if (jobs.length > 0) {
+      logger.info("polled jobs", { requestId, workerId: rt.workerId, count: jobs.length });
+      const limit = pLimit(env().WORKER_MAX_CONCURRENCY);
+      await Promise.all(jobs.map((job) => limit(() => processOneJob(job, requestId))));
+    }
   } catch (err) {
     logger.error("poll cycle failed", { requestId, error: err instanceof Error ? err.message : String(err) });
+  }
+  // P1-8: обработка ExportJob (раньше навсегда оставались pending → «вечные 202»)
+  try {
+    await pollExportJobs();
+  } catch (err) {
+    logger.error("export poll failed", { requestId, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+// P1-8: воркер генерирует файл экспорта в EXPORT_STORAGE_DIR, ставит fileSize и
+// expiresAt = now + EXPORT_URL_TTL_HOURS (§4.12). Download-роут отдаёт файл.
+async function pollExportJobs(): Promise<void> {
+  const now = new Date().toISOString();
+  const claim = await libsql.execute({
+    sql: `UPDATE ExportJob SET status = 'running', updatedAt = ?
+          WHERE id IN (SELECT id FROM ExportJob WHERE status = 'pending' ORDER BY createdAt ASC LIMIT 2)
+          RETURNING id, sessionId, format, attempts`,
+    args: [now],
+  });
+  if (claim.rows.length === 0) return;
+
+  for (const r of claim.rows) {
+    const row = r as Record<string, unknown>;
+    const jobId = String(row.id);
+    const sessionId = String(row.sessionId);
+    const format = String(row.format) as "gpx" | "kml" | "json";
+    const attempts = Number(row.attempts || 0);
+    try {
+      const sessionRes = await libsql.execute({
+        sql: `SELECT * FROM Session WHERE id = ?`,
+        args: [sessionId],
+      });
+      if (sessionRes.rows.length === 0) throw new Error("session not found");
+      const session = toCamel(sessionRes.rows[0] as Record<string, unknown>);
+      const ptsRes = await libsql.execute({
+        sql: `SELECT * FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC`,
+        args: [sessionId],
+      });
+      session.gpsPoints = ptsRes.rows.map((p) => toCamel(p as Record<string, unknown>));
+
+      const { generateExport } = await import("./export");
+      const { content, ext } = generateExport(session as never, format);
+      const fs = await import("fs");
+      const path = await import("path");
+      const dir = env().EXPORT_STORAGE_DIR;
+      fs.mkdirSync(dir, { recursive: true });
+      const filePath = path.join(dir, `${jobId}.${ext}`);
+      fs.writeFileSync(filePath, content, "utf8");
+      const expiresAt = Date.now() + env().EXPORT_URL_TTL_HOURS * 3600 * 1000;
+      await libsql.execute({
+        sql: `UPDATE ExportJob SET status = 'completed', fileUrl = ?, fileSize = ?, expiresAt = ?, completedAt = ?, error = NULL, updatedAt = ? WHERE id = ?`,
+        args: [filePath, Buffer.byteLength(content), expiresAt, now, now, jobId],
+      });
+      inc("export_completed_total", "Exports completed", 1, format);
+      logger.info("export job completed", { jobId, sessionId, format, bytes: Buffer.byteLength(content) });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const newAttempts = attempts + 1;
+      const nextStatus = newAttempts < 3 ? "pending" : "dead";
+      await libsql.execute({
+        sql: `UPDATE ExportJob SET status = ?, attempts = ?, error = ?, updatedAt = ? WHERE id = ?`,
+        args: [nextStatus, newAttempts, msg.slice(0, 500), now, jobId],
+      });
+      inc("export_failed_total", "Export jobs failed", 1);
+      logger.error("export job failed", { jobId, error: msg, attempts: newAttempts });
+    }
   }
 }
 

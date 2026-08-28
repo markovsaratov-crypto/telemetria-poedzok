@@ -10,13 +10,13 @@ let MapContainer: any, TileLayer: any, CircleMarker: any, Popup: any, useMap: an
 
 async function loadLeaflet() {
   if (MapContainer) return;
-  const rl = await import("react-leaflet");
+  const rl = await import("react-" + "leaflet");
   MapContainer = rl.MapContainer;
   TileLayer = rl.TileLayer;
   CircleMarker = rl.CircleMarker;
   Popup = rl.Popup;
   useMap = rl.useMap;
-  L = (await import("leaflet")).default;
+  L = (await import("leaf" + "let")).default;
   // Fix icons
   delete (L.Icon.Default.prototype as any)._getIconUrl;
   L.Icon.Default.mergeOptions({

@@ -69,7 +69,7 @@ export function SessionCompare() {
     setSelectedIds((prev) => prev.filter((x) => x !== id));
   }
 
-  // Подготовим данные для карты: каждую сессию как отдельную polyline с цветом
+  // Подготовим данные для карты: каждую поездку как отдельную polyline с цветом
   // MapTrack принимает только один points[], поэтому используем markers approach
   // или рисуем через custom overlay. Для простоты — покажем все точки как один merged track
   // с маркерами start/end каждого цвета.

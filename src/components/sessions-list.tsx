@@ -1,6 +1,6 @@
 "use client";
 
-// src/components/sessions-list.tsx — список сессий с курсорной пагинацией, фильтрами, сортировкой, view modes.
+// src/components/sessions-list.tsx — список поездок с курсорной пагинацией, фильтрами, сортировкой, view modes.
 
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -200,7 +200,7 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
 
   async function handleBulkDelete() {
     if (selectedIds.size === 0) return;
-    if (!confirm(`Удалить ${selectedIds.size} сессий? Это soft-delete с grace period 30 дней.`)) {
+    if (!confirm(`Удалить ${selectedIds.size} поездок? Это soft-delete с grace period 30 дней.`)) {
       return;
     }
     try {
@@ -224,7 +224,7 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
       <div className="border-b px-3 py-2 flex items-center justify-between bg-muted/30 gap-2">
         <div className="flex items-center gap-2 text-xs">
           <span className="font-medium">
-            {allSessions.length > 0 ? `${allSessions.length} сессий` : "Сессии"}
+            {allSessions.length > 0 ? `${allSessions.length} поездок` : "Поездки"}
           </span>
           {isFetching && (
             <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
@@ -443,7 +443,7 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
         ) : allSessions.length === 0 ? (
           <div className="p-8 text-center text-sm text-muted-foreground">
             <MapPin className="h-8 w-8 mx-auto mb-2 opacity-30" />
-            {isFetching ? "Загрузка…" : "Сессий не найдено"}
+            {isFetching ? "Загрузка…" : "Поездок не найдено"}
             <div className="mt-3">
               <Button variant="outline" size="sm" onClick={() => refetch()}>
                 Обновить

@@ -11,16 +11,18 @@ import * as React from "react";
 import { motion, useMotionValue, useTransform, PanInfo } from "framer-motion";
 import { MapPin, Clock, Gauge, Trash2, Download, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DestinationLabel } from "./DestinationLabel";
 
 interface SessionCardProps {
-  deviceName: string;
+  destLat: number | null;
+  destLon: number | null;
+  fallbackName: string;
   startTime: string;
   endTime?: string | null;
   pointCount: number;
   distance?: number;
   avgSpeed?: number | null;
-  ecoScore?: number | null;
-  deviation?: number | null;
+  durationMin?: number;
   onTap: () => void;
   onExport?: () => void;
   onDelete?: () => void;
@@ -32,13 +34,7 @@ export function SessionCard(props: SessionCardProps) {
 
   const start = new Date(props.startTime);
   const end = props.endTime ? new Date(props.endTime) : null;
-  const durationMin = end ? Math.round((end.getTime() - start.getTime()) / 60000) : 0;
-
-  const ecoColor = props.ecoScore != null
-    ? props.ecoScore >= 80 ? "text-[oklch(0.45_0.15_145)]"
-    : props.ecoScore >= 60 ? "text-[oklch(0.55_0.15_85)]"
-    : "text-[oklch(0.45_0.20_25)]"
-    : "text-muted-foreground";
+  const durationMin = props.durationMin ?? (end ? Math.round((end.getTime() - start.getTime()) / 60000) : 0);
 
   function onDragEnd(_: unknown, info: PanInfo) {
     if (info.offset.x < -60) {
@@ -85,16 +81,10 @@ export function SessionCard(props: SessionCardProps) {
         className="relative bg-card border rounded-xl p-4 cursor-pointer active:bg-accent/30 transition-colors"
         whileTap={{ scale: 0.98 }}
       >
-        {/* Row 1: EcoScore + name */}
-        <div className="flex items-center gap-2 mb-1">
-          {props.ecoScore != null && (
-            <span className={cn("text-xs font-bold tabular-nums", ecoColor)}>
-              {props.ecoScore}
-            </span>
-          )}
-          <span className="text-sm font-medium truncate flex-1">
-            {props.deviceName}
-          </span>
+        {/* Row 1: Destination address (reverse geocoded) */}
+        <div className="flex items-center gap-2 mb-1.5">
+          <MapPin className="h-4 w-4 text-primary shrink-0" />
+          <DestinationLabel lat={props.destLat} lon={props.destLon} fallback={props.fallbackName} className="text-sm font-medium" />
           <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
         </div>
 

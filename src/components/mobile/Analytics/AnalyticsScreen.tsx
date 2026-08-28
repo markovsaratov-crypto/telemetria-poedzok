@@ -12,6 +12,7 @@ import { useStats, useRoutes, useSessions, useSessionStats, useSession, useAggre
 import { MetricTile } from "../shared/MetricTile";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { fmtNumber } from "@/lib/format";
 
 type ViewMode = "aggregate" | "detail";
 
@@ -29,14 +30,16 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
 
   const sessions = sessionsData?.sessions || [];
 
-  // Aggregate KPIs from /api/stats
+  // Aggregate KPIs: use what's available from aggregate + speed distribution
   const aggKpis = {
     duration: aggregateStats?.totalDurationSec ?? 0,
     distance: aggregateStats?.totalDistanceM ?? 0,
     avgSpeed: aggregateStats?.avgSpeedMs ?? null,
     maxSpeed: speedDist?.maxSpeedMs ?? null,
-    movingTime: 0,
-    idleTime: 0,
+    // In aggregate mode: show trip count and total points instead of moving/idle
+    // (movingTime/idleTime only available per-session, not in aggregate)
+    sessionCount: aggregateStats?.validCount ?? 0,
+    totalPoints: speedDist?.total ?? 0,
   };
 
   // Per-trip KPIs from /api/sessions/[id]/stats
@@ -157,29 +160,36 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
                     : "success"
                   }
                 />
-                {/* REAL: В движении (movingTime) */}
-                <MetricTile
-                  label="В движении"
-                  value={(currentStats as any).movingTime ? Math.round((currentStats as any).movingTime / 60) : "—"}
-                  unit="мин"
-                  status={
-                    (currentStats as any).movingTime == null ? "neutral"
-                    : (currentStats as any).movingTime > 600 ? "success"
-                    : "neutral"
-                  }
-                />
-                {/* REAL: Остановки (idleTime) */}
-                <MetricTile
-                  label="Остановки"
-                  value={(currentStats as any).idleTime ? Math.round((currentStats as any).idleTime / 60) : "—"}
-                  unit="мин"
-                  status={
-                    (currentStats as any).idleTime == null ? "neutral"
-                    : (currentStats as any).idleTime > 600 ? "error"
-                    : (currentStats as any).idleTime > 180 ? "warning"
-                    : "success"
-                  }
-                />
+                {/* В aggregate: Поездок / В detail: В движении */}
+                {mode === "aggregate" ? (
+                  <MetricTile
+                    label="Поездок"
+                    value={(currentStats as any).sessionCount ?? "—"}
+                    status={(currentStats as any).sessionCount > 0 ? "success" : "neutral"}
+                  />
+                ) : (
+                  <MetricTile
+                    label="В движении"
+                    value={(currentStats as any).movingTime ? Math.round((currentStats as any).movingTime / 60) : "—"}
+                    unit="мин"
+                    status={(currentStats as any).movingTime == null ? "neutral" : (currentStats as any).movingTime > 600 ? "success" : "neutral"}
+                  />
+                )}
+                {/* В aggregate: Точек / В detail: Остановки */}
+                {mode === "aggregate" ? (
+                  <MetricTile
+                    label="GPS точек"
+                    value={(currentStats as any).totalPoints ? fmtNumber((currentStats as any).totalPoints) : "—"}
+                    status={(currentStats as any).totalPoints > 0 ? "success" : "neutral"}
+                  />
+                ) : (
+                  <MetricTile
+                    label="Остановки"
+                    value={(currentStats as any).idleTime ? Math.round((currentStats as any).idleTime / 60) : "—"}
+                    unit="мин"
+                    status={(currentStats as any).idleTime == null ? "neutral" : (currentStats as any).idleTime > 600 ? "error" : (currentStats as any).idleTime > 180 ? "warning" : "success"}
+                  />
+                )}
               </div>
             </div>
 

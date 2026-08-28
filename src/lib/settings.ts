@@ -61,6 +61,7 @@ export function getSettingSync(key: string): string {
   if (cached) return cached.value;
   const e = env();
   if (key === "TWO_GIS_API_KEY") return e.TWO_GIS_API_KEY;
+  if (key === "TWO_GIS_PROXY_URL") return e.TWO_GIS_PROXY_URL;
   if (key === "OSRM_BASE_URL") return e.OSRM_BASE_URL;
   return "";
 }
@@ -99,6 +100,7 @@ export async function listOverridableSettings(): Promise<
   const e = env();
   const known: Array<{ key: string; envDefault: string; isSensitive: boolean }> = [
     { key: "TWO_GIS_API_KEY", envDefault: e.TWO_GIS_API_KEY, isSensitive: true },
+    { key: "TWO_GIS_PROXY_URL", envDefault: e.TWO_GIS_PROXY_URL, isSensitive: false },
     { key: "OSRM_BASE_URL", envDefault: e.OSRM_BASE_URL, isSensitive: false },
   ];
   return known.map((k) => {

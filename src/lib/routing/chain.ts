@@ -54,8 +54,13 @@ async function route2Gis(
     return null;
   }
   try {
-    const url = `https://routing.api.2gis.ru/carrouting/6.0.0/global?key=${key}`;
-    const res = await fetch(url, {
+    // Use Cloudflare Worker proxy (Russian edge) to bypass EU→RU network issues
+    // Worker URL is configurable via TWO_GIS_PROXY_URL env or Setting
+    const proxyUrl = getSettingSync("TWO_GIS_PROXY_URL") || process.env.TWO_GIS_PROXY_URL || "";
+    const apiUrl = proxyUrl
+      ? `${proxyUrl}?key=${key}`
+      : `https://routing.api.2gis.ru/carrouting/6.0.0/global?key=${key}`;
+    const res = await fetch(apiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

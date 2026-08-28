@@ -53,6 +53,7 @@ export async function GET(request: NextRequest) {
 
     return json(
       {
+        sessionCount: validCount,
         totalDistanceM: Math.round(totalDistanceM),
         totalDistanceKm: Math.round((totalDistanceM / 1000) * 100) / 100,
         totalDurationSec: Math.round(totalDurationSec),

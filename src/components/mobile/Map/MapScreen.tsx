@@ -1,20 +1,30 @@
 "use client";
 
 import * as React from "react";
-import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from "react-leaflet";
-import L from "leaflet";
-import { useSessions, useBatchStats } from "@/lib/hooks";
 import { MapPin, Loader2, Plus, Minus, ArrowUp, ArrowDown, ArrowLeft, ArrowRight } from "lucide-react";
+import { useSessions, useBatchStats } from "@/lib/hooks";
 import { fmtDate } from "@/lib/format";
 
-delete (L.Icon.Default.prototype as unknown as { _getIconUrl?: unknown })._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-});
+// Lazy load react-leaflet — only in browser
+let MapContainer: any, TileLayer: any, CircleMarker: any, Popup: any, useMap: any, L: any;
 
-interface MapScreenProps { onSessionTap: (id: string) => void; }
+async function loadLeaflet() {
+  if (MapContainer) return;
+  const rl = await import("react-leaflet");
+  MapContainer = rl.MapContainer;
+  TileLayer = rl.TileLayer;
+  CircleMarker = rl.CircleMarker;
+  Popup = rl.Popup;
+  useMap = rl.useMap;
+  L = (await import("leaflet")).default;
+  // Fix icons
+  delete (L.Icon.Default.prototype as any)._getIconUrl;
+  L.Icon.Default.mergeOptions({
+    iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+    iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+    shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+  });
+}
 
 function FitBounds({ points }: { points: Array<[number, number]> }) {
   const map = useMap();
@@ -30,8 +40,8 @@ function ZoomButtons() {
   const map = useMap();
   return (
     <div className="absolute top-4 right-4 z-[1000] flex flex-col gap-1">
-      <button onClick={() => map.zoomIn()} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Приблизить"><Plus className="h-5 w-5" /></button>
-      <button onClick={() => map.zoomOut()} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Отдалить"><Minus className="h-5 w-5" /></button>
+      <button onClick={() => map.zoomIn()} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center"><Plus className="h-5 w-5" /></button>
+      <button onClick={() => map.zoomOut()} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center"><Minus className="h-5 w-5" /></button>
     </div>
   );
 }
@@ -41,17 +51,18 @@ function PanControls() {
   const pan = (dx: number, dy: number) => map.panBy([dx, dy]);
   return (
     <div className="absolute bottom-4 right-4 z-[1000] flex flex-col items-center gap-1">
-      <button onClick={() => pan(0, -80)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Вверх"><ArrowUp className="h-5 w-5" /></button>
+      <button onClick={() => pan(0, -80)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center"><ArrowUp className="h-5 w-5" /></button>
       <div className="flex gap-1">
-        <button onClick={() => pan(-80, 0)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Влево"><ArrowLeft className="h-5 w-5" /></button>
-        <button onClick={() => pan(80, 0)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Вправо"><ArrowRight className="h-5 w-5" /></button>
+        <button onClick={() => pan(-80, 0)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center"><ArrowLeft className="h-5 w-5" /></button>
+        <button onClick={() => pan(80, 0)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center"><ArrowRight className="h-5 w-5" /></button>
       </div>
-      <button onClick={() => pan(0, 80)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Вниз"><ArrowDown className="h-5 w-5" /></button>
+      <button onClick={() => pan(0, 80)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center"><ArrowDown className="h-5 w-5" /></button>
     </div>
   );
 }
 
-export function MapScreen({ onSessionTap }: MapScreenProps) {
+export function MapScreen({ onSessionTap }: { onSessionTap: (id: string) => void }) {
+  const [ready, setReady] = React.useState(false);
   const { data, isLoading } = useSessions({ limit: 100 });
   const sessions = data?.sessions || [];
   const sessionIds = React.useMemo(() => sessions.map((s: any) => s.id), [sessions]);
@@ -71,7 +82,9 @@ export function MapScreen({ onSessionTap }: MapScreenProps) {
   const allCoords: [number, number][] = points.map((p) => [p.lat, p.lon]);
   const center: [number, number] = allCoords[0] || [51.5924, 45.9606];
 
-  if (isLoading) return (
+  React.useEffect(() => { loadLeaflet().then(() => setReady(true)).catch(() => {}); }, []);
+
+  if (isLoading || !ready) return (
     <div className="flex flex-col h-full">
       <header className="bg-card border-b"><div className="flex items-center gap-2 h-14 px-4"><MapPin className="h-5 w-5 text-primary" /><h1 className="text-[22px] font-bold">Карта</h1></div></header>
       <div className="flex-1 flex items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>

@@ -54,12 +54,11 @@ async function route2Gis(
     return null;
   }
   try {
-    // Use Cloudflare Worker proxy (Russian edge) to bypass EU→RU network issues
-    // Worker URL is configurable via TWO_GIS_PROXY_URL env or Setting
+    // 2ГИС API: catalog.api.2gis.ru works globally (routing.api.2gis.ru is dead).
+    // Optional Cloudflare Worker proxy for Russian edge routing.
     const proxyUrl = getSettingSync("TWO_GIS_PROXY_URL") || process.env.TWO_GIS_PROXY_URL || "";
-    const apiUrl = proxyUrl
-      ? `${proxyUrl}?key=${key}`
-      : `https://routing.api.2gis.ru/carrouting/6.0.0/global?key=${key}`;
+    const baseUrl = proxyUrl || "https://catalog.api.2gis.ru";
+    const apiUrl = `${baseUrl}/carrouting/6.0.0/global?key=${key}`;
     const res = await fetch(apiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -69,7 +68,7 @@ async function route2Gis(
           { lat: endLat, lon: endLon },
         ],
       }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) {
       recordFailure("2gis");
@@ -82,20 +81,30 @@ async function route2Gis(
       return null;
     }
     const route = data.result[0];
-    const legs = route.legs || [];
+    // 2ГИС returns total_distance and total_duration directly (not in legs[])
+    const distanceM = route.total_distance || 0;
+    const durationSec = route.total_duration || 0;
+    const hasTraffic = (route.algorithm || "").includes("traffic");
+
+    // Extract polyline from maneuvers
     const segments: RouteSegment[] = [];
-    let distanceM = 0;
-    let durationSec = 0;
-    let polyline: [number, number][] = [];
-    for (const leg of legs) {
-      for (const step of leg.steps || []) {
-        for (const p of step.geometry?.points || []) {
-          polyline.push([p.lat, p.lon]);
-          segments.push({ lat: p.lat, lon: p.lon });
+    const polyline: [number, number][] = [];
+    const maneuvers = route.maneuvers || [];
+    for (const m of maneuvers) {
+      const paths = m.outcoming_path?.geometry || [];
+      for (const g of paths) {
+        if (g.selection) {
+          // Parse LINESTRING(lon1 lat1, lon2 lat2, ...)
+          const coords = g.selection.replace("LINESTRING(", "").replace(")", "").split(",");
+          for (const c of coords) {
+            const [lon, lat] = c.trim().split(" ").map(Number);
+            if (!isNaN(lat) && !isNaN(lon)) {
+              polyline.push([lat, lon]);
+              segments.push({ lat, lon });
+            }
+          }
         }
       }
-      distanceM += leg.distance || 0;
-      durationSec += leg.duration || 0;
     }
     recordSuccess("2gis");
     return {

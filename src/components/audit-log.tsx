@@ -105,7 +105,7 @@ export function AuditLog() {
 
   function exportCSV() {
     const headers = ["time", "action", "targetId", "targetType", "actorType", "actorId", "sessionId", "metadata"];
-    const rows = logs.map((l) => [
+    const rows = all.map((l) => [
       new Date(l.createdAt).toISOString(),
       l.action,
       l.targetId,
@@ -133,9 +133,9 @@ export function AuditLog() {
         <div className="flex items-center gap-2">
           <ScrollText className="h-4 w-4 text-primary" />
           <h3 className="text-sm font-semibold">Журнал аудита</h3>
-          {logs.length > 0 && (
+          {all.length > 0 && (
             <Badge variant="outline" className="text-[10px]">
-              {logs.length}
+              {all.length}
             </Badge>
           )}
         </div>
@@ -144,7 +144,7 @@ export function AuditLog() {
             size="sm"
             variant="ghost"
             onClick={exportCSV}
-            disabled={logs.length === 0}
+            disabled={all.length === 0}
             title="Экспорт в CSV"
             className="h-7"
           >

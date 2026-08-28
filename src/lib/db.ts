@@ -32,6 +32,18 @@ function toCamel(row: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
+// P1-10: унификация временных аргументов — Date → epoch ms (числа хранятся как INTEGER)
+function toTs(v: Date | number): number {
+  return v instanceof Date ? v.getTime() : v;
+}
+
+// P1: undefined-значения недопустимы для libsql («Unsupported type of value») — вырезаем их из data
+function pruneUndefined(o: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(o)) if (v !== undefined) out[k] = v;
+  return out;
+}
+
 // ——— Session relations: fetching for include/select (P0-2) ———
 type RelationOpts = Record<string, unknown> | true | undefined;
 
@@ -104,6 +116,9 @@ export const db = {
       let sql = "SELECT COUNT(*) as count FROM Session WHERE deletedAt IS NULL";
       const params: unknown[] = [];
       if (args?.where?.status) { sql += " AND status = ?"; params.push(args.where.status); }
+      // P1-10: startTime { gte } (было молча игнорировалось → «сегодня» показывало всего)
+      const gte = (args?.where?.startTime as { gte?: Date | number } | undefined)?.gte;
+      if (gte) { sql += " AND startTime >= ?"; params.push(toTs(gte)); }
       const result = await libsql.execute({ sql, args: params });
       return Number((result.rows[0] as Record<string, unknown>).count);
     },
@@ -124,11 +139,50 @@ export const db = {
       if (args?.where?.status) { sql += " AND status = ?"; params.push(args.where.status); }
       if (args?.where?.routeId) { sql += " AND routeId = ?"; params.push(args.where.routeId); }
       if (args?.cursor?.id) { sql += " AND id != ?"; params.push(args.cursor.id); }
+      // P1-10: расширенные фильтры (раньше молча игнорировались — retention удалял бы НОВЫЕ сессии!)
+      const w = args?.where || {};
+      const st = w.startTime as { lt?: Date | number; gte?: Date | number } | undefined;
+      if (st?.lt != null) { sql += " AND startTime < ?"; params.push(toTs(st.lt)); }
+      if (st?.gte != null) { sql += " AND startTime >= ?"; params.push(toTs(st.gte)); }
+      // deletedAt: null — базовый WHERE; поддерживаем { not: null } и { lt, not: null } (retention grace)
+      if (w.deletedAt === null) { /* already in WHERE */ }
+      else if (w.deletedAt && typeof w.deletedAt === "object") {
+        const da = w.deletedAt as { lt?: Date | number; not?: unknown };
+        if (da.lt != null) {
+          sql = sql.replace("deletedAt IS NULL", "deletedAt IS NOT NULL AND deletedAt < ?");
+          params.push(toTs(da.lt));
+        } else if (da.not != null) {
+          sql = sql.replace("deletedAt IS NULL", "deletedAt IS NOT NULL");
+        }
+      }
+      const pa = w.purgedAt as { /* null | { lt } */ } | undefined;
+      if (pa === undefined || pa === null || (pa && (pa as { not?: unknown }).not === undefined && Object.keys(pa).length === 0)) {
+        sql += " AND purgedAt IS NULL"; // purgedAt: null — дефолт
+      } else if (pa && (pa as { lt?: Date | number }).lt != null) {
+        sql += " AND purgedAt < ?"; params.push(toTs((pa as { lt: Date | number }).lt));
+      }
       const order = args?.orderBy?.startTime === "asc" ? "ASC" : "DESC";
       sql += ` ORDER BY startTime ${order} LIMIT ?`;
       if (skip > 0) { sql += " OFFSET ?"; params.push(take, skip); } else { params.push(take); }
       const result = await libsql.execute({ sql, args: params });
       return result.rows.map(r => toCamel(r as Record<string, unknown>));
+    },
+    // P1-10: aggregate (_sum) — /api/stats падал с TypeError (метода не было)
+    async aggregate(args?: { _sum?: Record<string, unknown>; where?: Record<string, unknown> }) {
+      let sql = "SELECT";
+      const params: unknown[] = [];
+      const sums: string[] = [];
+      if (args?._sum?.payloadBytes) sums.push("SUM(payloadBytes) as payloadBytes");
+      if (args?._sum?.distanceM) sums.push("SUM(distanceM) as distanceM");
+      if (sums.length === 0) sums.push("1 as x");
+      sql += " " + sums.join(", ") + " FROM Session WHERE deletedAt IS NULL";
+      const result = await libsql.execute({ sql, args: params });
+      const row = result.rows[0] as Record<string, unknown>;
+      const sum: Record<string, unknown> = {};
+      for (const k of ["payloadBytes", "distanceM"]) {
+        if (args?._sum && (args._sum as Record<string, unknown>)[k]) sum[k] = row[k] != null ? Number(row[k]) : null;
+      }
+      return { _sum: sum };
     },
     async findUnique(args: {
       where: { id?: string; deviceId_clientId?: { deviceId: string; clientId: string } };
@@ -157,7 +211,7 @@ export const db = {
     },
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...args.data };
+      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -234,7 +288,7 @@ export const db = {
     async createMany(args: { data: Array<Record<string, unknown>> }) {
       for (const item of args.data) {
         // GpsPoint.id — NOT NULL (cuid в Prisma): генерируем, если не передан (P0-2)
-        const data = { id: randomUUID(), ...item };
+        const data = { id: randomUUID(), ...pruneUndefined(item) };
         const keys = Object.keys(data);
         const values = Object.values(data).map((v) => (v === undefined ? null : v));
         const placeholders = keys.map(() => "?").join(", ");
@@ -250,7 +304,7 @@ export const db = {
   trafficJob: {
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...args.data };
+      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -299,7 +353,7 @@ export const db = {
   auditLog: {
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, ...args.data };
+      const data = { id: randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -340,7 +394,7 @@ export const db = {
     },
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...args.data };
+      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -398,7 +452,7 @@ export const db = {
     },
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, ...args.data };
+      const data = { id: randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -409,7 +463,7 @@ export const db = {
   backupJob: {
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, ...args.data };
+      const data = { id: randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");

@@ -73,6 +73,11 @@ export const zAuditQuery = z.object({
   targetType: z.string().optional(),
 });
 
+export const zShareBody = z.object({
+  // P1-9: срок действия share-ссылки в часах (по умолчанию 168 = 7 дней, максимум 1 год)
+  expiresInHours: z.coerce.number().int().min(1).max(8760).optional(),
+});
+
 export type IngestBody = z.infer<typeof zIngestBody>;
 export type IngestPoint = z.infer<typeof zIngestPoint>;
 export type PlanBody = z.infer<typeof zPlanBody>;

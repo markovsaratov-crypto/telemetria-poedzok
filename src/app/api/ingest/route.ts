@@ -21,7 +21,9 @@ export async function POST(request: NextRequest) {
         { "X-Request-Id": requestId }
       );
     }
-    const { deviceId, clientId, deviceName, points } = parsed.data;
+    const { deviceId, clientId, points } = parsed.data;
+    // P1: deviceName опционален — undefined в INSERT даёт libsql «Unsupported type of value» (500 на ingest без deviceName)
+    const deviceName = parsed.data.deviceName ?? null;
 
     // 1. Идемпотентность (§6.7)
     const existing = await findExistingSession(deviceId, clientId!);

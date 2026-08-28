@@ -57,3 +57,7 @@ export async function PUT(request: NextRequest) {
     return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });
   }
 }
+
+// P1-11: спека (матрица §7) определяет контракт POST /api/admin/settings.
+// PUT сохранён как алиас для обратной совместимости существующих клиентов.
+export const POST = PUT;

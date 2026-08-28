@@ -76,8 +76,10 @@ export async function runRetention(): Promise<{ purged: number; archived: number
   }
 
   // 3. Audit log retention
+  // P1-10: AuditLog.createdAt хранится как ISO-строка — сравнение с Date-объектом
+  // (число) в SQLite всегда ложно (числа сортируются раньше строк). Передаём ISO-строку.
   const auditCutoff = new Date(now.getTime() - env().AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
-  await db.auditLog.deleteMany({ where: { createdAt: { lt: auditCutoff } } });
+  await db.auditLog.deleteMany({ where: { createdAt: { lt: auditCutoff.toISOString() } } });
 
   return { purged, archived };
 }

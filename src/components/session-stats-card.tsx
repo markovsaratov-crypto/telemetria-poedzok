@@ -142,7 +142,7 @@ export function SessionStatsCard({ sessionId }: SessionStatsCardProps) {
           {stats.pointCount} точек · {fmtNumber(stats.distance / 1000, 2)} км · {formatDuration(stats.duration)}
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-3">
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
           {items.map((it, i) => (
             <motion.div
@@ -167,8 +167,110 @@ export function SessionStatsCard({ sessionId }: SessionStatsCardProps) {
             </motion.div>
           ))}
         </div>
+
+        {/* P1-6: метрики методологии v2.6 (разделы 5, 7, 8.2, 11) */}
+        {stats.methodology && <MethodologyGrid m={stats.methodology} />}
+        {/* P1-7: план-фактный анализ из результата ворчера */}
+        {stats.route && (stats.route.planDistanceM != null || stats.route.trafficFetched) && <PlanFactBlock r={stats.route} />}
       </CardContent>
     </Card>
+  );
+}
+
+// ——— P1-6: блок метрик методологии ———
+interface MethodologyMetrics {
+  speedP50: number | null;
+  speedStdDev: number | null;
+  timeInTraffic: number;
+  timeAtCruise: number;
+  speedVariation: number;
+  harshBrakingCount: number;
+  harshAccelCount: number;
+  ecoScore: number;
+  routeEfficiency: number | null;
+  pointDensity: number | null;
+  gapCount: number;
+  gapTotalDurationMs: number;
+  accuracyP90: number | null;
+  completenessScore: number;
+}
+
+function ecoColor(v: number): string {
+  if (v >= 80) return "text-emerald-600 dark:text-emerald-400";
+  if (v >= 60) return "text-amber-600 dark:text-amber-400";
+  if (v >= 40) return "text-orange-600 dark:text-orange-400";
+  return "text-red-600 dark:text-red-400";
+}
+
+function MethodologyGrid({ m }: { m: MethodologyMetrics }) {
+  const items = [
+    { label: "EcoScore", value: `${fmtNumber(m.ecoScore)}/100`, sub: "качество вождения", color: ecoColor(m.ecoScore) },
+    { label: "Скорость P50", value: m.speedP50 != null ? `${fmtNumber(m.speedP50 * 3.6, 1)} км/ч` : "—", sub: "медиана" },
+    { label: "StdDev скорости", value: m.speedStdDev != null ? `${fmtNumber(m.speedStdDev * 3.6, 1)} км/ч` : "—", sub: "равномерность" },
+    { label: "В пробках", value: m.timeInTraffic > 0 ? formatDuration(m.timeInTraffic) : "—", sub: "< 10 км/ч" },
+    { label: "Крейсер", value: m.timeAtCruise > 0 ? formatDuration(m.timeAtCruise) : "—", sub: "> 60 км/ч" },
+    { label: "Резкие торможения", value: String(m.harshBrakingCount), sub: "> 10 км/ч/с", color: m.harshBrakingCount > 0 ? "text-red-600 dark:text-red-400" : "" },
+    { label: "Резкие разгоны", value: String(m.harshAccelCount), sub: "> 10 км/ч/с", color: m.harshAccelCount > 0 ? "text-red-600 dark:text-red-400" : "" },
+    { label: "Рваность", value: String(m.speedVariation), sub: "Δv > 10 км/ч за 10 с" },
+    { label: "Извилистость", value: m.routeEfficiency != null ? `${fmtNumber(m.routeEfficiency, 2)}×` : "—", sub: "факт / прямая" },
+    { label: "Плотность точек", value: m.pointDensity != null ? `${fmtNumber(m.pointDensity, 1)}/мин` : "—", sub: "запись GPS" },
+    { label: "Разрывы трека", value: String(m.gapCount), sub: m.gapTotalDurationMs > 0 ? `потеряно ${formatDuration(m.gapTotalDurationMs / 1000)}` : "> 30 с" },
+    { label: "Точность P90", value: m.accuracyP90 != null ? `${fmtNumber(m.accuracyP90, 1)} м` : "—", sub: "худшие 10%" },
+    { label: "Полнота", value: `${fmtNumber(m.completenessScore * 100)}%`, sub: "запись без пропусков" },
+  ];
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Метрики методологии</div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+        {items.map((it, i) => (
+          <div key={i} className="rounded-lg border bg-card/40 p-2.5 space-y-1">
+            <div className="text-[10px] text-muted-foreground truncate">{it.label}</div>
+            <div className={cn("text-sm font-semibold tabular-nums truncate", it.color || "")}>{it.value}</div>
+            <div className="text-[9px] text-muted-foreground truncate">{it.sub}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ——— P1-7: план-фактный блок ———
+interface RoutePlanFact {
+  provider: string | null;
+  planDistanceM: number | null;
+  planDurationSec: number | null;
+  trafficFetched: boolean;
+  trafficDurationSec: number | null;
+  timeLostToTrafficSec: number | null;
+  durationDeviationPct: number | null;
+  distanceDeviationPct: number | null;
+  speedDeviationPct: number | null;
+}
+
+function PlanFactBlock({ r }: { r: RoutePlanFact }) {
+  const dev = (v: number | null) => (v == null ? "—" : `${v > 0 ? "+" : ""}${fmtNumber(v, 1)}%`);
+  const devColor = (v: number | null) => (v == null ? "" : v > 10 ? "text-red-600 dark:text-red-400" : v > 0 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400");
+  const items = [
+    { label: "План · дистанция", value: r.planDistanceM != null ? `${fmtNumber(r.planDistanceM / 1000, 2)} км` : "—", sub: r.provider ? `провайдер: ${r.provider}` : "нет плана" },
+    { label: "План · время", value: r.planDurationSec != null ? formatDuration(r.planDurationSec) : "—", sub: r.trafficDurationSec != null ? "базовая линия 40 км/ч" : "свободный поток" },
+    { label: "Δ по времени", value: dev(r.durationDeviationPct), sub: "факт vs план", color: devColor(r.durationDeviationPct) },
+    { label: "Δ по дистанции", value: dev(r.distanceDeviationPct), sub: "факт vs план", color: devColor(r.distanceDeviationPct) },
+    { label: "Δ по скорости", value: dev(r.speedDeviationPct), sub: "факт vs план", color: devColor(r.speedDeviationPct) },
+    { label: "Потери от пробок", value: r.timeLostToTrafficSec != null ? formatDuration(Math.max(r.timeLostToTrafficSec, 0)) : r.trafficFetched ? "—" : "нет данных", sub: r.trafficFetched ? "2ГИС vs базовая линия" : "трафик не запрошен" },
+  ];
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">План-фактный анализ</div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+        {items.map((it, i) => (
+          <div key={i} className="rounded-lg border bg-card/40 p-2.5 space-y-1">
+            <div className="text-[10px] text-muted-foreground truncate">{it.label}</div>
+            <div className={cn("text-sm font-semibold tabular-nums truncate", it.color || "")}>{it.value}</div>
+            <div className="text-[9px] text-muted-foreground truncate">{it.sub}</div>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

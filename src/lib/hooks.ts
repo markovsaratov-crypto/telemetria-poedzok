@@ -161,6 +161,34 @@ export interface SessionStats {
   bbox: { minLat: number; maxLat: number; minLon: number; maxLon: number };
   startTime: string;
   endTime: string | null;
+  // P1-6/P1-7: новые блоки ответа (опциональны для старых ответов)
+  methodology?: {
+    speedP50: number | null;
+    speedStdDev: number | null;
+    timeInTraffic: number;
+    timeAtCruise: number;
+    speedVariation: number;
+    harshBrakingCount: number;
+    harshAccelCount: number;
+    ecoScore: number;
+    routeEfficiency: number | null;
+    pointDensity: number | null;
+    gapCount: number;
+    gapTotalDurationMs: number;
+    accuracyP90: number | null;
+    completenessScore: number;
+  };
+  route?: {
+    provider: string | null;
+    planDistanceM: number | null;
+    planDurationSec: number | null;
+    trafficFetched: boolean;
+    trafficDurationSec: number | null;
+    timeLostToTrafficSec: number | null;
+    durationDeviationPct: number | null;
+    distanceDeviationPct: number | null;
+    speedDeviationPct: number | null;
+  };
 }
 
 export function useSessionStats(id: string | null) {

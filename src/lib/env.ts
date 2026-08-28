@@ -1,5 +1,6 @@
 // src/lib/env.ts — централизованный доступ к env (§11). Lenient validation with defaults.
 import { z } from "zod";
+import pkg from "../../package.json";
 
 const schema = z.object({
   DATABASE_URL: z.string().min(1).default("file:./db/custom.db"),
@@ -45,7 +46,7 @@ const schema = z.object({
   VERCEL_PLAN: z.enum(["free", "pro"]).default("pro"),
   TARGET_LOAD_RPM: z.coerce.number().int().positive().default(100),
   NODE_ENV: z.string().default("development"),
-  APP_VERSION: z.string().default("2.7.0"),
+  APP_VERSION: z.string().default(pkg.version),
   // P2-16: вебхук Slack для алертов §14.4 (пусто — только журнал и /api/admin/alerts)
   SLACK_WEBHOOK_URL: z.string().default(""),
 });
@@ -105,12 +106,14 @@ export function env(): Env {
       VERCEL_PLAN: (process.env.VERCEL_PLAN as "free" | "pro") || "pro",
       TARGET_LOAD_RPM: Number(process.env.TARGET_LOAD_RPM) || 100,
       NODE_ENV: process.env.NODE_ENV || "development",
-      APP_VERSION: process.env.APP_VERSION || "2.7.0",
+      // v2.7: версия — единый источник package.json (устаревшая APP_VERSION в дашборде Render больше не перекрывает релиз)
+      APP_VERSION: pkg.version,
     };
     cached = defaults;
     return cached;
   }
-  cached = parsed.data;
+  // v2.7: APP_VERSION всегда из package.json (единый источник; env дашборда не может перекрыть релиз)
+  cached = { ...parsed.data, APP_VERSION: pkg.version };
   return cached;
 }
 

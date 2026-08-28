@@ -3,6 +3,7 @@
 // 2) OSRM demo server (fallback, без пробок)
 // 3) Гаверсинус 40 км/ч (last resort)
 import { env } from "../env";
+import { getSettingSync } from "../settings";
 import { logger } from "../logger";
 import { checkCircuit, recordFailure, recordSuccess } from "./circuit-breaker";
 
@@ -46,7 +47,7 @@ async function route2Gis(
   endLat: number,
   endLon: number
 ): Promise<RouteResult | null> {
-  const key = env().TWO_GIS_API_KEY;
+  const key = getSettingSync("TWO_GIS_API_KEY");
   if (!key) return null;
   if (!checkCircuit("2gis")) {
     logger.warn("2ГИС circuit open, skip", { provider: "2gis" });
@@ -116,7 +117,7 @@ async function routeOsrm(
 ): Promise<RouteResult | null> {
   if (!checkCircuit("osrm")) return null;
   try {
-    const base = env().OSRM_BASE_URL;
+    const base = getSettingSync("OSRM_BASE_URL") || env().OSRM_BASE_URL;
     const url = `${base}/route/v1/driving/${startLon},${startLat};${endLon},${endLat}?overview=full&geometries=geojson&steps=true`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) {

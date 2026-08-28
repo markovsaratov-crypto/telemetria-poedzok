@@ -41,7 +41,7 @@ export function SessionListScreen({ onSessionTap, onSettingsTap }: SessionListSc
   const { data: batchStatsData } = useBatchStats(sessionIds);
   const statsMap = React.useMemo(() => {
     const m = new Map<string, any>();
-    for (const s of batchStatsData?.sessions || []) m.set(s.sessionId, s);
+    for (const s of batchStatsData?.sessions || []) m.set(s.id, s);
     return m;
   }, [batchStatsData]);
 

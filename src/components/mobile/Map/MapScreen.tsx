@@ -61,7 +61,7 @@ export function MapScreen({ onSessionTap }: MapScreenProps) {
   const points = React.useMemo(() => {
     const pts: Array<{ lat: number; lon: number; id: string; name: string; start: string; status: string }> = [];
     for (const s of sessions) {
-      const st = (batchStats?.sessions || []).find((bs: any) => bs.sessionId === s.id);
+      const st = (batchStats?.sessions || []).find((bs: any) => bs.id === s.id);
       if (st?.startLat != null && st?.startLon != null) {
         pts.push({ lat: st.startLat, lon: st.startLon, id: s.id, name: s.deviceName || s.deviceId, start: s.startTime, status: s.status });
       }

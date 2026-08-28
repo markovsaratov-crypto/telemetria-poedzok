@@ -10,15 +10,15 @@ import { motion } from "framer-motion";
 import { ArrowLeft, MoreVertical, Download, Trash2 } from "lucide-react";
 import { useSession, useSessionStats } from "@/lib/hooks";
 import { MetricTile } from "../shared/MetricTile";
-import { SpeedColoredTrack } from "../shared/SpeedColoredTrack";
+const MapTrack = dynamic(() => import("@/components/map-track"), { ssr: false, loading: () => <div className="h-full flex items-center justify-center text-xs text-muted-foreground">Загрузка карты…</div> });
 import { Skeleton } from "@/components/ui/skeleton";
-const Marker = React.lazy(() => import("react-leaflet").then(m => ({ default: m.Marker })));
-const Popup = React.lazy(() => import("react-leaflet").then(m => ({ default: m.Popup })));
-import L from "leaflet";
+
+
+// Leaflet removed — using MapTrack instead
 import { cn } from "@/lib/utils";
 
-const MapContainer = dynamic(() => import("react-leaflet").then(m => m.MapContainer), { ssr: false });
-const TileLayer = dynamic(() => import("react-leaflet").then(m => m.TileLayer), { ssr: false });
+
+
 
 type DetailTab = "speed" | "segments" | "deviations" | "altitude" | "summary";
 
@@ -35,14 +35,7 @@ interface SessionDetailScreenProps {
   onBack: () => void;
 }
 
-function makeIcon(color: string): L.DivIcon {
-  return L.divIcon({
-    html: `<div style="background:${color};width:16px;height:16px;border-radius:50%;border:3px solid white;box-shadow:0 0 0 2px ${color},0 2px 4px rgba(0,0,0,0.3);"></div>`,
-    className: "",
-    iconSize: [22, 22],
-    iconAnchor: [11, 11],
-  });
-}
+
 
 export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenProps) {
   const [tab, setTab] = React.useState<DetailTab>("speed");
@@ -77,23 +70,7 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
           {isLoading ? (
             <Skeleton className="h-full w-full shimmer" />
           ) : points.length > 0 ? (
-            <MapContainer
-              center={[points[0].lat, points[0].lon]}
-              zoom={13}
-              style={{ height: "100%", width: "100%" }}
-              scrollWheelZoom={false}
-            >
-              <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
-              <SpeedColoredTrack points={points} weight={5} />
-              <Marker position={[points[0].lat, points[0].lon]} icon={makeIcon("oklch(0.60 0.15 145)")}>
-                <Popup>Старт</Popup>
-              </Marker>
-              {points.length > 1 && (
-                <Marker position={[points[points.length - 1].lat, points[points.length - 1].lon]} icon={makeIcon("oklch(0.55 0.20 25)")}>
-                  <Popup>Финиш</Popup>
-                </Marker>
-              )}
-            </MapContainer>
+            <MapTrack points={points} height="240px" fitToPoints />
           ) : (
             <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
               Нет GPS данных

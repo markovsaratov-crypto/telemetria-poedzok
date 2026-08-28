@@ -62,7 +62,7 @@ services:
       - key: TARGET_LOAD_RPM
         value: "100"
       - key: APP_VERSION
-        value: "2.6.0"
+        value: "2.7.0"
 
   # P1-10: retention-cron (§3.7) — ежедневная чистка по grace/purgedAt.
   # BASE_URL и CRON_SECRET задаются в дашборде Render (sync: false значения не подтягиваются в cron-сервис автоматически).

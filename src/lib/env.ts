@@ -45,7 +45,7 @@ const schema = z.object({
   VERCEL_PLAN: z.enum(["free", "pro"]).default("pro"),
   TARGET_LOAD_RPM: z.coerce.number().int().positive().default(100),
   NODE_ENV: z.string().default("development"),
-  APP_VERSION: z.string().default("2.6.0"),
+  APP_VERSION: z.string().default("2.7.0"),
   // P2-16: вебхук Slack для алертов §14.4 (пусто — только журнал и /api/admin/alerts)
   SLACK_WEBHOOK_URL: z.string().default(""),
 });
@@ -105,7 +105,7 @@ export function env(): Env {
       VERCEL_PLAN: (process.env.VERCEL_PLAN as "free" | "pro") || "pro",
       TARGET_LOAD_RPM: Number(process.env.TARGET_LOAD_RPM) || 100,
       NODE_ENV: process.env.NODE_ENV || "development",
-      APP_VERSION: process.env.APP_VERSION || "2.6.0",
+      APP_VERSION: process.env.APP_VERSION || "2.7.0",
     };
     cached = defaults;
     return cached;

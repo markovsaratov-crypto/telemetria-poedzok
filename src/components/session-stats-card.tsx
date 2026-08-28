@@ -168,7 +168,7 @@ export function SessionStatsCard({ sessionId }: SessionStatsCardProps) {
           ))}
         </div>
 
-        {/* P1-6: метрики методологии v2.6 (разделы 5, 7, 8.2, 11) */}
+        {/* P1-6: метрики методологии v2.7 (разделы 5, 7, 8.2, 11) */}
         {stats.methodology && <MethodologyGrid m={stats.methodology} />}
         {/* P1-7: план-фактный анализ из результата ворчера */}
         {stats.route && (stats.route.planDistanceM != null || stats.route.trafficFetched) && <PlanFactBlock r={stats.route} />}

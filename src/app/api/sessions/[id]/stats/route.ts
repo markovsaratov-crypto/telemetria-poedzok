@@ -6,7 +6,10 @@ import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { computeMethodologyMetrics, haversineM } from "@/lib/metrics-methodology";
+import { computeMethodologyMetrics } from "@/lib/metrics-methodology";
+import { avgSpeedMs, meanPointSpeedMs, maxSpeedMs } from "@/lib/kpi"; // P2-13: единый источник KPI
+import { haversineM } from "@/lib/geo"; // P2-14: канонический гаверсинус
+import { trackLatency } from "@/lib/latency"; // P2-16: замер api_latency_p95
 
 // P1-7: план-фактные отклонения и трафик-блок из результата ворчера (§6.3/§6.6/§6.7/§6.8 методологии)
 interface RoutePlanFact {
@@ -127,7 +130,7 @@ export async function GET(
         deletedAt: true,
         gpsPoints: {
           orderBy: { timestamp: "asc" },
-          select: { lat: true, lon: true, speed: true, altitude: true, timestamp: true },
+          select: { lat: true, lon: true, speed: true, altitude: true, accuracy: true, timestamp: true },
         },
       },
     });
@@ -151,7 +154,6 @@ export async function GET(
 
     // Расчёт дистанции
     let distance = 0;
-    let maxSpeed = 0;
     let speedSum = 0;
     let speedCount = 0;
     let elevationGain = 0;
@@ -159,6 +161,10 @@ export async function GET(
     let prevAlt: number | null = null;
     let movingTime = 0;
     let idleTime = 0;
+
+    // P2-13: maxSpeed через единый фильтр выбросов (kpi.ts) — GPS-джиттер раньше
+    // давал нереальные значения MaxSpeed на экране
+    const maxSpeed = maxSpeedMs(points) ?? 0;
 
     for (let i = 0; i < points.length; i++) {
       const p = points[i];
@@ -177,9 +183,8 @@ export async function GET(
         }
       }
 
-      // Speed stats
+      // Speed stats — сумма для meanPointSpeed (НЕ KPI AvgSpeed, см. ниже)
       if (p.speed != null && p.speed >= 0) {
-        maxSpeed = Math.max(maxSpeed, p.speed);
         speedSum += p.speed;
         speedCount++;
       }
@@ -202,7 +207,10 @@ export async function GET(
       ? points[points.length - 1].timestamp
       : startTime;
     const durationSec = Math.max(0, (endTime - startTime) / 1000);
-    const avgSpeed = speedCount > 0 ? speedSum / speedCount : null;
+    // P2-13: канонический AvgSpeed §4.3 = Distance / Duration (было среднее по точкам —
+    // из-за этого на одном экране было 3 разных «средних скорости»)
+    const avgSpeed = avgSpeedMs(distance, durationSec);
+    const speedMean = meanPointSpeedMs(points);
 
     // Bounding box
     const lats = points.map((p) => p.lat);
@@ -218,6 +226,7 @@ export async function GET(
     const methodology = computeMethodologyMetrics(points, distance, durationSec);
     // P1-7: план-факт из завершённого TrafficJob
     const route = await computePlanFact(id, distance, durationSec, avgSpeed);
+    trackLatency(request); // P2-16: успешный ответ участвует в api_latency_p95
 
     return json(
       {
@@ -228,6 +237,8 @@ export async function GET(
         movingTime: Math.round(movingTime),
         idleTime: Math.round(idleTime),
         avgSpeed: avgSpeed != null ? Math.round(avgSpeed * 10) / 10 : null,
+        // P2-13: средняя по точкам — отдельно от KPI AvgSpeed (§4.3)
+        speedMeanMs: speedMean != null ? Math.round(speedMean * 10) / 10 : null,
         maxSpeed: Math.round(maxSpeed * 10) / 10,
         avgAltitude: prevAlt != null ? Math.round(points.filter((p) => p.altitude != null).reduce((a, p) => a + (p.altitude || 0), 0) / (points.filter((p) => p.altitude != null).length || 1)) : null,
         elevationGain: Math.round(elevationGain),

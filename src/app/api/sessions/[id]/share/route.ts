@@ -1,23 +1,17 @@
-// POST /api/sessions/[id]/share — создать shareable token для сессии.
-// GET /api/sessions/[id]/share?token=xxx — получить сессию по share token.
+// POST /api/sessions/[id]/share — создать shareable token (§7 матрицы: Cookie/API_KEY).
+// GET  /api/sessions/[id]/share?token=xxx — публичный доступ к сессии по токену (спека: «Публичный доступ»).
+//
+// P1-9: токен STATELESS (HMAC sessionId+срок, ключ SESSION_SECRET) — переживает рестарт,
+// раньше in-memory Map умирал вместе с процессом. Опциональное тело POST { expiresInHours }
+// (1..8760, по умолчанию 168 = 7 дней) — срок уважается при проверке.
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { writeAudit } from "@/lib/audit";
-import { env } from "@/lib/env";
-import { createHash } from "crypto";
-
-// In-memory store для share tokens (в прод-системе было бы в БД)
-const shareStore = new Map<string, { sessionId: string; createdAt: number; expiresAt: number }>();
-
-function generateToken(sessionId: string): string {
-  const secret = env().SESSION_SECRET;
-  const ts = Date.now();
-  const hash = createHash("sha256").update(`${sessionId}:${ts}:${secret}`).digest("hex");
-  return hash.slice(0, 32);
-}
+import { zShareBody } from "@/lib/validation";
+import { makeShareToken, verifyShareToken, sharePayload, SHARE_DEFAULT_TTL_HOURS, SHARE_MAX_TTL_HOURS } from "@/lib/share";
 
 export async function POST(
   request: NextRequest,
@@ -37,26 +31,14 @@ export async function POST(
       return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     }
 
-    // Проверяем, есть ли уже активный token
-    let existing: string | null = null;
-    for (const [token, data] of shareStore.entries()) {
-      if (data.sessionId === id && data.expiresAt > Date.now()) {
-        existing = token;
-        break;
-      }
-    }
+    // P1-9: уважаем expiresInHours из тела (раньше жёстко 7 дней)
+    const body = await request.json().catch(() => ({}));
+    const parsed = zShareBody.safeParse(body ?? {});
+    const ttlHours = parsed.success
+      ? Math.min(Math.max(parsed.data.expiresInHours ?? SHARE_DEFAULT_TTL_HOURS, 1), SHARE_MAX_TTL_HOURS)
+      : SHARE_DEFAULT_TTL_HOURS;
 
-    let token: string;
-    let expiresAt: number;
-    if (existing) {
-      token = existing;
-      expiresAt = shareStore.get(token)!.expiresAt;
-    } else {
-      token = generateToken(id);
-      const now = Date.now();
-      expiresAt = now + 7 * 24 * 60 * 60 * 1000; // 7 дней
-      shareStore.set(token, { sessionId: id, createdAt: now, expiresAt });
-    }
+    const { token, expiresAt } = makeShareToken(id, ttlHours);
 
     await writeAudit({
       action: "session.share",
@@ -65,7 +47,7 @@ export async function POST(
       actorType: auth.via === "cookie" ? "user" : "system",
       actorId: auth.via === "cookie" ? "owner" : "api",
       sessionId: id,
-      metadata: { token: token.slice(0, 8) + "…", expiresAt: new Date(expiresAt).toISOString() },
+      metadata: { tokenPrefix: token.slice(-16, -8), expiresInHours: ttlHours, expiresAt: new Date(expiresAt).toISOString() },
     });
 
     return json(
@@ -98,44 +80,12 @@ export async function GET(
       return json({ error: "token required" }, 400, { "X-Request-Id": requestId });
     }
 
-    const shareData = shareStore.get(token);
-    if (!shareData || shareData.sessionId !== id || shareData.expiresAt < Date.now()) {
+    const verified = verifyShareToken(token);
+    if (!verified || verified.sessionId !== id) {
       return json({ error: "Invalid or expired token" }, 403, { "X-Request-Id": requestId });
     }
 
-    // Возвращаем сессию с точками (без auth — публичный доступ)
-    const session = await db.session.findUnique({
-      where: { id },
-      include: {
-        gpsPoints: { orderBy: { timestamp: "asc" } },
-      },
-    });
-
-    if (!session || session.deletedAt) {
-      return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
-    }
-
-    return json(
-      {
-        sessionId: session.id,
-        deviceId: session.deviceId,
-        deviceName: session.deviceName,
-        startTime: session.startTime,
-        endTime: session.endTime,
-        pointCount: session.pointCount,
-        points: session.gpsPoints.map((p) => ({
-          lat: p.lat,
-          lon: p.lon,
-          speed: p.speed,
-          altitude: p.altitude,
-          timestamp: Number(p.timestamp),
-        })),
-        shared: true,
-        expiresAt: new Date(shareData.expiresAt).toISOString(),
-      },
-      200,
-      { "X-Request-Id": requestId }
-    );
+    return await sharePayload(id, verified.expiresAt, requestId);
   } catch (err) {
     logger.error("Share get error", { requestId, error: err instanceof Error ? err.message : String(err) });
     return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });

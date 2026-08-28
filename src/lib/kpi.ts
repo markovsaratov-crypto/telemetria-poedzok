@@ -2,7 +2,7 @@
 // Раньше три источника расходились: средняя скорость считалась как среднее по
 // точкам (stats), как Distance/Duration (aggregate) и как mean-of-points
 // (speed-distribution); схемы бакетов — 7 (UI) / 4 (API) / 6 (методология);
-// мобильный KPI учитывал soft-deleted сессии. Канон — METHODOLOGY v2.6:
+// мобильный KPI учитывал soft-deleted сессии. Канон — METHODOLOGY v2.7:
 //   §4.3 AvgSpeed = Distance / Duration (м/с)
 //   §5.3 SpeedDistribution — 6 бакетов по 20 км/ч, Σ percent = 100%
 //   §4.4 MaxSpeed — с фильтрацией GPS-выбросов (обоснование в isUsableSpeedPoint)

@@ -152,7 +152,7 @@ export default function Home() {
               </h1>
               <p className="text-[10px] text-muted-foreground leading-tight flex items-center gap-1">
                 <Zap className="h-2.5 w-2.5 text-primary" />
-                v2.6 · single-user
+                v2.7 · single-user
               </p>
             </div>
           </div>
@@ -302,7 +302,7 @@ export default function Home() {
           <div className="flex items-center gap-2">
             <Activity className="h-3.5 w-3.5 text-primary" />
             <span>
-              Телеметрия v2.6 · Next.js 16 · libsql · in-memory RL
+              Телеметрия v2.7 · Next.js 16 · libsql · in-memory RL
             </span>
           </div>
           <div className="flex items-center gap-3">

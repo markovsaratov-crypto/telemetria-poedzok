@@ -55,7 +55,7 @@ export async function GET(request: NextRequest) {
     )}&lon=${encodeURIComponent(lon)}&zoom=18&addressdetails=1`;
     const res = await fetch(nominatimUrl, {
       headers: {
-        "User-Agent": "telemetria-poedzok/2.6 (https://github.com/markovsaratov-crypto/telemetria-poedzok)",
+        "User-Agent": "telemetria-poedzok/2.7 (https://github.com/markovsaratov-crypto/telemetria-poedzok)",
         "Accept-Language": "ru",
       },
       signal: AbortSignal.timeout(8000),

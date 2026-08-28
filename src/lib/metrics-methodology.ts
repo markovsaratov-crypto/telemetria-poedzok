@@ -1,4 +1,4 @@
-// src/lib/metrics-methodology.ts — П1-6: метрики методологии v2.6 (разделы 5, 7, 8.2, 11).
+// src/lib/metrics-methodology.ts — П1-6: метрики методологии v2.7 (разделы 5, 7, 8.2, 11).
 // Реализует группы, отсутствовавшие в коде: скоростной профиль (P50/StdDev),
 // трафик (TimeInTraffic/TimeAtCruise/SpeedVariation), поведение (Harsh*/EcoScore),
 // география (RouteEfficiency), качество данных (Gap*, Completeness, PointDensity, AccuracyP90).

@@ -1,6 +1,6 @@
 // GET /api/sessions/[id]/stats — детальная статистика по сессии.
 // Возвращает: distance, duration, avgSpeed, maxSpeed, avgAltitude, elevationGain/loss, movingTime, idleTime
-// + P1-6: methodology (метрики методологии v2.6) + P1-7: route (план-факт и трафик из TrafficJob).
+// + P1-6: methodology (метрики методологии v2.7) + P1-7: route (план-факт и трафик из TrafficJob).
 import { NextRequest } from "next/server";
 import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";

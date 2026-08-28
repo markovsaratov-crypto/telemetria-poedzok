@@ -318,7 +318,7 @@ const server = Bun.serve({
         totalProcessed,
         totalFailed,
         uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
-        version: "2.6.0",
+        version: "2.7.0",
       };
       return Response.json(body, {
         status: 200,

@@ -33,15 +33,16 @@ export async function GET(request: NextRequest) {
       speedSum += speedMs;
       if (speedMs > maxSpeedMs) maxSpeedMs = speedMs;
       const kmh = speedMs * 3.6;
-      // Strict: find FIRST matching bucket and break
+      // Strict: find FIRST matching bucket and break (no double counting)
       for (let i = 0; i < BUCKETS.length; i++) {
-        if (kmh >= BUCKETS[i].minKmh && kmh < BUCKETS[i].maxKmh) {
+        if (i === BUCKETS.length - 1) {
+          // Last bucket (60+): match if kmh >= minKmh
+          if (kmh >= BUCKETS[i].minKmh) { counts[i]++; break; }
+        } else if (kmh >= BUCKETS[i].minKmh && kmh < BUCKETS[i].maxKmh) {
           counts[i]++;
           break;
         }
       }
-      // If kmh >= 60 (last bucket has maxKmh=Infinity)
-      if (kmh >= 60) counts[3]++;
     }
 
     const buckets = BUCKETS.map((b, i) => ({

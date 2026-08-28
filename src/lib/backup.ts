@@ -19,7 +19,7 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
       timestamp: new Date().toISOString(),
       sessions: await db.session.findMany({ include: { gpsPoints: true } }),
       routes: await db.route.findMany(),
-      routeCaches: await db.routeCache.findMany(),
+      routeCaches: (await libsql.execute("SELECT * FROM RouteCache")).rows,
       trafficJobs: await db.trafficJob.findMany(),
       auditLogs: await db.auditLog.findMany(),
       exportJobs: await db.exportJob.findMany(),

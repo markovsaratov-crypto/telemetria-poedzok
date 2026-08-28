@@ -1,145 +1,120 @@
 "use client";
 
-// src/components/mobile/Map/MapScreen.tsx
-// Mobile map screen: shows all sessions' tracks on a single Leaflet map.
-
-import * as React from "react";
-import dynamic from "next/dynamic";
-import { Map as MapIcon, Loader2, Layers } from "lucide-react";
-import { useSessions, useBatchStats } from "@/lib/hooks";
-import { Skeleton } from "@/components/ui/skeleton";
-import { cn } from "@/lib/utils";
-
-// IMPORTANT: import leaflet/dist/leaflet.css at top
 import "leaflet/dist/leaflet.css";
+import * as React from "react";
+import { MapContainer, TileLayer, CircleMarker, Popup, useMap } from "react-leaflet";
+import L from "leaflet";
+import { useSessions, useBatchStats } from "@/lib/hooks";
+import { MapPin, Loader2, Plus, Minus, ArrowUp, ArrowDown, ArrowLeft, ArrowRight } from "lucide-react";
+import { fmtDate } from "@/lib/format";
 
-// MapTrack is loaded client-side only.
-const MapTrack = dynamic(() => import("@/components/map-track"), {
-  ssr: false,
-  loading: () => (
-    <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
-      <Loader2 className="h-5 w-5 animate-spin mr-2" /> Загрузка карты…
-    </div>
-  ),
+delete (L.Icon.Default.prototype as unknown as { _getIconUrl?: unknown })._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
 });
 
-const COLORS = [
-  "#10b981", // emerald
-  "#0d9488", // teal
-  "#f59e0b", // amber
-  "#e11d48", // rose
-  "#8b5cf6", // violet
-  "#06b6d4", // cyan
-  "#ec4899", // pink
-  "#84cc16", // lime
-];
+interface MapScreenProps { onSessionTap: (id: string) => void; }
 
-interface MapScreenProps {
-  onSessionTap?: (id: string) => void;
+function FitBounds({ points }: { points: Array<[number, number]> }) {
+  const map = useMap();
+  React.useEffect(() => {
+    if (points.length === 0) return;
+    if (points.length === 1) { map.setView(points[0], 14); return; }
+    map.fitBounds(L.latLngBounds(points), { padding: [40, 40] });
+  }, [points, map]);
+  return null;
+}
+
+function ZoomButtons() {
+  const map = useMap();
+  return (
+    <div className="absolute top-4 right-4 z-[1000] flex flex-col gap-1">
+      <button onClick={() => map.zoomIn()} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Приблизить"><Plus className="h-5 w-5" /></button>
+      <button onClick={() => map.zoomOut()} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Отдалить"><Minus className="h-5 w-5" /></button>
+    </div>
+  );
+}
+
+function PanControls() {
+  const map = useMap();
+  const pan = (dx: number, dy: number) => map.panBy([dx, dy]);
+  return (
+    <div className="absolute bottom-4 right-4 z-[1000] flex flex-col items-center gap-1">
+      <button onClick={() => pan(0, -80)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Вверх"><ArrowUp className="h-5 w-5" /></button>
+      <div className="flex gap-1">
+        <button onClick={() => pan(-80, 0)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Влево"><ArrowLeft className="h-5 w-5" /></button>
+        <button onClick={() => pan(80, 0)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Вправо"><ArrowRight className="h-5 w-5" /></button>
+      </div>
+      <button onClick={() => pan(0, 80)} className="w-10 h-10 bg-card border rounded-lg shadow-md flex items-center justify-center" aria-label="Вниз"><ArrowDown className="h-5 w-5" /></button>
+    </div>
+  );
 }
 
 export function MapScreen({ onSessionTap }: MapScreenProps) {
-  const [limit] = React.useState(50);
-  const { data, isLoading } = useSessions({ limit });
+  const { data, isLoading } = useSessions({ limit: 100 });
   const sessions = data?.sessions || [];
-  const sessionIds = React.useMemo(() => sessions.map((s) => s.id), [sessions]);
+  const sessionIds = React.useMemo(() => sessions.map((s: any) => s.id), [sessions]);
   const { data: batchStats } = useBatchStats(sessionIds);
 
-  // Combine all start/dest markers
-  const markers = React.useMemo(() => {
-    const arr: Array<{ lat: number; lon: number; label: string; variant: "start" | "end" }> = [];
-    batchStats?.sessions?.forEach((s, idx) => {
-      const color = COLORS[idx % COLORS.length];
-      void color;
-      if (s.startLat != null && s.startLon != null) {
-        arr.push({
-          lat: s.startLat,
-          lon: s.startLon,
-          label: `Старт: ${s.deviceName || s.deviceId}`,
-          variant: "start",
-        });
+  const points = React.useMemo(() => {
+    const pts: Array<{ lat: number; lon: number; id: string; name: string; start: string; status: string }> = [];
+    for (const s of sessions) {
+      const st = (batchStats?.stats || []).find((bs: any) => bs.sessionId === s.id);
+      if (st?.startLat != null && st?.startLon != null) {
+        pts.push({ lat: st.startLat, lon: st.startLon, id: s.id, name: s.deviceName || s.deviceId, start: s.startTime, status: s.status });
       }
-      if (s.destLat != null && s.destLon != null) {
-        arr.push({
-          lat: s.destLat,
-          lon: s.destLon,
-          label: `Финиш: ${s.deviceName || s.deviceId}`,
-          variant: "end",
-        });
-      }
-    });
-    return arr;
-  }, [batchStats]);
+    }
+    return pts;
+  }, [sessions, batchStats]);
+
+  const allCoords: [number, number][] = points.map((p) => [p.lat, p.lon]);
+  const center: [number, number] = allCoords[0] || [51.5924, 45.9606];
+
+  if (isLoading) return (
+    <div className="flex flex-col h-full">
+      <header className="bg-card border-b"><div className="flex items-center gap-2 h-14 px-4"><MapPin className="h-5 w-5 text-primary" /><h1 className="text-[22px] font-bold">Карта</h1></div></header>
+      <div className="flex-1 flex items-center justify-center"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
+    </div>
+  );
 
   return (
-    <div className="flex flex-col h-full pb-16">
-      <header className="sticky top-0 z-20 bg-card/95 backdrop-blur-md border-b safe-top h-14 flex items-center justify-between px-4">
-        <h1 className="text-[22px] font-bold flex items-center gap-2">
-          <MapIcon className="h-5 w-5 text-primary" /> Карта
-        </h1>
-        <div className="flex items-center gap-1 text-xs text-muted-foreground">
-          <Layers className="h-3.5 w-3.5" />
-          {sessions.length} поездок
+    <div className="flex flex-col h-full">
+      <header className="bg-card border-b">
+        <div className="flex items-center justify-between h-14 px-4">
+          <div className="flex items-center gap-2"><MapPin className="h-5 w-5 text-primary" /><h1 className="text-[22px] font-bold">Карта</h1></div>
+          <span className="text-xs text-muted-foreground">{points.length} поездок</span>
         </div>
       </header>
-
-      <div className="flex-1 relative">
-        {isLoading ? (
-          <Skeleton className="h-full w-full" />
-        ) : markers.length === 0 ? (
-          <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
-            <MapIcon className="h-12 w-12 text-muted-foreground/30 mb-3" />
-            <p className="text-sm text-muted-foreground">Нет GPS-данных</p>
-            <p className="text-xs text-muted-foreground/70 mt-1">
-              Создайте поездку, чтобы увидеть треки на карте
-            </p>
-          </div>
+      <div className="flex-1 relative" style={{ minHeight: "400px", height: "calc(100vh - 120px)" }}>
+        {points.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-sm text-muted-foreground"><MapPin className="h-12 w-12 mb-3 opacity-30" />Нет поездок с координатами</div>
         ) : (
-          <MapTrack
-            markers={markers}
-            height="100%"
-            fitToPoints
-            interactive
-            showLayerSwitcher
-          />
+          <>
+            <MapContainer center={center} zoom={13} className="w-full h-full" style={{ height: "100%", width: "100%" }} scrollWheelZoom={false} zoomControl={false}>
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap contributors" />
+              <FitBounds points={allCoords} />
+              {points.map((p) => (
+                <CircleMarker key={p.id} center={[p.lat, p.lon]} radius={10} pathOptions={{
+                  color: p.status === "active" ? "#10b981" : p.status === "completed" ? "#14b8a6" : "#94a3b8",
+                  fillColor: p.status === "active" ? "#10b981" : p.status === "completed" ? "#14b8a6" : "#94a3b8", fillOpacity: 0.7,
+                }}>
+                  <Popup>
+                    <div className="text-xs space-y-1">
+                      <div className="font-semibold">{p.name}</div>
+                      <div>{fmtDate(p.start)}</div>
+                      <button onClick={() => onSessionTap(p.id)} className="text-primary font-medium">Открыть →</button>
+                    </div>
+                  </Popup>
+                </CircleMarker>
+              ))}
+            </MapContainer>
+            <ZoomButtons />
+            <PanControls />
+          </>
         )}
       </div>
-
-      {/* Session quick-list below map */}
-      {sessions.length > 0 && (
-        <div className="max-h-32 overflow-y-auto scroll-telem border-t p-2 space-y-1">
-          {sessions.slice(0, 8).map((s, idx) => (
-            <button
-              key={s.id}
-              onClick={() => onSessionTap?.(s.id)}
-              className={cn(
-                "w-full flex items-center gap-2 p-2 rounded-lg text-left active:bg-accent/30 transition-colors"
-              )}
-            >
-              <span
-                className="w-2.5 h-2.5 rounded-full shrink-0"
-                style={{ backgroundColor: COLORS[idx % COLORS.length] }}
-              />
-              <div className="flex-1 min-w-0">
-                <div className="text-xs font-medium truncate">
-                  {s.deviceName || s.deviceId}
-                </div>
-                <div className="text-[10px] text-muted-foreground">
-                  {new Date(s.startTime).toLocaleDateString("ru-RU", {
-                    day: "numeric",
-                    month: "short",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  })}
-                </div>
-              </div>
-              <span className="text-[10px] text-muted-foreground shrink-0">
-                {s.pointCount} тчк
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

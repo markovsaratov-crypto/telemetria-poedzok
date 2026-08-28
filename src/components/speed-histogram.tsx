@@ -5,47 +5,34 @@
 import * as React from "react";
 import { motion } from "framer-motion";
 import { BarChart3, Gauge } from "lucide-react";
+import { computeSpeedDistribution, maxSpeedMs, meanPointSpeedMs, SPEED_BUCKETS } from "@/lib/kpi"; // P2-13
 
 interface SpeedHistogramProps {
-  points: Array<{ speed?: number | null }>;
+  points: Array<{ speed?: number | null; accuracy?: number | null }>;
   height?: number;
 }
 
-const BUCKETS = [
-  { label: "0-10", min: 0, max: 10, color: "oklch(0.596 0.145 162)" },
-  { label: "10-20", min: 10, max: 20, color: "oklch(0.6 0.118 184)" },
-  { label: "20-30", min: 20, max: 30, color: "oklch(0.7 0.13 150)" },
-  { label: "30-40", min: 30, max: 40, color: "oklch(0.828 0.189 84)" },
-  { label: "40-60", min: 40, max: 60, color: "oklch(0.769 0.188 70)" },
-  { label: "60-80", min: 60, max: 80, color: "oklch(0.645 0.246 16)" },
-  { label: "80+", min: 80, max: Infinity, color: "oklch(0.55 0.18 40)" },
+// P2-13: единая схема 6 бакетов §5.3 (раньше локальные 7: 0-10…80+)
+const BUCKET_COLORS = [
+  "oklch(0.596 0.145 162)",
+  "oklch(0.6 0.118 184)",
+  "oklch(0.7 0.13 150)",
+  "oklch(0.828 0.189 84)",
+  "oklch(0.769 0.188 70)",
+  "oklch(0.55 0.18 40)",
 ];
 
 export function SpeedHistogram({ points, height = 100 }: SpeedHistogramProps) {
   const { buckets, total, avgKmh, maxKmh } = React.useMemo(() => {
-    const counts = BUCKETS.map(() => 0);
-    let total = 0;
-    let speedSum = 0;
-    let maxMs = 0;
-    for (const p of points) {
-      if (p.speed == null || p.speed < 0) continue;
-      const kmh = p.speed * 3.6; // m/s → km/h
-      speedSum += p.speed;
-      if (p.speed > maxMs) maxMs = p.speed;
-      for (let i = 0; i < BUCKETS.length; i++) {
-        if (kmh >= BUCKETS[i].min && kmh < BUCKETS[i].max) {
-          counts[i]++;
-          total++;
-          break;
-        }
-      }
-    }
-    const avgMs = total > 0 ? speedSum / total : 0;
+    const { buckets: dist } = computeSpeedDistribution(points);
+    // Профиль по точкам: средняя и макс — через единый фильтр выбросов
+    const mean = meanPointSpeedMs(points);
+    const max = maxSpeedMs(points) ?? 0;
     return {
-      buckets: counts,
-      total,
-      avgKmh: avgMs * 3.6,
-      maxKmh: maxMs * 3.6,
+      buckets: dist.map((b) => b.count),
+      total: dist.reduce((a, b) => a + b.count, 0),
+      avgKmh: mean != null ? mean * 3.6 : 0,
+      maxKmh: max * 3.6,
     };
   }, [points]);
 
@@ -78,23 +65,23 @@ export function SpeedHistogram({ points, height = 100 }: SpeedHistogramProps) {
           Распределение скоростей
         </span>
         <span className="font-mono text-muted-foreground">
-          {total} точек · пик: <span className="text-primary font-semibold">{BUCKETS[dominantIdx].label} км/ч</span>
+          {total} точек · пик: <span className="text-primary font-semibold">{SPEED_BUCKETS[dominantIdx].label} км/ч</span>
         </span>
       </div>
 
       {/* Horizontal bars per bucket */}
       <div className="space-y-1">
-        {BUCKETS.map((b, i) => {
+        {SPEED_BUCKETS.map((b, i) => {
           const count = buckets[i];
           const pct = (count / maxCount) * 100;
           const sharePct = total > 0 ? (count / total) * 100 : 0;
           return (
-            <div key={i} className="flex items-center gap-2">
+            <div key={b.label} className="flex items-center gap-2">
               <span className="text-[9px] text-muted-foreground w-9 text-right shrink-0">{b.label}</span>
               <div className="flex-1 h-2.5 bg-muted rounded-full overflow-hidden relative">
                 <motion.div
                   className="h-full rounded-full"
-                  style={{ backgroundColor: b.color }}
+                  style={{ backgroundColor: BUCKET_COLORS[i] }}
                   initial={{ width: 0 }}
                   animate={{ width: `${pct}%` }}
                   transition={{ delay: i * 0.05, duration: 0.4, ease: "easeOut" }}

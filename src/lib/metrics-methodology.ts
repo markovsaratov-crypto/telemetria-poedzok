@@ -22,15 +22,9 @@ const SPEED_VAR_WINDOW_SEC = 10; // сек
 const GAP_MS = 30_000; // 30 с — разрыв трека
 const MAX_GAP_SEC = 300; // разрывы длиннее 300 с не считаются временем движения
 
-export function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * 6371000 * Math.asin(Math.sqrt(a));
-}
+// P2-14: канонический гаверсинус — src/lib/geo.ts; реэкспорт для обратной совместимости
+import { haversineM } from "./geo";
+export { haversineM };
 
 // §5.1 SpeedP50 — медиана скоростей (м/с)
 export function speedP50(points: MethodologyPoint[]): number | null {

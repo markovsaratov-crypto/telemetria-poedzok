@@ -67,3 +67,13 @@ Thumbs.db
 .turso/
 .env*
 tool-results/
+
+# P2-15: внутренние документы, скриншоты и данные аудита — вне репозитория
+/Code_Review*.pdf
+/worklog.md
+/admin-tab.png
+/dashboard.png
+/prisma/db/*.db
+/download/
+/.zscripts/
+/*.db

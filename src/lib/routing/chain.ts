@@ -6,6 +6,9 @@ import { env } from "../env";
 import { getSettingSync } from "../settings";
 import { logger } from "../logger";
 import { checkCircuit, recordFailure, recordSuccess } from "./circuit-breaker";
+// P2-14: канонический гаверсинус — src/lib/geo.ts (была локальная копия)
+import { haversineM as haversine } from "@/lib/geo";
+export { haversine };
 
 export interface RouteSegment {
   lat: number;
@@ -33,18 +36,6 @@ export interface RouteResult {
   planDurationSec?: number | null;
   trafficDistanceM?: number | null; // с учётом пробок (2ГИС)
   trafficDurationSec?: number | null;
-}
-
-const EARTH_R = 6371000;
-
-export function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * EARTH_R * Math.asin(Math.sqrt(a));
 }
 
 async function route2Gis(

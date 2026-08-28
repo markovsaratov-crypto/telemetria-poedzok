@@ -7,6 +7,8 @@ import { db } from "@/lib/db";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
+import { recordIngestOutcome } from "@/lib/alerts"; // P2-16: правило ingest_error_rate
+import { trackLatency } from "@/lib/latency"; // P2-16: api_latency_p95
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -15,6 +17,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json().catch(() => null);
     const parsed = zIngestBody.safeParse(body);
     if (!parsed.success) {
+      recordIngestOutcome(false); // P2-16: ошибка валидации участвует в ingest_error_rate
       return json(
         { error: "Validation failed", details: parsed.error.flatten() },
         400,
@@ -29,6 +32,8 @@ export async function POST(request: NextRequest) {
     const existing = await findExistingSession(deviceId, clientId!);
     if (existing) {
       inc("ingest_duplicate_total", "Duplicate ingest (idempotency hit)", 1);
+      recordIngestOutcome(true); // P2-16: дубль — успешный исход (идемпотентность)
+      trackLatency(request);
       return json(
         { sessionId: existing, duplicate: true },
         200,
@@ -111,6 +116,8 @@ export async function POST(request: NextRequest) {
       });
 
     inc("ingest_total", "Total ingest requests", 1);
+    recordIngestOutcome(true); // P2-16
+    trackLatency(request); // P2-16
     logger.info("Ingest success", {
       requestId,
       sessionId: session.session.id,
@@ -130,6 +137,7 @@ export async function POST(request: NextRequest) {
       { "X-Request-Id": requestId }
     );
   } catch (err) {
+    recordIngestOutcome(false); // P2-16: 5xx участвует в ingest_error_rate
     logger.error("Ingest error", {
       requestId,
       error: err instanceof Error ? err.message : String(err),

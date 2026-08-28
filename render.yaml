@@ -79,3 +79,21 @@ services:
         sync: false
       - key: CRON_SECRET
         sync: false
+
+  # P2-16: alerts-cron (§14.4) — оценка правил алертов каждые 5 минут.
+  # BASE_URL, CRON_SECRET и SLACK_WEBHOOK_URL (опционально) задаются в дашборде Render.
+  - type: cron
+    name: telemetria-alerts-cron
+    runtime: node
+    plan: starter
+    region: frankfurt
+    schedule: "*/5 * * * *"
+    buildCommand: echo "cron: no build needed"
+    startCommand: curl -sf -X POST "$BASE_URL/api/cron/alerts" -H "Authorization: Bearer $CRON_SECRET"
+    envVars:
+      - key: BASE_URL
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false

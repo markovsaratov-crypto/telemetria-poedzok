@@ -9,6 +9,7 @@ import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { BarChart3, FileText, Clock, Gauge, Activity, Timer, AlertTriangle, TrafficCone, Route as RouteIcon, TrendingUp, MapPin } from "lucide-react";
 import { useStats, useRoutes, useSessions, useSessionStats, useSession, useAggregateStats, useSpeedDistribution } from "@/lib/hooks";
+import { SPEED_BUCKETS } from "@/lib/kpi"; // P2-13: единая схема бакетов
 import { MetricTile } from "../shared/MetricTile";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -240,7 +241,9 @@ function SpeedProfileBlock({ stats, speedDist }: { stats: any; speedDist: any })
   const [showDetail, setShowDetail] = React.useState(false);
   const maxSpeedMs = stats?.maxSpeed ?? speedDist?.maxSpeedMs ?? 0;
   const maxSpeedKmh = Math.round(maxSpeedMs * 3.6);
-  const avgSpeedMs = stats?.avgSpeed ?? speedDist?.avgSpeedMs ?? 0;
+  // P2-13: KPI AvgSpeed — только канонический Distance/Duration (§4.3);
+  // mean-of-points из speed-distribution больше не подмешивается (было 3 разных «средних» на экране)
+  const avgSpeedMs = stats?.avgSpeed ?? null;
   const avgSpeedKmh = avgSpeedMs != null ? (avgSpeedMs * 3.6).toFixed(1) : "—";
 
   // Horizontal bullet chart: avg speed as a thin line on a 0..max+20% bar
@@ -248,15 +251,10 @@ function SpeedProfileBlock({ stats, speedDist }: { stats: any; speedDist: any })
   const avgPct = avgSpeedMs != null ? Math.min(100, ((avgSpeedMs * 3.6) / barMax) * 100) : 0;
   const maxPct = Math.min(100, (maxSpeedKmh / barMax) * 100);
 
-  // Distribution buckets (from server or fallback 4 buckets)
+  // Distribution buckets (from server or fallback — единые 6 бакетов §5.3, P2-13)
   const buckets = speedDist?.buckets?.length
     ? speedDist.buckets
-    : [
-        { label: "0-20", count: 0, percent: 0 },
-        { label: "20-40", count: 0, percent: 0 },
-        { label: "40-60", count: 0, percent: 0 },
-        { label: "60+", count: 0, percent: 0 },
-      ];
+    : SPEED_BUCKETS.map((b) => ({ label: b.label, count: 0, percent: 0 }));
   const maxBucket = Math.max(...buckets.map((b: any) => b.count), 1);
 
   return (

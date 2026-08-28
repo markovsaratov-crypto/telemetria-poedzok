@@ -6,23 +6,13 @@ import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { z } from "zod";
+import { haversineM } from "@/lib/geo"; // P2-14: канонический гаверсинус (была локальная копия)
 
 export const dynamic = "force-dynamic";
 
 const zBody = z.object({
   ids: z.array(z.string()).min(1).max(100),
 });
-
-const EARTH_R = 6371000;
-function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * EARTH_R * Math.asin(Math.sqrt(a));
-}
 
 interface SessionStatsOut {
   id: string;

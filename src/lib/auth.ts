@@ -7,8 +7,9 @@ import { getClientIP } from "./http-utils";
 import { timingSafeEqual as nodeTimingSafeEqual } from "crypto";
 import { userDb, type UserRow } from "./user-db";
 import bcrypt from "bcryptjs";
+import { sessionCookieName, isProduction } from "./cookie-name";
 
-const COOKIE_NAME = "telem_session";
+const COOKIE_NAME = sessionCookieName();
 const COOKIE_TTL_SEC = 86400; // 24 часа
 const RENEW_THRESHOLD_SEC = 3600; // обновляем если до exp < 1 часа
 
@@ -68,11 +69,12 @@ export async function verifyPasswordHash(plain: string, hash: string): Promise<b
 }
 
 // Установка cookie в response (вместо next/headers cookies())
+// P0-5 / §6.1: Secure, SameSite=Strict, __Host- префикс в продакшене.
 export function setSessionCookie(response: NextResponse, cookieValue: string): void {
   response.cookies.set(COOKIE_NAME, cookieValue, {
     httpOnly: true,
-    secure: false,
-    sameSite: "lax",
+    secure: isProduction(),
+    sameSite: "strict",
     path: "/",
     maxAge: COOKIE_TTL_SEC,
   });
@@ -81,8 +83,8 @@ export function setSessionCookie(response: NextResponse, cookieValue: string): v
 export function clearSessionCookie(response: NextResponse): void {
   response.cookies.set(COOKIE_NAME, "", {
     httpOnly: true,
-    secure: false,
-    sameSite: "lax",
+    secure: isProduction(),
+    sameSite: "strict",
     path: "/",
     maxAge: 0,
   });

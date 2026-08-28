@@ -7,7 +7,7 @@
 import * as React from "react";
 import { motion } from "framer-motion";
 import { Search, Settings, SlidersHorizontal } from "lucide-react";
-import { useSessions, useRoutes } from "@/lib/hooks";
+import { useSessions, useRoutes, useBatchStats } from "@/lib/hooks";
 import { SessionCard } from "./SessionCard";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -35,6 +35,15 @@ export function SessionListScreen({ onSessionTap, onSettingsTap }: SessionListSc
 
   const { data, isLoading, isFetching } = useSessions({ limit: 20, cursor });
   const { data: routesData } = useRoutes();
+
+  // Batch fetch stats for destination coordinates
+  const sessionIds = React.useMemo(() => allSessions.map((s: any) => s.id), [allSessions]);
+  const { data: batchStatsData } = useBatchStats(sessionIds);
+  const statsMap = React.useMemo(() => {
+    const m = new Map<string, any>();
+    for (const s of batchStatsData?.stats || []) m.set(s.sessionId, s);
+    return m;
+  }, [batchStatsData]);
 
   React.useEffect(() => {
     setAllSessions([]);
@@ -127,12 +136,15 @@ export function SessionListScreen({ onSessionTap, onSettingsTap }: SessionListSc
               transition={{ delay: Math.min(idx * 0.03, 0.2) }}
             >
               <SessionCard
-                destLat={null}
-                destLon={null}
+                destLat={statsMap.get(s.id)?.destLat ?? null}
+                destLon={statsMap.get(s.id)?.destLon ?? null}
                 fallbackName={s.deviceName || s.deviceId}
                 startTime={s.startTime}
                 endTime={s.endTime}
                 pointCount={s.pointCount}
+                distance={statsMap.get(s.id)?.distanceM}
+                avgSpeed={statsMap.get(s.id)?.avgSpeedMs}
+                durationMin={statsMap.get(s.id)?.durationSec ? Math.round(statsMap.get(s.id).durationSec / 60) : undefined}
                 onTap={() => onSessionTap(s.id)}
               />
             </motion.div>

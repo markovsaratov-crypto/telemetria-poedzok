@@ -5,9 +5,11 @@ import { env } from "@/lib/env";
 import { corsResponse, setSecurityHeaders, json, getClientIP } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
+import { tokenMatches } from "@/lib/token-check"; // P0-3: проверка ЗНАЧЕНИЙ токенов
+import { sessionCookieName } from "@/lib/cookie-name"; // P0-5: __Host- префикс в prod
 
 // В dev-режиме cookie без __Host- префикса (который требует Secure).
-const SESSION_COOKIE_NAME = "telem_session";
+const SESSION_COOKIE_NAME = sessionCookieName();
 
 // Эндпоинты без авторизации
 const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics"];
@@ -41,6 +43,11 @@ function rateLimitKey(scope: string, request: NextRequest): string {
     return rlKey(scope, tokenPart);
   }
   return rlKey(scope, ip);
+}
+
+function bearerToken(auth: string): string | null {
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1].trim() : null;
 }
 
 export async function middleware(request: NextRequest): Promise<NextResponse> {
@@ -87,35 +94,46 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       }
     }
 
-    // 3. Auth (кроме public)
+    // 3. Auth (кроме public) — P0-3: обязательна проверка ЗНАЧЕНИЙ токенов (timing-safe),
+    // а не только формата: ранее любой Bearer ≥32 символов проходил гейт.
     const isPublic = PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"));
     if (!isPublic && pathname.startsWith("/api/")) {
-      const auth = request.headers.get("authorization") || "";
+      const authHeader = request.headers.get("authorization") || "";
       const cookie = request.headers.get("cookie") || "";
       // ?token= query param — альтернатива Bearer header для ingest/cron (SensorLogger, cron jobs)
       const queryToken = request.nextUrl.searchParams.get("token") || "";
-      const hasBearer = /^Bearer\s+\S{32,}$/i.test(auth);
-      const hasQueryToken = queryToken.length >= 32;
+      const bearer = bearerToken(authHeader);
+      const hasCookie = cookie.includes(SESSION_COOKIE_NAME);
+      const e = env();
 
       if (pathname === "/api/ingest" || pathname.startsWith("/api/ingest/")) {
-        if (!hasBearer && !hasQueryToken) {
-          return json({ error: "Unauthorized", reason: "INGEST_TOKEN required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
+        const token = bearer ?? queryToken;
+        if (!token || !(await tokenMatches(token, e.INGEST_TOKEN))) {
+          return json({ error: "Unauthorized", reason: "Valid INGEST_TOKEN required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
         }
       } else if (pathname.startsWith("/api/cron/")) {
-        if (!hasBearer && !hasQueryToken) {
-          return json({ error: "Unauthorized", reason: "CRON_SECRET required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
+        const token = bearer ?? queryToken;
+        if (!token || !(await tokenMatches(token, e.CRON_SECRET))) {
+          return json({ error: "Unauthorized", reason: "Valid CRON_SECRET required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
         }
       } else if (WORKER_PATHS.some((p) => pathname.startsWith(p))) {
-        if (!hasBearer) {
-          return json({ error: "Unauthorized", reason: "CRON_SECRET required" }, 401, { "X-Request-Id": requestId });
+        if (!bearer || !(await tokenMatches(bearer, e.CRON_SECRET))) {
+          return json({ error: "Unauthorized", reason: "Valid CRON_SECRET required" }, 401, { "X-Request-Id": requestId });
         }
       } else if (ADMIN_PATHS.some((p) => pathname.startsWith(p))) {
-        if (!hasBearer && !cookie.includes(SESSION_COOKIE_NAME)) {
+        // Bearer — строго значение ADMIN_TOKEN; cookie — наличие здесь,
+        // полная HMAC-проверка и роль на уровне роута (authorizeRequest).
+        if (bearer) {
+          if (!(await tokenMatches(bearer, e.ADMIN_TOKEN))) {
+            return json({ error: "Unauthorized", reason: "Invalid ADMIN_TOKEN" }, 401, { "X-Request-Id": requestId });
+          }
+        } else if (!hasCookie) {
           return json({ error: "Unauthorized", reason: "ADMIN_TOKEN or cookie required" }, 401, { "X-Request-Id": requestId });
         }
       } else {
-        // default api scope: bearer или cookie
-        if (!hasBearer && !cookie.includes(SESSION_COOKIE_NAME)) {
+        // Default scope: финальная авторизация на уровне роута (authorizeRequest:
+        // API_KEY, per-user apiKey, сессионная cookie) — БД недоступна в edge-middleware.
+        if (!bearer && !hasCookie) {
           return json({ error: "Unauthorized" }, 401, { "X-Request-Id": requestId });
         }
       }

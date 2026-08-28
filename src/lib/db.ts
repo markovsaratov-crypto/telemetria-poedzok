@@ -32,6 +32,71 @@ function toCamel(row: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
+// ——— Session relations: fetching for include/select (P0-2) ———
+type RelationOpts = Record<string, unknown> | true | undefined;
+
+function projectScalars(row: Record<string, unknown>, select: Record<string, boolean>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(select)) {
+    if (v && k in row) out[k] = row[k];
+  }
+  return out;
+}
+
+async function fetchGpsPoints(sessionId: string, opts: RelationOpts): Promise<Record<string, unknown>[]> {
+  const o = (opts === true ? {} : opts || {}) as { orderBy?: { timestamp?: string }; take?: number; select?: Record<string, boolean> };
+  const order = o.orderBy?.timestamp === "desc" ? "DESC" : "ASC";
+  let sql = `SELECT * FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ${order}`;
+  const params: unknown[] = [sessionId];
+  if (o.take) { sql += " LIMIT ?"; params.push(o.take); }
+  const res = await libsql.execute({ sql, args: params });
+  let rows = res.rows.map(r => { const p = toCamel(r as Record<string, unknown>); p.timestamp = Number(p.timestamp); return p; });
+  if (o.select) rows = rows.map(r => projectScalars(r, o.select));
+  return rows;
+}
+
+async function fetchTrafficJobs(sessionId: string, opts: RelationOpts): Promise<Record<string, unknown>[]> {
+  const o = (opts === true ? {} : opts || {}) as { orderBy?: { createdAt?: string }; take?: number };
+  const order = o.orderBy?.createdAt === "asc" ? "ASC" : "DESC";
+  let sql = `SELECT * FROM TrafficJob WHERE sessionId = ? ORDER BY createdAt ${order}`;
+  const params: unknown[] = [sessionId];
+  if (o.take) { sql += " LIMIT ?"; params.push(o.take); }
+  const res = await libsql.execute({ sql, args: params });
+  return res.rows.map(r => toCamel(r as Record<string, unknown>));
+}
+
+async function fetchRouteById(routeId: unknown): Promise<Record<string, unknown> | null> {
+  if (!routeId || typeof routeId !== "string") return null;
+  const res = await libsql.execute({ sql: "SELECT * FROM Route WHERE id = ?", args: [routeId] });
+  return res.rows.length > 0 ? toCamel(res.rows[0] as Record<string, unknown>) : null;
+}
+
+// Applying select/include to a Session row (supports nested relations with orderBy/take/select)
+async function projectSession(
+  row: Record<string, unknown>,
+  select?: Record<string, unknown>,
+  include?: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  const session = toCamel(row);
+  if (include) {
+    if (include.gpsPoints) session.gpsPoints = await fetchGpsPoints(session.id as string, include.gpsPoints as RelationOpts);
+    if (include.trafficJobs) session.trafficJobs = await fetchTrafficJobs(session.id as string, include.trafficJobs as RelationOpts);
+    if (include.route) session.route = await fetchRouteById(session.routeId);
+  }
+  if (select) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(select)) {
+      if (!v) continue;
+      if (k === "gpsPoints") out.gpsPoints = await fetchGpsPoints(session.id as string, v as RelationOpts);
+      else if (k === "trafficJobs") out.trafficJobs = await fetchTrafficJobs(session.id as string, v as RelationOpts);
+      else if (k === "route") out.route = await fetchRouteById(session.routeId);
+      else if (k in session) out[k] = session[k];
+    }
+    return out;
+  }
+  return session;
+}
+
 // Prisma-compatible db wrapper using libsql
 export const db = {
   session: {
@@ -65,27 +130,30 @@ export const db = {
       const result = await libsql.execute({ sql, args: params });
       return result.rows.map(r => toCamel(r as Record<string, unknown>));
     },
-    async findUnique(args: { where: { id: string }; include?: Record<string, unknown> }) {
-      const result = await libsql.execute({ sql: "SELECT * FROM Session WHERE id = ? AND deletedAt IS NULL", args: [args.where.id] });
-      if (result.rows.length === 0) return null;
-      const session = toCamel(result.rows[0] as Record<string, unknown>);
-      if (args.include?.gpsPoints) {
-        const pts = await libsql.execute({ sql: "SELECT * FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC", args: [args.where.id] });
-        (session as Record<string, unknown>).gpsPoints = pts.rows.map(r => { const p = toCamel(r as Record<string, unknown>); p.timestamp = Number(p.timestamp); return p; });
+    async findUnique(args: {
+      where: { id?: string; deviceId_clientId?: { deviceId: string; clientId: string } };
+      select?: Record<string, unknown>;
+      include?: Record<string, unknown>;
+    }) {
+      // Composite unique key (deviceId, clientId) — §6.2 idempotency.
+      // Without the deletedAt filter: the caller itself checks deletedAt.
+      let row: Record<string, unknown> | null = null;
+      const composite = args.where?.deviceId_clientId;
+      if (composite) {
+        const result = await libsql.execute({
+          sql: "SELECT * FROM Session WHERE deviceId = ? AND clientId = ? LIMIT 1",
+          args: [composite.deviceId, composite.clientId],
+        });
+        row = result.rows.length > 0 ? (result.rows[0] as Record<string, unknown>) : null;
+      } else {
+        const result = await libsql.execute({
+          sql: "SELECT * FROM Session WHERE id = ? AND deletedAt IS NULL",
+          args: [args.where?.id as string],
+        });
+        row = result.rows.length > 0 ? (result.rows[0] as Record<string, unknown>) : null;
       }
-      if (args.include?.trafficJobs) {
-        const jobs = await libsql.execute({ sql: "SELECT * FROM TrafficJob WHERE sessionId = ? ORDER BY createdAt DESC LIMIT 1", args: [args.where.id] });
-        (session as Record<string, unknown>).trafficJobs = jobs.rows.map(r => toCamel(r as Record<string, unknown>));
-      }
-      if (args.include?.route) {
-        if (session.routeId) {
-          const route = await libsql.execute({ sql: "SELECT * FROM Route WHERE id = ?", args: [session.routeId] });
-          (session as Record<string, unknown>).route = route.rows.length > 0 ? toCamel(route.rows[0] as Record<string, unknown>) : null;
-        } else {
-          (session as Record<string, unknown>).route = null;
-        }
-      }
-      return session;
+      if (!row) return null;
+      return projectSession(row, args.select, args.include);
     },
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
@@ -105,12 +173,26 @@ export const db = {
     async updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }) {
       const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
       const values = Object.values(args.data);
-      const conditions = Object.keys(args.where).map((k) => `${k} IN (SELECT value FROM json_each(?))`).join(" AND ");
-      // Simple approach: use IN clause
-      const ids = (args.where.id?.in || []) as string[];
-      if (ids.length === 0) return { count: 0 };
-      const placeholders = ids.map(() => "?").join(", ");
-      const result = await libsql.execute({ sql: `UPDATE Session SET ${sets} WHERE id IN (${placeholders})`, args: [...values, ...ids] });
+      const conditions: string[] = [];
+      const condParams: unknown[] = [];
+      const w = args.where || {};
+      // id: { in: [...] } — P0-2 (was ignored along with the rest of the filters)
+      const idIn = (w.id as { in?: string[] } | undefined)?.in;
+      if (Array.isArray(idIn)) {
+        if (idIn.length === 0) return { count: 0 };
+        conditions.push(`id IN (${idIn.map(() => "?").join(", ")})`);
+        condParams.push(...idIn);
+      } else if (typeof w.id === "string") {
+        conditions.push("id = ?");
+        condParams.push(w.id);
+      }
+      // Additional scalar filters (previously silently ignored)
+      for (const key of ["deviceId", "status", "routeId"] as const) {
+        if (typeof w[key] === "string") { conditions.push(`${key} = ?`); condParams.push(w[key]); }
+      }
+      // Protection from a mistake: an update without filters is forbidden
+      if (conditions.length === 0) return { count: 0 };
+      const result = await libsql.execute({ sql: `UPDATE Session SET ${sets} WHERE ${conditions.join(" AND ")}`, args: [...values, ...condParams] });
       return { count: result.rowsAffected };
     },
     async groupBy(args: { by: string[]; _count: boolean; where?: Record<string, unknown> }) {
@@ -151,8 +233,10 @@ export const db = {
   gpsPoint: {
     async createMany(args: { data: Array<Record<string, unknown>> }) {
       for (const item of args.data) {
-        const keys = Object.keys(item);
-        const values = Object.values(item);
+        // GpsPoint.id — NOT NULL (cuid в Prisma): генерируем, если не передан (P0-2)
+        const data = { id: randomUUID(), ...item };
+        const keys = Object.keys(data);
+        const values = Object.values(data).map((v) => (v === undefined ? null : v));
         const placeholders = keys.map(() => "?").join(", ");
         await libsql.execute({ sql: `INSERT INTO GpsPoint (${keys.join(", ")}) VALUES (${placeholders})`, args: values });
       }
@@ -283,10 +367,16 @@ export const db = {
       return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
     },
     async upsert(args: { where: { hash: string }; create: Record<string, unknown>; update: Record<string, unknown> }) {
-      const createKeys = Object.keys(args.create);
-      const createValues = Object.values(args.create);
-      const updateKeys = Object.keys(args.update);
-      const updateValues = Object.values(args.update);
+      // RouteCache: id/createdAt NOT NULL — substitute defaults if the caller didn't pass them (P0-2);
+      // drop undefined values (libsql rejects undefined — Prisma semantics "don't set")
+      const createData = { id: randomUUID(), createdAt: new Date().toISOString(), ...args.create };
+      for (const k of Object.keys(createData)) if (createData[k] === undefined) delete createData[k];
+      const updateData = { ...args.update };
+      for (const k of Object.keys(updateData)) if (updateData[k] === undefined) delete updateData[k];
+      const createKeys = Object.keys(createData);
+      const createValues = Object.values(createData);
+      const updateKeys = Object.keys(updateData);
+      const updateValues = Object.values(updateData);
       const placeholders = createKeys.map(() => "?").join(", ");
       const sets = updateKeys.map((k) => `${k} = ?`).join(", ");
       await libsql.execute({ sql: `INSERT INTO RouteCache (${createKeys.join(", ")}) VALUES (${placeholders}) ON CONFLICT(hash) DO UPDATE SET ${sets}`, args: [...createValues, ...updateValues] });
@@ -413,6 +503,13 @@ const originalFindMany = (db as any).session.findMany;
   // Handle deviceId contains
   if (w.deviceId?.contains) { sql += " AND deviceId LIKE ?"; params.push(`%${w.deviceId.contains}%`); }
   else if (w.deviceId) { sql += " AND deviceId LIKE ?"; params.push(`%${w.deviceId}%`); }
+  // Handle id: scalar or { in: [...] } — P0-2 (batch/bulk-delete)
+  const idIn = (w.id as { in?: string[] } | undefined)?.in;
+  if (Array.isArray(idIn)) {
+    if (idIn.length === 0) return [];
+    sql += ` AND id IN (${idIn.map(() => "?").join(", ")})`;
+    params.push(...idIn);
+  } else if (typeof w.id === "string") { sql += " AND id = ?"; params.push(w.id); }
   // Handle status
   if (w.status) { sql += " AND status = ?"; params.push(w.status); }
   // Handle routeId
@@ -434,7 +531,22 @@ const originalFindMany = (db as any).session.findMany;
   if (skip > 0) { sql += " OFFSET ?"; params.push(take, skip); } else { params.push(take); }
   
   const result = await libsql.execute({ sql, args: params });
-  return result.rows.map(r => toCamel(r as Record<string, unknown>));
+  const rows = result.rows.map(r => toCamel(r as Record<string, unknown>));
+  // select: scalar fields + nested gpsPoints (P0-2)
+  if (args?.select) {
+    const out: Record<string, unknown>[] = [];
+    for (const row of rows) {
+      const proj: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(args.select)) {
+        if (!v) continue;
+        if (k === "gpsPoints") proj.gpsPoints = await fetchGpsPoints(row.id as string, args.select.gpsPoints as RelationOpts);
+        else if (k in row) proj[k] = row[k];
+      }
+      out.push(proj);
+    }
+    return out;
+  }
+  return rows;
 };
 
 // session.count with more where options

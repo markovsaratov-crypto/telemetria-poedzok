@@ -14,19 +14,19 @@ services:
       - key: DATABASE_URL
         value: libsql://tele-markovsaratov-crypto.aws-ap-south-1.turso.io
       - key: TURSO_AUTH_TOKEN
-        value: eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODc1ODE5MzUsImlkIjoiMDE5ZmVmODItZmIwMS03MjEzLWIzMzgtNjU0MTE2ZTZmNDM4Iiwia2lkIjoiUUpzM0tVWjlUb0l0d29oLXBLYTQ2eWJGYmpNYzhla2ZrbG4taFVfcVBDZyIsInJpZCI6IjdiZDJjNjBjLWY0MjUtNDVmNS05YTg1LTRkZjk1MmFmZTFhYSJ9.oi6p7mschIUm-Kz-B53yBsKcxthJUqxUyTyRbYg7KQ5Z49QgLHB9pthJAfVgYhuYdX1bUe9VIaV5v7_jlq63Ag
+        sync: false
       - key: LOGIN_PASSWORD
-        value: 11IS4M4f4EUh0MBgfc3UQDkYibMvtkF4wShzAp3E
+        sync: false
       - key: SESSION_SECRET
-        value: ca94627b90fa31c7c6faecf715b09d62809b11ce10e79d78
+        sync: false
       - key: API_KEY
-        value: 037d2343956dd5dd598fa6ef7569bbc15a216e6415136219
+        sync: false
       - key: INGEST_TOKEN
-        value: f759fb81cd36c41e5e269f92f521a304231be7df28ba4ca4
+        sync: false
       - key: CRON_SECRET
-        value: a33220e583b2b17053eff681f91c872919bf9728bfb7593a
+        sync: false
       - key: ADMIN_TOKEN
-        value: 860c36775e469d1f26155412986f85616685d8ec81ac2827
+        sync: false
       - key: RATE_LIMIT_MAX_INGEST
         value: "120"
       - key: RATE_LIMIT_MAX_DEFAULT

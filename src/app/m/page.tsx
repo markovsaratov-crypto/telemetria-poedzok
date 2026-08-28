@@ -1,5 +1,4 @@
 "use client";
-import "leaflet/dist/leaflet.css";
 
 import * as React from "react";
 import dynamic from "next/dynamic";
@@ -26,6 +25,8 @@ export default function MobilePage() {
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
+      {/* Leaflet CSS — loaded via link to avoid bundler issues */}
+      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
       <BottomNav active={tab} onChange={setTab} />
       <div className="flex-1 overflow-y-auto">
         {tab === "trips" && <SessionListScreen onSessionTap={(id) => setSelectedSession(id)} onSettingsTap={() => setTab("admin")} />}

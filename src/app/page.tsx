@@ -302,7 +302,7 @@ export default function Home() {
           <div className="flex items-center gap-2">
             <Activity className="h-3.5 w-3.5 text-primary" />
             <span>
-              Телеметрия v2.6 · Next.js 16 · Prisma · SQLite · in-memory RL
+              Телеметрия v2.6 · Next.js 16 · libsql · in-memory RL
             </span>
           </div>
           <div className="flex items-center gap-3">
@@ -310,7 +310,7 @@ export default function Home() {
               <kbd>⌘K</kbd> команды · <kbd>⌘⇧F</kbd> поиск · <kbd>?</kbd> справка · <kbd>Alt+1..5</kbd> табы
             </span>
             <span className="hidden sm:inline">
-              Cookie: <code className="font-mono">__Host-telem_session</code> · HMAC-SHA256
+              Cookie: <code className="font-mono">telem_session</code> · HMAC-SHA256
             </span>
             <a
               href="https://prometheus.io/docs/instrumenting/exposition_formats/"

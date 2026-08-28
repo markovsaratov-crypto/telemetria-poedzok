@@ -79,7 +79,7 @@ export function SessionListScreen({ onSessionTap, onSettingsTap }: SessionListSc
           <button onClick={onSettingsTap} className="p-2 -ml-2 min-w-[44px] min-h-[44px] flex items-center justify-center">
             <Settings className="h-5 w-5 text-muted-foreground" />
           </button>
-          <h1 className="text-[22px] font-bold">Телеметрия</h1>
+          <h1 className="text-[22px] font-bold">Поездки</h1>
           <button onClick={() => setSearchOpen(!searchOpen)} className="p-2 -mr-2 min-w-[44px] min-h-[44px] flex items-center justify-center">
             <Search className="h-5 w-5 text-muted-foreground" />
           </button>
@@ -127,12 +127,12 @@ export function SessionListScreen({ onSessionTap, onSettingsTap }: SessionListSc
               transition={{ delay: Math.min(idx * 0.03, 0.2) }}
             >
               <SessionCard
-                deviceName={s.deviceName || s.deviceId}
+                destLat={null}
+                destLon={null}
+                fallbackName={s.deviceName || s.deviceId}
                 startTime={s.startTime}
                 endTime={s.endTime}
                 pointCount={s.pointCount}
-                distance={s.distance}
-                avgSpeed={s.avgSpeed}
                 onTap={() => onSessionTap(s.id)}
               />
             </motion.div>

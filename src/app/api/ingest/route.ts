@@ -7,10 +7,6 @@ import { db } from "@/lib/db";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
-import pLimit from "p-limit";
-
-// §3.1: сериализация DB-write через p-limit(1) — protects SQLite write lock
-const writeLock = pLimit(1);
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -70,9 +66,8 @@ export async function POST(request: NextRequest) {
     const endTime = new Date(filtered[filtered.length - 1].timestampMs);
     const payloadBytes = Buffer.byteLength(JSON.stringify(body));
 
-    // 3. INSERT через writeLock (p-limit(1))
-    const session = await writeLock(async () => {
-      return db.$transaction(async (tx) => {
+    // 3. INSERT (no global write lock — SQLite WAL handles concurrency)
+    const session = await db.$transaction(async (tx: any) => {
         const s = await tx.session.create({
           data: {
             deviceId,
@@ -112,7 +107,6 @@ export async function POST(request: NextRequest) {
         });
         return { session: s, job };
       });
-    });
 
     inc("ingest_total", "Total ingest requests", 1);
     logger.info("Ingest success", {

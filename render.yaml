@@ -14,19 +14,19 @@ services:
       - key: DATABASE_URL
         value: libsql://tele-markovsaratov-crypto.aws-ap-south-1.turso.io
       - key: TURSO_AUTH_TOKEN
-        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
+        sync: false
       - key: LOGIN_PASSWORD
-        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
+        sync: false
       - key: SESSION_SECRET
-        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
+        sync: false
       - key: API_KEY
-        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
+        sync: false
       - key: INGEST_TOKEN
-        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
+        sync: false
       - key: CRON_SECRET
-        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
+        sync: false
       - key: ADMIN_TOKEN
-        value: ***REMOVED-СЕКРЕТ-РОТИРОВАН***
+        sync: false
       - key: RATE_LIMIT_MAX_INGEST
         value: "120"
       - key: RATE_LIMIT_MAX_DEFAULT

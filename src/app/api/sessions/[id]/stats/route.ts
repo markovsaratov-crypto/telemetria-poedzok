@@ -111,6 +111,56 @@ async function computePlanFact(
 const EARTH_R = 6371000; // (оставлено для совместимости сигнатур; расчёт — в metrics-methodology)
 void EARTH_R;
 
+// ——— v2.9.3: спидограмма — даунсемпл GPS-точек для графика скорость-время ———
+// st: 0 = idle (<2 км/ч), 1 = moving, 2 = gap (dt > 30 сек от предыдущей точки).
+// Максимум SPEED_PROFILE_MAX точек; при меньшем числе точек — как есть.
+const SPEED_PROFILE_MAX = 240;
+interface SpeedProfilePoint {
+  t: number; // сек от начала сессии
+  v: number | null; // км/ч (null — нет GPS-скорости у точки)
+  st: 0 | 1 | 2;
+}
+function buildSpeedProfile(
+  points: Array<{ speed: number | null; timestamp: number }>,
+  startMs: number
+): SpeedProfilePoint[] {
+  if (points.length === 0) return [];
+  // gap-флаги считаются на ИСХОДНОМ ряду (до даунсемпла), иначе при длинных
+  // сессиях интервал сэмплов превысил бы 30с и дал ложные gap-детекты
+  const gapFlag = new Array<boolean>(points.length).fill(false);
+  for (let i = 1; i < points.length; i++) {
+    if (points[i].timestamp - points[i - 1].timestamp > 30_000) gapFlag[i] = true;
+  }
+  const step = Math.max(1, Math.ceil(points.length / SPEED_PROFILE_MAX));
+  const out: SpeedProfilePoint[] = [];
+  for (let i = 0; i < points.length; i += step) {
+    const p = points[i];
+    const t = Math.round((p.timestamp - startMs) / 1000);
+    const kmh = p.speed != null && p.speed >= 0 ? Math.round(p.speed * 3.6 * 10) / 10 : null;
+    // gap мог произойти между сэмплами — проверяем всё окно даунсемпла
+    let isGap = gapFlag[i];
+    if (!isGap) {
+      for (let j = Math.max(1, i - step + 1); j < i; j++) {
+        if (gapFlag[j]) {
+          isGap = true;
+          break;
+        }
+      }
+    }
+    const st: 0 | 1 | 2 = isGap ? 2 : kmh == null || kmh < 2 ? 0 : 1;
+    out.push({ t, v: kmh, st });
+  }
+  // хвостовая точка — чтобы график дотягивался до конца записи
+  const last = points[points.length - 1];
+  if (out.length === 0 || out[out.length - 1].t < (last.timestamp - startMs) / 1000 - 1) {
+    const t = Math.round((last.timestamp - startMs) / 1000);
+    const kmh =
+      last.speed != null && last.speed >= 0 ? Math.round(last.speed * 3.6 * 10) / 10 : null;
+    out.push({ t, v: kmh, st: kmh != null && kmh >= 2 ? 1 : 0 });
+  }
+  return out;
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -219,6 +269,8 @@ export async function GET(
 
     // P1-7: план-факт из завершённого TrafficJob
     const route = await computePlanFact(id, distance, durationSec, avgSpeed);
+    // v2.9.3: спидограмма (даунсемпл ≤240 точек, сек от старта, км/ч, состояние)
+    const speedProfile = buildSpeedProfile(points, startTime);
     trackLatency(request); // P2-16: успешный ответ участвует в api_latency_p95
 
     return json(
@@ -227,6 +279,8 @@ export async function GET(
         pointCount: points.length,
         distance: Math.round(distance),
         duration: Math.round(durationSec),
+        // v2.9.3: спидограмма для графика скорость-время
+        speedProfile,
         // v2.9: из state machine (§4.6/§4.7)
         movingTime: methodology.movingTime,
         idleTime: methodology.idleTime,

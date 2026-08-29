@@ -46,6 +46,7 @@ import {
   TimerReset,
 } from "lucide-react";
 import { useSessionStats, useRouteComparison } from "@/lib/hooks";
+import { SpeedProfileChart } from "@/components/speed-profile-chart";
 import {
   Card,
   CardContent,
@@ -238,6 +239,20 @@ export function SessionStatsCard({ sessionId }: SessionStatsCardProps) {
             <MetricTile key={i} icon={it.icon} label={it.label} value={it.value} sub={it.sub} color={it.color} index={i} />
           ))}
         </div>
+
+        {/* v2.9.3: спидограмма — скорость по времени с таймлайном движения/стоянок/разрывов */}
+        {stats.speedProfile && stats.speedProfile.length >= 2 && (
+          <div className="pt-1">
+            <SectionLabel icon={<Gauge className="h-3 w-3" />}>Спидограмма поездки</SectionLabel>
+            <SpeedProfileChart
+              profile={stats.speedProfile}
+              startIso={stats.startTime}
+              avgKmh={stats.avgSpeed != null ? stats.avgSpeed * 3.6 : null}
+              maxKmh={stats.maxSpeed != null ? stats.maxSpeed * 3.6 : null}
+              height={200}
+            />
+          </div>
+        )}
 
         {/* v2.9: метрики методологии (62 в 8 группах + routeId) (разделы 5, 7, 8.2, 11) */}
         {stats.methodology && <MethodologyGrid m={stats.methodology} />}

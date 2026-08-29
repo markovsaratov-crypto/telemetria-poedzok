@@ -89,8 +89,10 @@
   transform: translateY(-2px);
 }
 
-/* v2.9.2: переиспользуемые паттерны стайлинга */
-/* .empty-state — градиентный empty-контейнер с центрированной иконкой */
+/* v2.9.2→v2.9.3: переиспользуемые паттерны стайлинга */
+/* .empty-state — градиентный empty-контейнер с центрированной иконкой.
+   v2.9.3: пунктирная рамка убрана (VLM-аудит: «wireframe-паттерн») —
+   сплошная мягкая рамка + радиальный влив сверху. */
 .empty-state {
   display: flex;
   flex-direction: column;
@@ -98,11 +100,66 @@
   justify-content: center;
   text-align: center;
   border-radius: var(--radius);
-  border: 1px dashed var(--border);
-  background: linear-gradient(180deg, oklch(0.55 0.18 350 / 0.04), transparent);
+  border: 1px solid oklch(0.55 0.18 350 / 0.14);
+  background:
+    radial-gradient(120% 80% at 50% 0%, oklch(0.55 0.18 350 / 0.06), transparent 70%),
+    linear-gradient(180deg, oklch(0.55 0.18 350 / 0.03), transparent);
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.4);
 }
 .dark .empty-state {
-  background: linear-gradient(180deg, oklch(0.65 0.18 350 / 0.06), transparent);
+  border-color: oklch(0.65 0.18 350 / 0.18);
+  background:
+    radial-gradient(120% 80% at 50% 0%, oklch(0.65 0.18 350 / 0.09), transparent 70%),
+    linear-gradient(180deg, oklch(0.65 0.18 350 / 0.05), transparent);
+  box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.04);
+}
+/* .live-dot — пульсирующий индикатор живой системы (uptime-менталитет) */
+.live-dot {
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success, oklch(0.6 0.15 145));
+}
+.live-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  animation: liveDot 1.8s ease-out infinite;
+}
+.live-dot--warn {
+  background: var(--warning, oklch(0.7 0.15 85));
+}
+.live-dot--crit {
+  background: var(--destructive, oklch(0.55 0.2 25));
+}
+@keyframes liveDot {
+  0% { transform: scale(1); opacity: 0.6; }
+  70% { transform: scale(2.6); opacity: 0; }
+  100% { transform: scale(2.6); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-dot::after { animation: none; opacity: 0; }
+}
+/* v2.9.3: активный таб — акцентная полоска сверху (индикатор раздела) */
+[data-slot="tabs-trigger"][data-state="active"] {
+  position: relative;
+}
+[data-slot="tabs-trigger"][data-state="active"]::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 12%;
+  right: 12%;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(to right, transparent, oklch(0.55 0.18 350), transparent);
+}
+.dark [data-slot="tabs-trigger"][data-state="active"]::before {
+  background: linear-gradient(to right, transparent, oklch(0.65 0.18 350), transparent);
 }
 /* .section-rule — градиентная разделительная линия под заголовком секции */
 .section-rule {

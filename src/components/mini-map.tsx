@@ -50,7 +50,7 @@ export function MiniMap({
     return (
       <div
         className={cn(
-          "flex items-center justify-center rounded-lg border border-dashed bg-muted/30 text-muted-foreground/60",
+          "flex items-center justify-center rounded-lg border border-border/60 bg-muted/20 text-muted-foreground/60",
           className
         )}
         style={{ height }}

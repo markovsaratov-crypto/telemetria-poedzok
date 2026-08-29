@@ -47,6 +47,10 @@ interface MapTrackProps {
   center?: [number, number];
   zoom?: number;
   showLayerSwitcher?: boolean;
+  // v2.9.4: связка карта↔график — акцентный маркер точки с профиля (hover/pin)
+  focusPoint?: { lat: number; lon: number } | null;
+  // v2.9.4: панорамировать карту к focusPoint при его смене (режим закрепления)
+  panToFocus?: boolean;
 }
 
 const LAYERS: Record<LayerKind, { url: string; attr: string; label: string; maxZoom?: number }> = {
@@ -114,6 +118,37 @@ function makeIcon(variant: "start" | "end" | "pin", label?: string): L.DivIcon {
   });
 }
 
+// v2.9.4: акцентный маркер точки с профиля (связка карта↔график).
+// divIcon с CSS-пульсацией — заметен на любом слое, отличается от старт/финиш.
+function makeFocusIcon(): L.DivIcon {
+  const html = `
+    <div class="telem-focus-marker" style="position:relative;width:20px;height:20px;">
+      <div style="
+        position:absolute;inset:2px;border-radius:50%;
+        background:#e5484d;
+        border:2.5px solid #fff;
+        box-shadow:0 0 0 2px rgba(229,72,77,0.35),0 2px 6px rgba(0,0,0,0.4);
+      "></div>
+      <div style="
+        position:absolute;inset:0;border-radius:50%;
+        border:2px solid rgba(229,72,77,0.65);
+        animation:telemFocusPulse 1.6s ease-out infinite;
+      "></div>
+    </div>`;
+  return L.divIcon({ html, className: "telem-marker", iconSize: [20, 20], iconAnchor: [10, 10] });
+}
+
+// v2.9.4: панорамирование к точке фокуса (только при явном изменении — не на каждый hover)
+function PanToFocus({ focus }: { focus: { lat: number; lon: number } | null }) {
+  const map = useMap();
+  React.useEffect(() => {
+    if (!focus) return;
+    const targetZoom = Math.max(map.getZoom(), 14);
+    map.setView([focus.lat, focus.lon], targetZoom, { animate: true, duration: 0.6 });
+  }, [focus, map]);
+  return null;
+}
+
 // Компонент для авто-подгонки bounds к точкам/маркерам.
 function FitBounds({
   positions,
@@ -171,6 +206,8 @@ export default function MapTrack({
   center = [55.751244, 37.618423], // Москва по умолчанию
   zoom = 12,
   showLayerSwitcher = true,
+  focusPoint = null,
+  panToFocus = false,
 }: MapTrackProps) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
@@ -309,6 +346,13 @@ export default function MapTrack({
         )}
         {fitToPoints && fitPositions.length > 0 && (
           <FitBounds positions={fitPositions} />
+        )}
+        {/* v2.9.4: точка фокуса с профиля (связка карта↔график) */}
+        {focusPoint && (
+          <>
+            <Marker position={[focusPoint.lat, focusPoint.lon]} icon={makeFocusIcon()} interactive={false} zIndexOffset={1000} />
+            {panToFocus && <PanToFocus focus={focusPoint} />}
+          </>
         )}
         {onMapClick && <MapEvents onClick={onMapClick} />}
         <ClickHandler />

@@ -22,10 +22,19 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
       routeCaches: (await libsql.execute("SELECT * FROM RouteCache")).rows,
       trafficJobs: await db.trafficJob.findMany(),
       auditLogs: await db.auditLog.findMany(),
-      exportJobs: await db.exportJob.findMany(),
+      // v2.9 fix: db.exportJob wrapper не определён в db.ts — используем прямой libsql-запрос
+      exportJobs: (await libsql.execute("SELECT * FROM ExportJob")).rows,
+      // v2.9: также включаем BackupJob и Setting для полноты дампа
+      backupJobs: (await libsql.execute("SELECT * FROM BackupJob")).rows,
+      settings: (await libsql.execute("SELECT * FROM Setting")).rows,
+      users: (await libsql.execute("SELECT id, email, role, createdAt, updatedAt FROM User")).rows,
     };
 
-    const content = JSON.stringify(dump, null, 2);
+    // BigInt-safe serialization: GpsPoint.timestamp is BigInt, JSON.stringify падает
+    // Заменяем BigInt на строковое представление
+    const content = JSON.stringify(dump, (key, value) =>
+      typeof value === "bigint" ? `BIGINT:${value.toString()}` : value
+    , 2);
     const checksum = createHash("sha256").update(content).digest("hex");
     const fileSize = Buffer.byteLength(content);
 

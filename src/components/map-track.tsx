@@ -47,12 +47,76 @@ export interface ColoredTrack {
   label?: string;
 }
 
+// v2.9.8: тепловая карта скорости — трек, раскрашенный по скорости движения.
+// Классическая телеметрическая шкала; границы бакетов в км/ч.
+export interface SpeedBucket {
+  maxKmh: number;
+  color: string;
+  label: string;
+}
+
+export const SPEED_BUCKETS: SpeedBucket[] = [
+  { maxKmh: 30, color: "#10b981", label: "0–30" },   // emerald — город/стоянка
+  { maxKmh: 60, color: "#65a30d", label: "30–60" },   // lime-600 — темнее 500-го: VLM отмечал сливание со светлыми тайлами
+  { maxKmh: 90, color: "#eab308", label: "60–90" },   // yellow
+  { maxKmh: 120, color: "#f97316", label: "90–120" }, // orange
+  { maxKmh: Infinity, color: "#e11d48", label: "120+" }, // rose — быстро
+];
+
+function speedBucketFor(kmh: number): number {
+  for (let i = 0; i < SPEED_BUCKETS.length; i++) {
+    if (kmh <= SPEED_BUCKETS[i].maxKmh) return i;
+  }
+  return SPEED_BUCKETS.length - 1;
+}
+
+// Строит по точкам со скоростью набор «пробегов» на каждый бакет:
+// массивы полилиний (каждая — непрерывный участок одного цвета).
+// Один компонент Polyline на бакет (multi-polyline) — 5 SVG-путей вместо тысяч сегментов.
+function buildSpeedRuns(
+  track: Array<{ lat: number; lon: number; speed?: number | null }>
+): Array<Array<Array<[number, number]>>> {
+  const runs: Array<Array<Array<[number, number]>>> = SPEED_BUCKETS.map(() => []);
+  let currentBucket = -1;
+  let currentRun: Array<[number, number]> | null = null;
+  for (let i = 1; i < track.length; i++) {
+    const a = track[i - 1];
+    const b = track[i];
+    if (
+      typeof a.lat !== "number" || typeof a.lon !== "number" ||
+      typeof b.lat !== "number" || typeof b.lon !== "number"
+    ) {
+      currentBucket = -1;
+      currentRun = null;
+      continue;
+    }
+    // средняя скорость сегмента (м/с → км/ч); без данных — 0 (стоянка)
+    const vA = a.speed != null && a.speed >= 0 ? a.speed : 0;
+    const vB = b.speed != null && b.speed >= 0 ? b.speed : 0;
+    const bucket = speedBucketFor(((vA + vB) / 2) * 3.6);
+    if (bucket !== currentBucket || currentRun === null) {
+      currentRun = [
+        [a.lat, a.lon] as [number, number],
+        [b.lat, b.lon] as [number, number],
+      ];
+      runs[bucket].push(currentRun);
+      currentBucket = bucket;
+    } else {
+      currentRun.push([b.lat, b.lon] as [number, number]);
+    }
+  }
+  return runs;
+}
+
 interface MapTrackProps {
   points?: Array<{ lat: number; lon: number }>;
   markers?: MapMarker[];
   // v2.9.7: несколько цветных треков на одной карте (сравнение поездок).
   // Если задан — обычный points-трек не рисуется.
   tracks?: ColoredTrack[];
+  // v2.9.8: тепловая карта скорости — трек по бакетам скорости (км/ч).
+  // Если задан — рисуется вместо обычного points-трека (+ легенда шкалы).
+  speedTrack?: Array<{ lat: number; lon: number; speed?: number | null }> | null;
   height?: string;
   className?: string;
   interactive?: boolean;
@@ -231,6 +295,7 @@ export default function MapTrack({
   showLayerSwitcher = true,
   focusPoint = null,
   panToFocus = false,
+  speedTrack = null,
 }: MapTrackProps) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
@@ -262,6 +327,16 @@ export default function MapTrack({
         }))
         .filter((t) => t.positions.length >= 2),
     [tracks]
+  );
+
+  // v2.9.8: пробеги по бакетам скорости для тепловой карты
+  const speedRuns = React.useMemo(
+    () => (speedTrack && speedTrack.length >= 2 ? buildSpeedRuns(speedTrack) : null),
+    [speedTrack]
+  );
+  const speedRunsTotal = React.useMemo(
+    () => (speedRuns ? speedRuns.reduce((a, r) => a + r.length, 0) : 0),
+    [speedRuns]
   );
 
   const fitPositions = React.useMemo(() => {
@@ -342,6 +417,38 @@ export default function MapTrack({
                 />
               </React.Fragment>
             ))
+          : speedRuns && speedRunsTotal > 0
+          ? // v2.9.8: тепловая карта скорости — белый касинг по всему треку,
+            // затем одна multi-polyline на каждый бакет (5 цветов);
+            // стайлинг-раунд 9: касинг плотнее (0.65) — цветные сегменты
+            // не сливаются со светлыми тайлами, линия толще (5) для читаемости
+            <>
+              <Polyline
+                positions={polylinePositions}
+                pathOptions={{
+                  color: "#ffffff",
+                  weight: 8,
+                  opacity: 0.65,
+                  lineJoin: "round",
+                  lineCap: "round",
+                }}
+              />
+              {SPEED_BUCKETS.map((b, i) =>
+                speedRuns[i].length > 0 ? (
+                  <Polyline
+                    key={`speed-${i}`}
+                    positions={speedRuns[i]}
+                    pathOptions={{
+                      color: b.color,
+                      weight: 5,
+                      opacity: 0.95,
+                      lineJoin: "round",
+                      lineCap: "round",
+                    }}
+                  />
+                ) : null
+              )}
+            </>
           : polylinePositions.length >= 2 && (
           <>
             <Polyline
@@ -456,6 +563,41 @@ export default function MapTrack({
             >
               {LAYERS[k].label}
             </button>
+          ))}
+        </div>
+      )}
+
+      {/* v2.9.8: легенда шкалы скорости (тепловая карта трека).
+          стайлинг-раунд 9: крупнее чипы/шрифт (VLM: «too small on mobile»),
+          бейдж «км/ч» слева, тень поверх тайлов */}
+      {speedRuns && speedRunsTotal > 0 && (
+        <div
+          className="absolute bottom-7 left-1/2 -translate-x-1/2 z-[1000] bg-background/95 backdrop-blur-sm border rounded-md shadow-md px-2.5 py-1.5 flex gap-2.5 items-center max-w-[calc(100%-12px)] flex-wrap justify-center"
+          role="figure"
+          aria-label="Шкала скорости на треке, км/ч"
+        >
+          <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide select-none">
+            км/ч
+          </span>
+          {SPEED_BUCKETS.map((b, i) => (
+            <span
+              key={`legend-${i}`}
+              className={cn(
+                "flex items-center gap-1 text-[11px] font-mono font-medium select-none",
+                speedRuns[i].length > 0 ? "text-foreground" : "text-muted-foreground/40"
+              )}
+              title={`Скорость ${b.label} км/ч`}
+            >
+              <span
+                aria-hidden
+                className="inline-block h-2.5 w-4 rounded-[3px] shadow-sm"
+                style={{
+                  backgroundColor: b.color,
+                  opacity: speedRuns[i].length > 0 ? 1 : 0.25,
+                }}
+              />
+              {b.label}
+            </span>
           ))}
         </div>
       )}

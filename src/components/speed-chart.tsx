@@ -14,9 +14,11 @@ interface SpeedChartProps {
 
 export function SpeedChart({ points, height = 120 }: SpeedChartProps) {
   const data = React.useMemo(() => {
+    // v2.9.8 fix: GpsPoint.speed хранится в м/с — переводим в км/ч (раньше подпись
+    // «км/ч» показывала сырые м/с: «макс: 47.1 км/ч» вместо 169.6)
     return points
       .filter((p) => p.speed != null && p.speed >= 0)
-      .map((p) => ({ t: p.timestamp, v: p.speed as number }));
+      .map((p) => ({ t: p.timestamp, v: (p.speed as number) * 3.6 }));
   }, [points]);
 
   if (data.length < 2) {

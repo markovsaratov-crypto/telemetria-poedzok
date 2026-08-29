@@ -47,6 +47,29 @@ const schema = z.object({
   TARGET_LOAD_RPM: z.coerce.number().int().positive().default(100),
   NODE_ENV: z.string().default("development"),
   APP_VERSION: z.string().default(pkg.version),
+  // v2.9 §4.6: MovingTime state machine — гистерезис 5/2 км/ч + debounce 5 сек + gap 30 сек
+  MOVING_TIME_HYSTERESIS_HIGH_KMH: z.coerce.number().positive().default(5),
+  MOVING_TIME_HYSTERESIS_LOW_KMH: z.coerce.number().positive().default(2),
+  MOVING_TIME_DEBOUNCE_SEC: z.coerce.number().positive().default(5),
+  MOVING_TIME_GAP_SEC: z.coerce.number().positive().default(30),
+  // v2.9 §7.3: CAP EcoScore — базовые линии калибруются по референсному корпусу (по умолчанию 0.5/0.4/0.3)
+  ECO_SCORE_CAP_BASELINE: z.string().default(""),
+  ECO_SCORE_CAP_PENALTY_EXPONENT: z.coerce.number().positive().default(1.5),
+  ECO_SCORE_MIN_CALIBRATION_CORPUS: z.coerce.number().int().positive().default(30),
+  ECO_SCORE_MIN_BASELINE_VALUE: z.coerce.number().positive().default(0.05),
+  ECO_SCORE_MIN_ACTIVE_DISTANCE_KM: z.coerce.number().positive().default(5),
+  ECO_SCORE_MIN_ACTIVE_DURATION_SEC: z.coerce.number().positive().default(300),
+  // v2.9 §17.2: HMM map matching — σ (GPS-погрешность, м) + β (transition, м)
+  HMM_EMISSION_SIGMA_M: z.coerce.number().positive().default(5),
+  HMM_TRANSITION_BETA_M: z.coerce.number().positive().default(5),
+  // v2.9 §10.5: Theil-Sen RouteTrend — bootstrap при n > 200
+  ROUTE_TREND_BOOTSTRAP_THRESHOLD: z.coerce.number().int().positive().default(200),
+  ROUTE_TREND_BOOTSTRAP_SAMPLES: z.coerce.number().int().positive().default(200),
+  // v2.9 §10.6: HotspotSegments — перцентильная основа
+  HOTSPOT_SEGMENTS_PERCENTILE: z.coerce.number().int().min(1).max(100).default(75),
+  HOTSPOT_SEGMENTS_THRESHOLD: z.coerce.number().positive().default(0.5),
+  // v2.9 §10.0: routeHash — snap-to-grid шаг (0.0005° ≈ 55 м на широте Москвы)
+  ROUTE_ID_SNAP_GRID_DEG: z.coerce.number().positive().default(0.0005),
   // P2-16: вебхук Slack для алертов §14.4 (пусто — только журнал и /api/admin/alerts)
   SLACK_WEBHOOK_URL: z.string().default(""),
 });
@@ -105,6 +128,31 @@ export function env(): Env {
       BACKUP_STORAGE_DIR: process.env.BACKUP_STORAGE_DIR || "/tmp/backups",
       VERCEL_PLAN: (process.env.VERCEL_PLAN as "free" | "pro") || "pro",
       TARGET_LOAD_RPM: Number(process.env.TARGET_LOAD_RPM) || 100,
+      // v2.9 §4.6
+      MOVING_TIME_HYSTERESIS_HIGH_KMH: Number(process.env.MOVING_TIME_HYSTERESIS_HIGH_KMH) || 5,
+      MOVING_TIME_HYSTERESIS_LOW_KMH: Number(process.env.MOVING_TIME_HYSTERESIS_LOW_KMH) || 2,
+      MOVING_TIME_DEBOUNCE_SEC: Number(process.env.MOVING_TIME_DEBOUNCE_SEC) || 5,
+      MOVING_TIME_GAP_SEC: Number(process.env.MOVING_TIME_GAP_SEC) || 30,
+      // v2.9 §7.3 CAP
+      ECO_SCORE_CAP_BASELINE: process.env.ECO_SCORE_CAP_BASELINE || "",
+      ECO_SCORE_CAP_PENALTY_EXPONENT: Number(process.env.ECO_SCORE_CAP_PENALTY_EXPONENT) || 1.5,
+      ECO_SCORE_MIN_CALIBRATION_CORPUS: Number(process.env.ECO_SCORE_MIN_CALIBRATION_CORPUS) || 30,
+      ECO_SCORE_MIN_BASELINE_VALUE: Number(process.env.ECO_SCORE_MIN_BASELINE_VALUE) || 0.05,
+      ECO_SCORE_MIN_ACTIVE_DISTANCE_KM: Number(process.env.ECO_SCORE_MIN_ACTIVE_DISTANCE_KM) || 5,
+      ECO_SCORE_MIN_ACTIVE_DURATION_SEC: Number(process.env.ECO_SCORE_MIN_ACTIVE_DURATION_SEC) || 300,
+      // v2.9 §17.2 HMM
+      HMM_EMISSION_SIGMA_M: Number(process.env.HMM_EMISSION_SIGMA_M) || 5,
+      HMM_TRANSITION_BETA_M: Number(process.env.HMM_TRANSITION_BETA_M) || 5,
+      // v2.9 §10.5 Theil-Sen
+      ROUTE_TREND_BOOTSTRAP_THRESHOLD: Number(process.env.ROUTE_TREND_BOOTSTRAP_THRESHOLD) || 200,
+      ROUTE_TREND_BOOTSTRAP_SAMPLES: Number(process.env.ROUTE_TREND_BOOTSTRAP_SAMPLES) || 200,
+      // v2.9 §10.6 HotspotSegments
+      HOTSPOT_SEGMENTS_PERCENTILE: Number(process.env.HOTSPOT_SEGMENTS_PERCENTILE) || 75,
+      HOTSPOT_SEGMENTS_THRESHOLD: Number(process.env.HOTSPOT_SEGMENTS_THRESHOLD) || 0.5,
+      // v2.9 §10.0 routeHash
+      ROUTE_ID_SNAP_GRID_DEG: Number(process.env.ROUTE_ID_SNAP_GRID_DEG) || 0.0005,
+      // P2-16: вебхук Slack для алертов §14.4 (пусто — только журнал)
+      SLACK_WEBHOOK_URL: process.env.SLACK_WEBHOOK_URL || "",
       NODE_ENV: process.env.NODE_ENV || "development",
       // v2.7: версия — единый источник package.json (устаревшая APP_VERSION в дашборде Render больше не перекрывает релиз)
       APP_VERSION: pkg.version,

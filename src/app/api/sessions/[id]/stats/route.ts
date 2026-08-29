@@ -1,6 +1,7 @@
 // GET /api/sessions/[id]/stats — детальная статистика по сессии.
 // Возвращает: distance, duration, avgSpeed, maxSpeed, avgAltitude, elevationGain/loss, movingTime, idleTime
-// + P1-6: methodology (метрики методологии v2.7) + P1-7: route (план-факт и трафик из TrafficJob).
+// + v2.9: полный набор метрик методологии (62 метрики в 8 группах + routeId) + план-факт из TrafficJob.
+// v2.9: AvgSpeed использует ActiveDuration (§4.11), movingTime/idleTime из state machine (§4.6/§4.7).
 import { NextRequest } from "next/server";
 import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
@@ -128,9 +129,11 @@ export async function GET(
         endTime: true,
         pointCount: true,
         deletedAt: true,
+        routeHash: true,    // v2.9 §10.0: детерминированный хэш маршрута
+        topologyHash: true, // v2.9 §10.0: 8-char хэш топологии
         gpsPoints: {
           orderBy: { timestamp: "asc" },
-          select: { lat: true, lon: true, speed: true, altitude: true, accuracy: true, timestamp: true },
+          select: { lat: true, lon: true, speed: true, altitude: true, accuracy: true, bearing: true, timestamp: true },
         },
       },
     });
@@ -159,8 +162,6 @@ export async function GET(
     let elevationGain = 0;
     let elevationLoss = 0;
     let prevAlt: number | null = null;
-    let movingTime = 0;
-    let idleTime = 0;
 
     // P2-13: maxSpeed через единый фильтр выбросов (kpi.ts) — GPS-джиттер раньше
     // давал нереальные значения MaxSpeed на экране
@@ -173,14 +174,6 @@ export async function GET(
       if (i > 0) {
         const prev = points[i - 1];
         distance += haversineM(prev.lat, prev.lon, p.lat, p.lon);
-
-        // Moving vs idle (speed > 1 m/s = moving)
-        const dt = (p.timestamp - prev.timestamp) / 1000;
-        if (dt > 0 && dt < 300) {
-          const isMoving = (p.speed ?? 0) > 1;
-          if (isMoving) movingTime += dt;
-          else idleTime += dt;
-        }
       }
 
       // Speed stats — сумма для meanPointSpeed (НЕ KPI AvgSpeed, см. ниже)
@@ -207,9 +200,11 @@ export async function GET(
       ? points[points.length - 1].timestamp
       : startTime;
     const durationSec = Math.max(0, (endTime - startTime) / 1000);
-    // P2-13: канонический AvgSpeed §4.3 = Distance / Duration (было среднее по точкам —
-    // из-за этого на одном экране было 3 разных «средних скорости»)
-    const avgSpeed = avgSpeedMs(distance, durationSec);
+
+    // v2.9: метрики методологии (§12) — state machine + ActiveTrip + CAP EcoScore + новые поведенческие
+    const methodology = computeMethodologyMetrics(points, distance, durationSec);
+    // v2.9: AvgSpeed = Distance / ActiveDuration (§4.3 + §4.11)
+    const avgSpeed = avgSpeedMs(distance, durationSec, methodology.activeTrip.activeDuration);
     const speedMean = meanPointSpeedMs(points);
 
     // Bounding box
@@ -222,8 +217,6 @@ export async function GET(
       maxLon: Math.max(...lons),
     };
 
-    // P1-6: метрики методологии (разделы 5, 7, 8.2, 11)
-    const methodology = computeMethodologyMetrics(points, distance, durationSec);
     // P1-7: план-факт из завершённого TrafficJob
     const route = await computePlanFact(id, distance, durationSec, avgSpeed);
     trackLatency(request); // P2-16: успешный ответ участвует в api_latency_p95
@@ -234,8 +227,13 @@ export async function GET(
         pointCount: points.length,
         distance: Math.round(distance),
         duration: Math.round(durationSec),
-        movingTime: Math.round(movingTime),
-        idleTime: Math.round(idleTime),
+        // v2.9: из state machine (§4.6/§4.7)
+        movingTime: methodology.movingTime,
+        idleTime: methodology.idleTime,
+        gapTime: methodology.gapTime,
+        // v2.9 §10.0: детерминированные хэши маршрута
+        routeHash: session.routeHash,
+        topologyHash: session.topologyHash,
         avgSpeed: avgSpeed != null ? Math.round(avgSpeed * 10) / 10 : null,
         // P2-13: средняя по точкам — отдельно от KPI AvgSpeed (§4.3)
         speedMeanMs: speedMean != null ? Math.round(speedMean * 10) / 10 : null,

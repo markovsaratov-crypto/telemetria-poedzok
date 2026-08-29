@@ -38,6 +38,34 @@ export async function POST(request: NextRequest) {
     if (status === "completed") {
       updateData.result = result ? JSON.stringify(result) : null;
       inc("traffic_job_completed_total", "Traffic jobs completed", 1);
+
+      // v2.9: персист routeHash + topologyHash в Session, если они вычислены ворчером
+      // (см. mini-services/worker/processor.ts → computeRouteHash §10.0).
+      if (result && typeof result === "object") {
+        const r = result as { routeHash?: string | null; topologyHash?: string | null };
+        if (r.routeHash || r.topologyHash) {
+          const sessionUpdate: Record<string, unknown> = { updatedAt: new Date() };
+          if (r.routeHash) {
+            sessionUpdate.routeHash = r.routeHash;
+            inc("route_id_assignments_total", "routeId (routeHash) assignments via worker", 1);
+          }
+          if (r.topologyHash) sessionUpdate.topologyHash = r.topologyHash;
+          await db.session.update({
+            where: { id: job.sessionId },
+            data: sessionUpdate,
+          }).catch((err) => {
+            logger.warn("Failed to persist routeHash/topologyHash on session (non-fatal)", {
+              requestId,
+              sessionId: job.sessionId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
+        // v2.9: метрика HMM map matching
+        if ("mapMatchLogProb" in r && typeof r.mapMatchLogProb === "number" && isFinite(r.mapMatchLogProb)) {
+          inc("hmm_mapmatching_runs_total", "HMM map matching runs in worker", 1);
+        }
+      }
     } else if (status === "failed") {
       updateData.error = error || "unknown";
       inc("traffic_job_failed_total", "Traffic jobs failed", 1);

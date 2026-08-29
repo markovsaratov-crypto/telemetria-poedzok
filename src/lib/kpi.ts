@@ -33,15 +33,22 @@ export function assignSpeedBucketIndex(kmh: number): number {
   return SPEED_BUCKETS.length - 1;
 }
 
-// §4.3 AvgSpeed = Distance / Duration (м/с). durationSec <= 0 → null.
+// §4.3 AvgSpeed = Distance / ActiveDuration (м/с). v2.9: формула использует ActiveDuration
+// (раздел 4.11) вместо Duration — отсекает «хвосты» (стоянки в начале/конце записи).
+// Если activeDurationSec не передан (null/undefined) — fallback на durationSec для обратной
+// совместимости с v2.7 кодом, не имеющим ActiveTrip.
 export function avgSpeedMs(
   distanceM: number | null | undefined,
-  durationSec: number | null | undefined
+  durationSec: number | null | undefined,
+  activeDurationSec?: number | null
 ): number | null {
-  if (distanceM == null || durationSec == null || !Number.isFinite(distanceM) || durationSec <= 0) {
-    return null;
-  }
-  return distanceM / durationSec;
+  if (distanceM == null || !Number.isFinite(distanceM)) return null;
+  // v2.9: предпочтение ActiveDuration; fallback на Duration для legacy callers
+  const dur = activeDurationSec != null && Number.isFinite(activeDurationSec) && activeDurationSec > 0
+    ? activeDurationSec
+    : durationSec;
+  if (dur == null || !Number.isFinite(dur) || dur <= 0) return null;
+  return distanceM / dur;
 }
 
 // §4.4 + фильтр GPS-выбросов. Методология берёт max(speed) при speed >= 0,

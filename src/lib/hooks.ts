@@ -153,6 +153,11 @@ export interface SessionStats {
   duration: number;
   movingTime: number;
   idleTime: number;
+  // v2.9 §4.6: gapTime из state machine (контрольная сумма MovingTime + IdleTime + GapTime = Duration)
+  gapTime?: number;
+  // v2.9 §10.0: детерминированные хэши маршрута (вычисляются в ворчере, персистятся на session)
+  routeHash?: string | null;
+  topologyHash?: string | null;
   avgSpeed: number | null;
   maxSpeed: number | null;
   avgAltitude: number | null;
@@ -161,22 +166,72 @@ export interface SessionStats {
   bbox: { minLat: number; maxLat: number; minLon: number; maxLon: number };
   startTime: string;
   endTime: string | null;
-  // P1-6/P1-7: новые блоки ответа (опциональны для старых ответов)
+  // v2.9: полный набор метрик методологии (62 в 8 группах + routeId)
   methodology?: {
+    // Группа 1
+    movingTime: number;
+    idleTime: number;
+    gapTime: number;
+    // Группа 2
     speedP50: number | null;
     speedStdDev: number | null;
+    speedDistribution: number[];
     timeInTraffic: number;
     timeAtCruise: number;
     speedVariation: number;
+    // Группа 4 — поведение (включая v2.9 новые)
     harshBrakingCount: number;
     harshAccelCount: number;
-    ecoScore: number;
+    ecoScore: {
+      value: number | null;
+      brakingRate: number;
+      accelRate: number;
+      jerkRate: number;
+      rating: string;
+      baselineVersion: string;
+      breakdown: { brakingPenalty: number; accelPenalty: number; jerkPenalty: number };
+    };
+    accelerationRms: number | null;
+    jerkRms: number | null;
+    speedConsistencyIndex: number | null;
+    bearingConsistency: number | null;
+    uTurnCount: number;
+    turnCount: number;
+    highSpeedCornering: number;
+    // Группа 5
     routeEfficiency: number | null;
+    avgAccuracy: number | null;
+    // Группа 8
     pointDensity: number | null;
     gapCount: number;
     gapTotalDurationMs: number;
     accuracyP90: number | null;
     completenessScore: number;
+    sessionReliability: {
+      value: number | null;
+      completenessScore: number | null;
+      driftScore: number | null;
+      plausibilityScore: number | null;
+      rating: string;
+    };
+    // v2.9: служебные
+    activeTrip: {
+      hasActiveTrip: boolean;
+      activeStartTime: number;
+      activeEndTime: number;
+      activeDuration: number;
+      activeStartCoord: { lat: number; lon: number };
+      activeEndCoord: { lat: number; lon: number };
+      preTripIdle: number;
+      postTripIdle: number;
+      activeIdleTime: number;
+    };
+    motion: {
+      movingTime: number;
+      idleTime: number;
+      gapTime: number;
+      states: ("idle" | "moving" | "gap")[];
+    };
   };
   route?: {
     provider: string | null;

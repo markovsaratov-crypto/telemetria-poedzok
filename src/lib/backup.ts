@@ -6,6 +6,13 @@ import { promises as fs } from "fs";
 import { createHash } from "crypto";
 import path from "path";
 
+// P0-фикс v2.9.10 (Render build failure): Turbopack static analysis помечает
+// fs-операции с динамическим путём из env() как "dynamic filesystem access" →
+// трассировка всего проекта → build failed на Render. Используем СТАТИЧЕСКИЙ
+// путь (path.join из process.cwd() + литералов), который Turbopack может
+// проанализировать. Env-переопределение BACKUP_STORAGE_DIR намеренно не используется.
+const BACKUP_STORAGE_DIR = path.join(process.cwd(), "data", "backups");
+
 export async function runBackup(actorId?: string): Promise<{ backupId: string; filePath: string; checksum: string; fileSize: number; tableCounts: Record<string, number> }> {
   // Создаём BackupJob
   const job = await db.backupJob.create({
@@ -45,10 +52,10 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
     const checksum = createHash("sha256").update(content).digest("hex");
     const fileSize = Buffer.byteLength(content);
 
-    // Сохраняем в файл
-    await fs.mkdir(env().BACKUP_STORAGE_DIR, { recursive: true });
+    // Сохраняем в файл (статический путь — Turbopack-friendly, см. коммент в начале файла)
+    await fs.mkdir(BACKUP_STORAGE_DIR, { recursive: true });
     const fileName = `backup-${Date.now()}-${job.id}.json`;
-    const filePath = path.join(env().BACKUP_STORAGE_DIR, fileName);
+    const filePath = path.join(BACKUP_STORAGE_DIR, fileName);
     await fs.writeFile(filePath, content, "utf8");
 
     // Верификация: перечитываем и сравниваем checksum

@@ -1,4 +1,4 @@
-// sw.js — v2.9.9: service worker для installable PWA.
+// sw.js — v2.9.10: service worker для installable PWA (hotfix Render build failure).
 // Стратегии:
 //  - статика Next.js (/_next/static/*): cache-first (иммутаемые хэшированные ассеты)
 //  - иконки приложения (/icons/*): cache-first
@@ -6,13 +6,13 @@
 //  - всё остальное (API, тайлы карт): только сеть — телеметрия всегда свежая,
 //    тайлы Leaflet не раздуваем кэш (CARTO/Esri отдают своё кэширование)
 //
-// v2.9.9: управляемое обновление вместо мгновенного skipWaiting:
+// v2.9.9: управляемое обновление вместо мгновенного skipWaiting (без изменений в v2.9.10):
 //  - install БЕЗ skipWaiting → новый SW уходит в waiting
 //  - страница ловит waiting через useSwUpdate() → баннер «Доступна новая версия»
 //  - клик «Обновить» → postMessage SKIP_WAITING → activate → страница перезагружается
 //  (в v2.9.8 skipWaiting срабатывал сразу: старая вкладка оставалась на устаревшем
 //   бандле до ручной перезагрузки — «browser hangs on old tab»)
-const VERSION = "telem-v2.9.9";
+const VERSION = "telem-v2.9.10";
 const STATIC_CACHE = `${VERSION}-static`;
 const PAGES_CACHE = `${VERSION}-pages`;
 const OFFLINE_URL = "/offline.html";
@@ -23,7 +23,7 @@ self.addEventListener("install", (event) => {
     caches
       .open(STATIC_CACHE)
       .then((c) => c.addAll(PRECACHE))
-    // v2.9.9: без skipWaiting — обновление применяется по подтверждению пользователя
+    // v2.9.9+: без skipWaiting — обновление применяется по подтверждению пользователя
   );
 });
 
@@ -42,7 +42,7 @@ self.addEventListener("activate", (event) => {
   );
 });
 
-// v2.9.9: подтверждённое обновление — страница шлёт SKIP_WAITING,
+// v2.9.9+: подтверждённое обновление — страница шлёт SKIP_WAITING,
 // новый SW активируется, страница ловит controllerchange и перезагружается
 self.addEventListener("message", (event) => {
   if (event.data && event.data.type === "SKIP_WAITING") {

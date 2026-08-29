@@ -17,6 +17,8 @@ export default function MobilePage() {
   const auth = useAuth();
   const [tab, setTab] = React.useState<MobileTab>("analytics");
   const [selectedSession, setSelectedSession] = React.useState<string | null>(null);
+  // v2.9.7: deep-link из «Тяжёлых участков» — раскрыть конкретную группу на «Маршрутах»
+  const [routesExpandHash, setRoutesExpandHash] = React.useState<string | null>(null);
   const isAuthenticated = auth.data?.authenticated === true;
 
   if (!isAuthenticated) return <LoginForm onSuccess={() => auth.refetch()} />;
@@ -29,8 +31,15 @@ export default function MobilePage() {
       <div className="flex-1 overflow-y-auto">
         {tab === "trips" && <SessionListScreen onSessionTap={(id) => setSelectedSession(id)} onSettingsTap={() => setTab("admin")} />}
         {tab === "map" && <MapScreenWrapper onSessionTap={(id) => setSelectedSession(id)} />}
-        {tab === "analytics" && <AnalyticsScreen />}
-        {tab === "routes" && <RoutesScreen />}
+        {tab === "analytics" && (
+          <AnalyticsScreen
+            onGoToRoutes={(routeHash) => {
+              setRoutesExpandHash(routeHash ?? null);
+              setTab("routes");
+            }}
+          />
+        )}
+        {tab === "routes" && <RoutesScreen expandHash={routesExpandHash} />}
         {tab === "admin" && <AdminScreen onBack={() => setTab("trips")} onLogout={() => auth.refetch()} />}
       </div>
     </div>

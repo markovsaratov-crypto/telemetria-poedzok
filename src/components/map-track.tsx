@@ -32,13 +32,27 @@ export interface MapMarker {
   lon: number;
   label?: string;
   variant?: "start" | "end" | "pin";
+  // v2.9.7: цвет маркера (сравнение поездок — цвет трека сессии)
+  color?: string;
+  // v2.9.7: не показывать постоянную подпись на иконке (только Tooltip при hover)
+  hideIconLabel?: boolean;
 }
 
 type LayerKind = "voyager" | "dark" | "satellite" | "street";
 
+// v2.9.7: цветной трек для сравнения поездок — каждая поездка своей полилинией
+export interface ColoredTrack {
+  points: Array<{ lat: number; lon: number }>;
+  color: string;
+  label?: string;
+}
+
 interface MapTrackProps {
   points?: Array<{ lat: number; lon: number }>;
   markers?: MapMarker[];
+  // v2.9.7: несколько цветных треков на одной карте (сравнение поездок).
+  // Если задан — обычный points-трек не рисуется.
+  tracks?: ColoredTrack[];
   height?: string;
   className?: string;
   interactive?: boolean;
@@ -81,13 +95,21 @@ const LAYERS: Record<LayerKind, { url: string; attr: string; label: string; maxZ
 };
 
 // Кастомные иконки (без внешних PNG — используем divIcon с CSS).
-function makeIcon(variant: "start" | "end" | "pin", label?: string): L.DivIcon {
+function makeIcon(
+  variant: "start" | "end" | "pin",
+  label?: string,
+  colorOverride?: string,
+  hideIconLabel?: boolean
+): L.DivIcon {
   const colorMap: Record<string, string> = {
     start: "#10b981", // emerald-500
     end: "#f59e0b", // amber-500
     pin: "#0d9488", // teal-600
   };
-  const color = colorMap[variant];
+  const color = colorOverride || colorMap[variant];
+  // v2.9.7 (стайлинг-раунд 8): подпись только если явно не скрыта —
+  // постоянные подписи перекрывали друг друга при нескольких треках
+  const showLabel = label && !hideIconLabel;
   const html = `
     <div style="position:relative;display:flex;flex-direction:column;align-items:center;">
       <div style="
@@ -97,7 +119,7 @@ function makeIcon(variant: "start" | "end" | "pin", label?: string): L.DivIcon {
         box-shadow:0 0 0 2px ${color},0 2px 6px rgba(0,0,0,0.35);
       "></div>
       ${
-        label
+        showLabel
           ? `<div style="
         margin-top:4px;
         background:rgba(255,255,255,0.95);
@@ -198,6 +220,7 @@ function MapEvents({
 export default function MapTrack({
   points = [],
   markers = [],
+  tracks,
   height = "320px",
   className,
   interactive = true,
@@ -227,15 +250,32 @@ export default function MapTrack({
     [points]
   );
 
+  // v2.9.7: цветные треки для сравнения (каждая поездка — свой цвет)
+  const coloredTracks = React.useMemo(
+    () =>
+      (tracks || [])
+        .map((t) => ({
+          ...t,
+          positions: t.points
+            .filter((p) => typeof p.lat === "number" && typeof p.lon === "number")
+            .map((p) => [p.lat, p.lon] as [number, number]),
+        }))
+        .filter((t) => t.positions.length >= 2),
+    [tracks]
+  );
+
   const fitPositions = React.useMemo(() => {
     const arr: Array<[number, number]> = [...polylinePositions];
+    for (const t of coloredTracks) {
+      arr.push(...t.positions);
+    }
     for (const m of markers) {
       arr.push([m.lat, m.lon]);
     }
     return arr;
-  }, [polylinePositions, markers]);
+  }, [polylinePositions, coloredTracks, markers]);
 
-  const hasContent = polylinePositions.length > 0 || markers.length > 0;
+  const hasContent = polylinePositions.length > 0 || markers.length > 0 || coloredTracks.length > 0;
   const effectiveCenter: [number, number] =
     hasContent && fitPositions.length > 0
       ? fitPositions[fitPositions.length - 1]
@@ -262,7 +302,47 @@ export default function MapTrack({
         <TileLayer url={tileUrl} attribution={tileAttr} maxZoom={tileMaxZoom} />
         <ZoomControl position="topright" />
         <ScaleControl position="bottomleft" imperial={false} metric={true} />
-        {polylinePositions.length >= 2 && (
+        {coloredTracks.length > 0
+          ? // v2.9.7: сравнение поездок — каждая своей полилинией + glow;
+            // стайлинг-раунд 8: чередование solid/dashed для различимости
+            // при цветовой слепоте (Deuteranopia) + белая окантовка
+            coloredTracks.map((t, i) => (
+              <React.Fragment key={`track-${i}`}>
+                {/* Касинг — белая окантовка под цветной линией для контраста с картой */}
+                <Polyline
+                  positions={t.positions}
+                  pathOptions={{
+                    color: "#ffffff",
+                    weight: 7,
+                    opacity: 0.55,
+                    lineJoin: "round",
+                    lineCap: "round",
+                  }}
+                />
+                <Polyline
+                  positions={t.positions}
+                  pathOptions={{
+                    color: t.color,
+                    weight: 4,
+                    opacity: 0.95,
+                    lineJoin: "round",
+                    lineCap: "round",
+                    ...(i % 2 === 1 ? { dashArray: "10 7" } : {}),
+                  }}
+                />
+                <Polyline
+                  positions={t.positions}
+                  pathOptions={{
+                    color: t.color,
+                    weight: 10,
+                    opacity: 0.14,
+                    lineJoin: "round",
+                    lineCap: "round",
+                  }}
+                />
+              </React.Fragment>
+            ))
+          : polylinePositions.length >= 2 && (
           <>
             <Polyline
               positions={polylinePositions}
@@ -291,9 +371,10 @@ export default function MapTrack({
           <Marker
             key={`${m.lat}-${m.lon}-${i}`}
             position={[m.lat, m.lon]}
-            icon={makeIcon(m.variant || "pin", m.label)}
+            icon={makeIcon(m.variant || "pin", m.label, m.color, m.hideIconLabel)}
             interactive={!!m.label}
           >
+            {m.label && <Tooltip direction="top" offset={[0, -12]} opacity={1}><span className="text-[10px] font-medium">{m.label}</span></Tooltip>}
             {m.label && (
               <Popup>
                 <div className="text-xs">{m.label}</div>

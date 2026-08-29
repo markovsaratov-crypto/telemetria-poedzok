@@ -55,6 +55,8 @@ export default function Home() {
   const queryClient = useQueryClient();
   const [tab, setTab] = React.useState("overview");
   const [selectedSession, setSelectedSession] = React.useState<string | null>(null);
+  // v2.9.7: deep-link из виджета «Тяжёлые участки» — раскрыть конкретную группу на «Маршрутах»
+  const [routesExpandHash, setRoutesExpandHash] = React.useState<string | null>(null);
   const [cmdOpen, setCmdOpen] = React.useState(false);
   const [helpOpen, setHelpOpen] = React.useState(false);
   const [searchOpen, setSearchOpen] = React.useState(false);
@@ -252,8 +254,14 @@ export default function Home() {
                   onGoToSessions={() => setTab("sessions")}
                 />
                 {/* v2.9.6: виджет «Тяжёлые участки» — худшие P75-хотспоты всех групп */}
+                {/* v2.9.7: клик по мини-карте раскрывает конкретную группу на «Маршрутах» */}
                 <div className="mt-4">
-                  <HeavySegmentsCard onGoToRoutes={() => setTab("routes")} />
+                  <HeavySegmentsCard
+                    onGoToRoutes={(routeHash) => {
+                      setRoutesExpandHash(routeHash ?? null);
+                      setTab("routes");
+                    }}
+                  />
                 </div>
               </TabsContent>
 
@@ -280,7 +288,7 @@ export default function Home() {
 
               <TabsContent value="routes" className="mt-0 space-y-4">
                 {/* v2.9 §10: группы маршрутов по routeHash (сравнительные метрики) */}
-                <RouteGroups />
+                <RouteGroups expandHash={routesExpandHash} />
                 <RoutesManager />
               </TabsContent>
 

@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { useSessions, useBatchSessions } from "@/lib/hooks";
 import type { BatchSession } from "@/lib/hooks";
-import type { ColoredTrack } from "@/components/map-track";
+import type { ColoredTrack } from "@/lib/speed-buckets";
 import {
   Card,
   CardContent,

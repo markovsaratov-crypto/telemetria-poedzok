@@ -15,7 +15,7 @@ import {
   Coffee,
   Mountain,
 } from "lucide-react";
-import { useSessionStats } from "@/lib/hooks";
+import { useSessionStats, useRouteComparison } from "@/lib/hooks";
 import {
   Card,
   CardContent,
@@ -177,8 +177,41 @@ export function SessionStatsCard({ sessionId }: SessionStatsCardProps) {
         {stats.methodology && <MethodologyGrid m={stats.methodology} />}
         {/* P1-7: план-фактный анализ из результата ворчера */}
         {stats.route && (stats.route.planDistanceM != null || stats.route.trafficFetched) && <PlanFactBlock r={stats.route} />}
+        {/* v2.9 §10: сравнение с routeHash-группой */}
+        <RouteComparisonBlock sessionId={sessionId} />
       </CardContent>
     </Card>
+  );
+}
+
+// ——— v2.9 §10: сравнение сессии с её routeHash-группой ———
+function RouteComparisonBlock({ sessionId }: { sessionId: string }) {
+  const { data: cmp, isLoading } = useRouteComparison(sessionId);
+  if (isLoading) return <Skeleton className="h-16 w-full shimmer" />;
+  if (!cmp || cmp.groupSize < 2) return null; // одиночная поездка — не с чем сравнивать
+
+  const vsAvg = cmp.vsAvgPct;
+  const vsAvgColor = vsAvg == null ? "" : vsAvg > 10 ? "text-red-600 dark:text-red-400" : vsAvg > 0 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400";
+  const items = [
+    { label: "Группа маршрута", value: `${cmp.groupSize} поездок`, sub: `routeHash ${cmp.routeHash.slice(0, 8)}…` },
+    { label: "Среднее время", value: formatDuration(cmp.stats.avg ?? 0), sub: `лучшее ${formatDuration(cmp.stats.best ?? 0)} · худшее ${formatDuration(cmp.stats.worst ?? 0)}` },
+    { label: "Место в группе", value: cmp.rank != null ? `${cmp.rank} из ${cmp.groupSize}` : "—", sub: cmp.percentile != null ? `перцентиль ${cmp.percentile}` : "единственная" },
+    { label: "Δ к среднему", value: vsAvg != null ? `${vsAvg > 0 ? "+" : ""}${vsAvg}%` : "—", sub: "эта поездка vs группа", color: vsAvgColor },
+    { label: "StdDev группы", value: cmp.stats.stdDev != null ? formatDuration(cmp.stats.stdDev) : "—", sub: `надёжных: ${cmp.stats.eligibleCount}/${cmp.stats.totalCount}` },
+  ];
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1.5">Сравнение с маршрутом (§10)</div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+        {items.map((it, i) => (
+          <div key={i} className="rounded-lg border bg-card/40 p-2.5 space-y-1">
+            <div className="text-[10px] text-muted-foreground truncate">{it.label}</div>
+            <div className={cn("text-sm font-semibold tabular-nums truncate", it.color || "")}>{it.value}</div>
+            <div className="text-[9px] text-muted-foreground truncate">{it.sub}</div>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

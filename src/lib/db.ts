@@ -156,7 +156,8 @@ export const db = {
           sql = sql.replace("deletedAt IS NULL", "deletedAt IS NOT NULL");
         }
       }
-      const pa = w.purgedAt as { /* null | { lt } */ } | undefined;
+      // purgedAt: null | { lt: Date | number } — обрабатываем оба варианта
+      const pa = w.purgedAt as null | { lt?: Date | number; not?: unknown } | undefined;
       if (pa === undefined || pa === null || (pa && (pa as { not?: unknown }).not === undefined && Object.keys(pa).length === 0)) {
         sql += " AND purgedAt IS NULL"; // purgedAt: null — дефолт
       } else if (pa && (pa as { lt?: Date | number }).lt != null) {

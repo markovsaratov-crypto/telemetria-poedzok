@@ -1314,6 +1314,7 @@ libsql dump.sql -u libsql://... -t token
 | /api/plan/[sessionId]                     | GET              | Cookie/API_KEY      | План/сегменты сессии (с результатом HMM map matching)   |
 | /api/routes                               | GET/POST         | Cookie/API_KEY      | CRUD маршрутов                                          |
 | /api/routes/[id]                          | GET/PATCH/DELETE | Cookie/API_KEY      | CRUD одного маршрута                                    |
+| /api/routes/grouped                       | GET              | Cookie/API_KEY      | routeHash-группы концептуально одинаковых поездок (§10.0) с агрегатами |
 | /api/routes/[id]/trend                    | GET              | Cookie/API_KEY      | Theil-Sen-тренд activeDuration по сессиям routeId + CI 95% |
 | /api/routes/[id]/hotspots                 | GET              | Cookie/API_KEY      | HotspotSegments (P75 < 0.5) по сессиям routeId          |
 | /api/exports/[jobId]                      | GET              | Cookie/API_KEY      | Статус экспорта                                         |
@@ -1341,7 +1342,7 @@ libsql dump.sql -u libsql://... -t token
 | /api/test-2gis                            | GET              | Cookie              | Тест 2ГИС API                                          |
 | /api/cron/finalize-sessions               | POST             | Bearer CRON_SECRET  | Финализация сессий                                      |
 
-> Endpoints `/api/sessions/[id]/route-comparison`, `/api/routes/[id]/trend`, `/api/routes/[id]/hotspots` — новый v2.9-контракт. Если на момент релиза реализация ещё не завершена, сервер возвращает HTTP 501 Not Implemented до окончания фазы кода; методология v2.9 описывает их контракты.
+> Endpoints `/api/sessions/[id]/route-comparison`, `/api/routes/[id]/trend`, `/api/routes/[id]/hotspots`, `/api/routes/grouped` — реализованы в v2.9 (см. `src/lib/route-comparison.ts`): группировка по `Session.routeHash` (§10.0), агрегаты по `activeDuration` с фильтром `SessionReliability ≥ 0.6` (§10.1), Theil-Sen + bootstrap (§10.5), P75-хотспоты (§10.6). Для `[id]` trend/hotspots принимают routeHash (16-hex) либо UUID админского Route (fallback по FK).
 
 ## Приложение Б. Глоссарий
 

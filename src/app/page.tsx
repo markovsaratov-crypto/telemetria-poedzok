@@ -30,6 +30,7 @@ import { SessionsList } from "@/components/sessions-list";
 import { SessionDetail } from "@/components/session-detail";
 import { SessionCompare } from "@/components/session-compare";
 import { RoutesManager } from "@/components/routes-manager";
+import { RouteGroups } from "@/components/route-groups";
 import { CsvImport } from "@/components/csv-import";
 import { ZipImport } from "@/components/zip-import";
 import { AdminPanel } from "@/components/admin-panel";
@@ -273,6 +274,8 @@ export default function Home() {
               </TabsContent>
 
               <TabsContent value="routes" className="mt-0 space-y-4">
+                {/* v2.9 §10: группы маршрутов по routeHash (сравнительные метрики) */}
+                <RouteGroups />
                 <RoutesManager />
               </TabsContent>
 

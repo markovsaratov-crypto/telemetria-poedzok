@@ -33,3 +33,29 @@ f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-pro
 #   OPERATIONS.md — без изменений:
 #   8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a  docs/OPERATIONS.md
 # Следующий полный бэкап (/api/admin/backup) зафиксирует новые SHA256 целиком.
+#
+# ── v2.9.2 addendum (2026-08-29) ────────────────────────────────────────────
+# Релиз v2.9.2 (feature round 3): CSV-экспорт агрегатов routeHash-групп
+# (GET /api/routes/grouped/export?format=csv), мобильная секция групп с
+# мини-картами + GPX-кнопкой (mobile/Routes/RoutesScreen), общий компонент
+# MiniMap (src/components/mini-map.tsx), стайлинг-паттерны (.empty-state,
+# .section-rule, .icon-chip) + elevation/hover на settings-card и sessions-list.
+#
+# Prod-бэкап v2.9.2 (POST /api/admin/backup с ADMIN_TOKEN):
+#   backupId:    a3fe5e39-3221-479e-a2a9-4d98e2077b58
+#   status:      completed (HTTP 201, 12.2 с)
+#   checksum:    e0b0d3d773f38273c7468a5771bfc282ae4e1f34ef7bca9d2c8e43dfd77a5a05
+#   fileSize:    9 781 992 байт (9.8 МБ)
+#   tableCounts: Session=46, GpsPoint=25998, Route=0, RouteCache=0,
+#                TrafficJob=45, AuditLog=58, ExportJob=5, BackupJob=10,
+#                Setting=15, User=2
+# Открытый пункт «прогнать свежий /api/admin/backup» (Task 10 final) — закрыт.
+#
+# Документы в репо (текущие, v2.9.2):
+#   ADMIN_SPEC.md: 96a50fc1cef039da596106ea5686a4dc0381f87596f3ceeec3faa2e5ddd85ebb
+#   METHODOLOGY.md — без изменений: 7990e0f1e40e532487aa5a6a573b4a9dacbeae224798e46c007a30207329143b
+#   OPERATIONS.md — без изменений: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a
+#
+# Бэкап-артефакты выше (v2.9 backup от 2026-08-29T00:56:25) — без изменений.
+# Файл prod-бэкапа лежит в эфемерном volume Render; скачивание — через
+# /api/exports/[jobId]/download с токеном из BackupJob.

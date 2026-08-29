@@ -4,6 +4,8 @@
 // SVG-график с градиентной заливкой, полосой состояний (движение/стоянка/разрыв §4.6),
 // референсной линией средней скорости, маркером максимума и hover-кросхейром.
 // Общий для десктопа (session-stats-card) и мобильной версии (SessionDetailScreen).
+// v2.9.4: связка карта↔график — сэмплы несут lat/lng; onHoverIdx/onPinIdx/externalIdx
+// синхронизируют кросхейр с маркером на карте (клик по графику = закрепление точки).
 
 import * as React from "react";
 import { cn } from "@/lib/utils";
@@ -12,6 +14,9 @@ export interface SpeedProfilePointView {
   t: number; // сек от начала
   v: number | null; // км/ч
   st: 0 | 1 | 2; // 0 idle, 1 moving, 2 gap
+  alt?: number | null; // м (v2.9.4)
+  lat?: number; // v2.9.4: для маркера на карте
+  lng?: number; // v2.9.4
 }
 
 interface SpeedProfileChartProps {
@@ -22,6 +27,11 @@ interface SpeedProfileChartProps {
   height?: number; // px высота области графика
   compact?: boolean; // мобильный режим: меньше подписей
   className?: string;
+  // v2.9.4: связка карта↔график
+  onHoverIdx?: (idx: number | null) => void; // hover по графику (null — курсор ушёл)
+  onPinIdx?: (idx: number | null) => void; // клик по графику (закрепить/открепить точку)
+  externalIdx?: number | null; // внешний индекс (клик по карте) — показать кросхейр
+  pinnedIdx?: number | null; // закреплённый индекс — рисуем маркер-пин
 }
 
 const STATE_COLORS: Record<0 | 1 | 2, string> = {
@@ -52,6 +62,10 @@ export function SpeedProfileChart({
   height = 208,
   compact = false,
   className,
+  onHoverIdx,
+  onPinIdx,
+  externalIdx,
+  pinnedIdx,
 }: SpeedProfileChartProps) {
   const wrapRef = React.useRef<HTMLDivElement>(null);
   const [hover, setHover] = React.useState<{ x: number; idx: number } | null>(null);
@@ -156,6 +170,7 @@ export function SpeedProfileChart({
       const tRatio = (relX - PAD.left) / plotW;
       if (tRatio < 0 || tRatio > 1) {
         setHover(null);
+        onHoverIdx?.(null);
         return;
       }
       const t = tRatio * geom.tMax;
@@ -170,9 +185,23 @@ export function SpeedProfileChart({
         }
       }
       setHover({ x: geom.x(profile[idx].t), idx });
+      onHoverIdx?.(idx);
     },
-    [geom, PAD.left, plotW, profile]
+    [geom, PAD.left, plotW, profile, onHoverIdx]
   );
+
+  // v2.9.4: клик по графику — закрепить точку (повторный клик по той же — открепить)
+  const onClick = React.useCallback(() => {
+    if (!onPinIdx) return;
+    const idx = hover?.idx ?? externalIdx ?? null;
+    if (idx == null) return;
+    onPinIdx(pinnedIdx === idx ? null : idx);
+  }, [onPinIdx, hover, externalIdx, pinnedIdx]);
+
+  // v2.9.4: эффективная точка кросхейра — hover > внешний (карта) > закреплённая
+  const activeIdx = hover?.idx ?? externalIdx ?? pinnedIdx ?? null;
+  const activeX =
+    activeIdx != null && geom ? geom.x(profile[activeIdx].t) : null;
 
   if (!geom) {
     return (
@@ -188,8 +217,12 @@ export function SpeedProfileChart({
     );
   }
 
-  const hoverP = hover ? profile[hover.idx] : null;
-  const hoverLeftPct = hover ? (hover.x / W) * 100 : 0;
+  // v2.9.4: точка для тултипа — с учётом внешнего/закреплённого индекса
+  const tipIdx = activeIdx;
+  const tipP = tipIdx != null ? profile[tipIdx] : null;
+  const tipX = activeX;
+  const tipLeftPct = tipX != null ? (tipX / W) * 100 : 0;
+  const isPinned = pinnedIdx != null && pinnedIdx === tipIdx;
 
   return (
     <div className={cn("relative select-none", className)}>
@@ -221,9 +254,16 @@ export function SpeedProfileChart({
 
       <div
         ref={wrapRef}
-        className="relative rounded-lg border bg-card/50 overflow-hidden"
+        className={cn(
+          "relative rounded-lg border bg-card/50 overflow-hidden",
+          onPinIdx && "cursor-crosshair"
+        )}
         onPointerMove={onMove}
-        onPointerLeave={() => setHover(null)}
+        onPointerLeave={() => {
+          setHover(null);
+          onHoverIdx?.(null);
+        }}
+        onClick={onClick}
       >
         <svg
           viewBox={`0 0 ${W} ${H}`}
@@ -380,52 +420,62 @@ export function SpeedProfileChart({
             );
           })}
 
-          {/* Кросхейр */}
-          {hover && hoverP && (
+          {/* Кросхейр: hover > внешний (карта) > закреплённая точка */}
+          {tipX != null && tipP && (
             <g>
               <line
-                x1={hover.x}
-                x2={hover.x}
+                x1={tipX}
+                x2={tipX}
                 y1={PAD.top}
                 y2={PAD.top + plotH + 4 + ribbonH}
-                stroke="oklch(0.55 0.18 350 / 0.55)"
-                strokeWidth="1"
-                strokeDasharray="3 3"
+                stroke={isPinned ? "oklch(0.62 0.19 350)" : "oklch(0.55 0.18 350 / 0.55)"}
+                strokeWidth={isPinned ? 1.5 : 1}
+                strokeDasharray={isPinned ? "" : "3 3"}
               />
-              {hoverP.v != null && (
+              {tipP.v != null && (
                 <circle
-                  cx={hover.x}
-                  cy={geom.y(hoverP.v)}
-                  r={3.5}
+                  cx={tipX}
+                  cy={geom.y(tipP.v)}
+                  r={isPinned ? 4.5 : 3.5}
                   fill="oklch(0.62 0.19 350)"
                   stroke="oklch(0.99 0.005 350)"
                   strokeWidth="1.5"
+                />
+              )}
+              {/* v2.9.4: флажок-пин закреплённой точки */}
+              {isPinned && (
+                <circle
+                  cx={tipX}
+                  cy={PAD.top - 5}
+                  r={2.5}
+                  fill="oklch(0.62 0.19 350)"
                 />
               )}
             </g>
           )}
         </svg>
 
-        {/* Tooltip */}
-        {hover && hoverP && (
+        {/* Tooltip (hover / внешний / закреплённая точка) */}
+        {tipP && tipX != null && (
           <div
             className="pointer-events-none absolute top-1.5 z-10 rounded-md border bg-popover/95 backdrop-blur-sm px-2 py-1 text-[10px] shadow-sm whitespace-nowrap"
             style={{
-              left: `${hoverLeftPct}%`,
-              transform: hoverLeftPct > 70 ? "translateX(-100%)" : "translateX(6px)",
+              left: `${tipLeftPct}%`,
+              transform: tipLeftPct > 70 ? "translateX(-100%)" : "translateX(6px)",
             }}
           >
             <div className="text-muted-foreground tabular-nums">
-              {startMs > 0 ? fmtClock(startMs, hoverP.t) : fmtDurationShort(hoverP.t)}
+              {startMs > 0 ? fmtClock(startMs, tipP.t) : fmtDurationShort(tipP.t)}
               <span className="mx-1 opacity-40">·</span>
-              +{fmtDurationShort(hoverP.t)}
+              +{fmtDurationShort(tipP.t)}
             </div>
             <div className="font-semibold tabular-nums">
-              {hoverP.v != null ? `${hoverP.v} км/ч` : "нет данных"}
+              {tipP.v != null ? `${tipP.v} км/ч` : "нет данных"}
               <span
                 className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full align-middle"
-                style={{ background: STATE_COLORS[hoverP.st] }}
+                style={{ background: STATE_COLORS[tipP.st] }}
               />
+              {isPinned && <span className="ml-1 opacity-60">· закреплено</span>}
             </div>
           </div>
         )}

@@ -7,7 +7,7 @@ import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { computeMethodologyMetrics } from "@/lib/metrics-methodology";
+import { computeMethodologyMetrics, calibrateEcoScoreBaselinesFromCorpus, type EcoScoreBaselines } from "@/lib/metrics-methodology";
 import { avgSpeedMs, meanPointSpeedMs, maxSpeedMs } from "@/lib/kpi"; // P2-13: единый источник KPI
 import { haversineM } from "@/lib/geo"; // P2-14: канонический гаверсинус
 import { trackLatency } from "@/lib/latency"; // P2-16: замер api_latency_p95
@@ -110,6 +110,70 @@ async function computePlanFact(
 
 const EARTH_R = 6371000; // (оставлено для совместимости сигнатур; расчёт — в metrics-methodology)
 void EARTH_R;
+
+// ——— v2.10.0 R6.1: corpus-calibrated CAP baselines (§7.3) ———
+// Iterate all non-deleted sessions once, compute braking/accel/jerk rates per session,
+// take median as baseline for EcoScore penalty formula. Cached for CORPUS_CACHE_TTL_MS.
+// Production-correct: avoids EcoScore=0 on noisy synthetic CSV data (default baselines
+// 0.5/0.4/0.3 are calibrated for high-quality real GPS data).
+const CORPUS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+let _corpusCache: { baselines: EcoScoreBaselines; ts: number } | null = null;
+
+async function getCorpusEcoBaselines(): Promise<EcoScoreBaselines> {
+  if (_corpusCache && Date.now() - _corpusCache.ts < CORPUS_CACHE_TTL_MS) {
+    return _corpusCache.baselines;
+  }
+  try {
+    // Get all non-deleted sessions with their points
+    const sessions = await libsql.execute({
+      sql: `SELECT s.id, s.startTime, s.endTime FROM Session s WHERE s.deletedAt IS NULL ORDER BY s.startTime DESC`,
+    });
+    const rates: { braking: number; accel: number; jerk: number }[] = [];
+    for (const row of sessions.rows) {
+      const sid = row.id as string;
+      const pts = await libsql.execute({
+        sql: "SELECT lat, lon, timestamp, speed, bearing, altitude, accuracy FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC",
+        args: [sid],
+      });
+      const points = pts.rows.map((p: Record<string, unknown>) => ({
+        lat: p.lat as number,
+        lon: p.lon as number,
+        timestamp: Number(p.timestamp),
+        speed: p.speed == null ? null : (p.speed as number),
+        bearing: p.bearing == null ? null : (p.bearing as number),
+        altitude: p.altitude == null ? null : (p.altitude as number),
+        // v2.10.0 R6.1: accuracy field is required by MethodologyPoint interface; GpsPoint
+        // table may not have it populated for legacy rows → default null.
+        accuracy: (p.accuracy as number | undefined) ?? null,
+      }));
+      if (points.length < 60) continue;
+      const startTime = Number(row.startTime);
+      const endTime = row.endTime ? Number(row.endTime) : points[points.length - 1].timestamp;
+      const durationSec = Math.max(0, (endTime - startTime) / 1000);
+      // Distance via haversine
+      let distance = 0;
+      for (let i = 1; i < points.length; i++) {
+        const R = 6371000;
+        const dLat = ((points[i].lat - points[i - 1].lat) * Math.PI) / 180;
+        const dLon = ((points[i].lon - points[i - 1].lon) * Math.PI) / 180;
+        const a = Math.sin(dLat / 2) ** 2 + Math.cos((points[i - 1].lat * Math.PI) / 180) * Math.cos((points[i].lat * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+        distance += 2 * R * Math.asin(Math.sqrt(a));
+      }
+      const m = computeMethodologyMetrics(points, distance, durationSec);
+      if (m.ecoScore.value == null) continue;
+      rates.push({ braking: m.ecoScore.brakingRate, accel: m.ecoScore.accelRate, jerk: m.ecoScore.jerkRate });
+    }
+    const baselines = calibrateEcoScoreBaselinesFromCorpus(rates);
+    _corpusCache = { baselines, ts: Date.now() };
+    return baselines;
+  } catch (err) {
+    logger.warn("corpus baseline calibration failed, using defaults", {
+      requestId: "corpus",
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return calibrateEcoScoreBaselinesFromCorpus([]);
+  }
+}
 
 // ——— v2.9.3: спидограмма — даунсемпл GPS-точек для графика скорость-время ———
 // v2.9.4: сэмпл расширен полями alt (высотный профиль) и lat/lng (связка карта↔график).
@@ -291,7 +355,10 @@ export async function GET(
     const durationSec = Math.max(0, (endTime - startTime) / 1000);
 
     // v2.9: метрики методологии (§12) — state machine + ActiveTrip + CAP EcoScore + новые поведенческие
-    const methodology = computeMethodologyMetrics(points, distance, durationSec);
+    // v2.10.0 R6.1: EcoScore использует corpus-calibrated baselines (median of all sessions in DB)
+    // instead of DEFAULT_BASELINES that produce EcoScore=0 on noisy synthetic CSV data.
+    const ecoBaselines = await getCorpusEcoBaselines();
+    const methodology = computeMethodologyMetrics(points, distance, durationSec, ecoBaselines);
     // v2.9: AvgSpeed = Distance / ActiveDuration (§4.3 + §4.11)
     const avgSpeed = avgSpeedMs(distance, durationSec, methodology.activeTrip.activeDuration);
     const speedMean = meanPointSpeedMs(points);

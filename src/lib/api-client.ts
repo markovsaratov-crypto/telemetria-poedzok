@@ -293,3 +293,126 @@ export interface PlanResponse {
   trafficJobId?: string | null;
   cached?: boolean;
 }
+
+// ===== v2.10.0: Типы ответов для v4 analytics (R1 Live API) =====
+
+export interface TrackPoint {
+  i: number;
+  t: number; // сек от старта
+  lat: number;
+  lng: number;
+  v: number | null; // м/с
+  alt: number | null;
+  brg: number | null;
+  acc: number | null;
+  st: 0 | 1; // 0=idle, 1=moving
+}
+
+export interface TrackSegment {
+  color: string;
+  bucket: string;
+  points: Array<{ lat: number; lng: number }>;
+  startIndex: number;
+  endIndex: number;
+}
+
+export interface TrackGap {
+  fromIdx: number;
+  toIdx: number;
+  durationSec: number;
+}
+
+export interface TrackHarshPoint {
+  lat: number;
+  lng: number;
+  type: "braking" | "acceleration";
+  dv: number;
+  idx: number;
+  t: number;
+}
+
+export interface TrackMarkers {
+  start: { lat: number; lng: number; t: number };
+  finish: { lat: number; lng: number; t: number };
+}
+
+export interface TrackResponse {
+  sessionId: string;
+  deviceId: string;
+  startTime: string | number;
+  endTime: string | number | null;
+  pointCount: number;
+  bounds: [[number, number], [number, number]] | null;
+  points: TrackPoint[];
+  segments: TrackSegment[];
+  gaps: TrackGap[];
+  harshPoints: TrackHarshPoint[];
+  markers: TrackMarkers | null;
+  defaultLayer: string;
+  availableLayers: string[];
+  legend: Array<{ color: string; label: string }>;
+}
+
+export interface Maneuver {
+  lat: number;
+  lng: number;
+  t: number;
+  longA: number; // м/с²
+  latA: number; // м/с²
+  speed: number; // км/ч
+  bearing: number;
+}
+
+export interface EventsHarshEvent {
+  lat: number;
+  lng: number;
+  type: "braking" | "acceleration";
+  longA: number;
+  t: number;
+  speed: number;
+}
+
+export interface HscEvent {
+  lat: number;
+  lng: number;
+  t: number;
+  turnDeg: number;
+  speed: number;
+}
+
+export interface GgPoint {
+  x: number; // longA / g
+  y: number; // latA / g
+}
+
+export interface EventsSummary {
+  accelerationRMS: number; // м/с²
+  jerkRMS: number; // м/с³
+  harshBraking: number;
+  harshAcceleration: number;
+  maneuvers: number;
+  hscCount: number;
+}
+
+export interface EventsResponse {
+  sessionId: string;
+  deviceId: string;
+  maneuvers: Maneuver[];
+  gg: {
+    points: GgPoint[];
+    rings: number[]; // [0.2, 0.4, 0.6]
+  };
+  harshEvents: EventsHarshEvent[];
+  hscEvents: HscEvent[];
+  summary: EventsSummary;
+}
+
+// Скоростной профиль точки из /api/sessions/[id]/stats (v2.9.3+)
+export interface SpeedProfilePoint {
+  t: number; // сек от старта
+  v: number | null; // км/ч (null = нет GPS-скорости)
+  st: 0 | 1 | 2; // 0=idle, 1=moving, 2=gap
+  alt?: number | null;
+  lat?: number;
+  lng?: number;
+}

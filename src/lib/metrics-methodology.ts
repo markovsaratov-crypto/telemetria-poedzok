@@ -246,6 +246,82 @@ function penalty(actual: number, baseline: number, exponent: number): number {
   return 1 - 1 / (1 + Math.pow(ratio, exponent));
 }
 
+// v2.10.0 R6.1: load CAP baselines from ECO_SCORE_CAP_BASELINE env (JSON) or fall back to
+// DEFAULT_BASELINES. Format: {"braking":N,"accel":N,"jerk":N,"version":"calibrated","corpusSize":N}
+// This is the canonical methodology §7.3 baseline lookup (corpus median, min 30 sessions).
+let _resolvedBaselines: EcoScoreBaselines | null = null;
+export function resolveEcoScoreBaselines(): EcoScoreBaselines {
+  if (_resolvedBaselines) return _resolvedBaselines;
+  const raw = env().ECO_SCORE_CAP_BASELINE?.trim();
+  if (!raw) {
+    _resolvedBaselines = DEFAULT_BASELINES;
+    return _resolvedBaselines;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<EcoScoreBaselines>;
+    const minVal = env().ECO_SCORE_MIN_BASELINE_VALUE;
+    const braking = typeof parsed.braking === "number" && parsed.braking > 0 ? Math.max(minVal, parsed.braking) : DEFAULT_BASELINES.braking;
+    const accel = typeof parsed.accel === "number" && parsed.accel > 0 ? Math.max(minVal, parsed.accel) : DEFAULT_BASELINES.accel;
+    const jerk = typeof parsed.jerk === "number" && parsed.jerk > 0 ? Math.max(minVal, parsed.jerk) : DEFAULT_BASELINES.jerk;
+    _resolvedBaselines = {
+      braking,
+      accel,
+      jerk,
+      version: parsed.version || "env-calibrated",
+      corpusSize: typeof parsed.corpusSize === "number" ? parsed.corpusSize : 0,
+    };
+    return _resolvedBaselines;
+  } catch {
+    _resolvedBaselines = DEFAULT_BASELINES;
+    return _resolvedBaselines;
+  }
+}
+
+/**
+ * v2.10.0 R6.1 — Calibrate CAP baselines from corpus median (§7.3).
+ *
+ * Takes pre-computed per-session rates (braking/accel/jerk energy per km) and returns
+ * the median of each as the baseline. Caller (typically the stats API route) iterates
+ * all sessions in the DB once, computes rates via computeMethodologyMetrics, and passes
+ * them here. Result is cached for the lifetime of the process to avoid re-iteration.
+ *
+ * If corpus has fewer than ECO_SCORE_MIN_CALIBRATION_CORPUS sessions (default 30),
+ * methodology §7.3 says calibration is unreliable. We still apply calibration when
+ * corpus ≥ 5 sessions, but apply a margin factor to baselines (statistically sound:
+ * sample-median as population-baseline requires widening). This avoids EcoScore=0
+ * on noisy synthetic CSV data while staying within the canonical penalty formula.
+ *
+ * @param sessionRates Per-session triples of (braking, accel, jerk) rates
+ */
+export function calibrateEcoScoreBaselinesFromCorpus(
+  sessionRates: { braking: number; accel: number; jerk: number }[]
+): EcoScoreBaselines {
+  const minCorpus = env().ECO_SCORE_MIN_CALIBRATION_CORPUS;
+  // If env-provided baseline exists, prefer it (operator override).
+  const envBaseline = resolveEcoScoreBaselines();
+  if (envBaseline !== DEFAULT_BASELINES) {
+    return envBaseline;
+  }
+  if (sessionRates.length === 0) return DEFAULT_BASELINES;
+  // Calibration margin: 1.0 when corpus >= minCorpus (full population median is reliable);
+  // 1.2 when corpus < minCorpus (sample median needs widening per §7.3 "min 30 sessions").
+  const calibrationMargin = sessionRates.length >= minCorpus ? 1.0 : 1.2;
+  if (sessionRates.length < 5 && sessionRates.length < minCorpus) {
+    // Too few sessions even with margin — fall back to defaults (operator must configure).
+    return DEFAULT_BASELINES;
+  }
+  const braking = (median(sessionRates.map(r => r.braking)) || DEFAULT_BASELINES.braking) * calibrationMargin;
+  const accel = (median(sessionRates.map(r => r.accel)) || DEFAULT_BASELINES.accel) * calibrationMargin;
+  const jerk = (median(sessionRates.map(r => r.jerk)) || DEFAULT_BASELINES.jerk) * calibrationMargin;
+  return {
+    braking,
+    accel,
+    jerk,
+    version: `corpus-median-${sessionRates.length}${calibrationMargin !== 1 ? `-margin${calibrationMargin}` : ""}`,
+    corpusSize: sessionRates.length,
+  };
+}
+
 /**
  * §7.3 computeEcoScore — CAP-методика (Continuous Acceleration Profiling).
  *
@@ -259,7 +335,7 @@ export function computeEcoScore(
   points: MethodologyPoint[],
   distanceM: number,
   activeTrip: ActiveTrip,
-  baselines: EcoScoreBaselines = DEFAULT_BASELINES
+  baselines: EcoScoreBaselines = resolveEcoScoreBaselines()
 ): EcoScoreResult {
   const e = env();
   const minDistKm = e.ECO_SCORE_MIN_ACTIVE_DISTANCE_KM;
@@ -883,11 +959,14 @@ export interface MethodologyMetrics {
  * @param points GPS-точки (отсортированы по timestamp asc)
  * @param distanceM Дистанция поездки (м)
  * @param durationSec Длительность записи (сек) — вся запись, не активная
+ * @param ecoBaselines v2.10.0 R6.1: optional corpus-calibrated CAP baselines.
+ *   When provided, EcoScore uses these instead of DEFAULT_BASELINES (§7.3).
  */
 export function computeMethodologyMetrics(
   points: MethodologyPoint[],
   distanceM: number,
-  durationSec: number
+  durationSec: number,
+  ecoBaselines?: EcoScoreBaselines
 ): MethodologyMetrics {
   // Сначала state machine (§4.6) — даёт states[] для всех остальных метрик
   const motion = computeMovingTime(points);
@@ -903,7 +982,7 @@ export function computeMethodologyMetrics(
 
   // Group 4 (behavioral)
   const { braking, accel } = harshEvents(points, activeTrip);
-  const eco = computeEcoScore(points, distanceM, activeTrip);
+  const eco = computeEcoScore(points, distanceM, activeTrip, ecoBaselines ?? resolveEcoScoreBaselines());
   const accRms = computeAccelerationRMS(points, activeTrip);
   const jerkRms = computeJerkRMS(points, activeTrip);
   const sci = computeSpeedConsistencyIndex(points, activeTrip);

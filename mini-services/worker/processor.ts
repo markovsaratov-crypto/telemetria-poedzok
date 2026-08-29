@@ -21,6 +21,7 @@ export interface RouteSegment {
   bearing?: number | null;
   distanceM?: number;
   durationSec?: number;
+  planSpeedKmh?: number;
   trafficSpeedKmh?: number;
   trafficDurationSec?: number;
   trafficSource?: string;
@@ -175,7 +176,12 @@ async function route2Gis(
   if (!key) return null;
   if (!checkCircuit("2gis")) return null;
   try {
-    const url = `https://routing.api.2gis.ru/carrouting/6.0.0/global?key=${key}`;
+    // R5.1: align with src/lib/routing/chain.ts — routing.api.2gis.ru is dead,
+    // use catalog.api.2gis.ru (works globally with the configured key).
+    // Optional Cloudflare Worker proxy override via TWO_GIS_PROXY_URL.
+    const proxyUrl = envString("TWO_GIS_PROXY_URL");
+    const baseUrl = proxyUrl || "https://catalog.api.2gis.ru";
+    const url = `${baseUrl}/carrouting/6.0.0/global?key=${key}`;
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -185,7 +191,7 @@ async function route2Gis(
           { lat: endLat, lon: endLon },
         ],
       }),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) {
       recordFailure("2gis");
@@ -193,12 +199,21 @@ async function route2Gis(
     }
     const data = (await res.json()) as {
       result?: Array<{
-        legs?: Array<{
-          distance?: number;
-          duration?: number;
-          steps?: Array<{
-            geometry?: { points?: Array<{ lat: number; lon: number }> };
-          }>;
+        total_distance?: number;
+        total_duration?: number;
+        algorithm?: string;
+        maneuvers?: Array<{
+          outcoming_path?:
+            | {
+                distance?: number;
+                duration?: number;
+                geometry?: Array<{ selection?: string }>;
+              }
+            | Array<{
+                distance?: number;
+                duration?: number;
+                geometry?: Array<{ selection?: string }>;
+              }>;
         }>;
       }>;
     };
@@ -207,18 +222,55 @@ async function route2Gis(
       return null;
     }
     const route = data.result[0];
-    const legs = route.legs || [];
+    const distanceM = Number(route.total_distance) || 0;
+    const durationSec = Number(route.total_duration) || 0;
+    // R5.1: parse maneuvers[].outcoming_path.geometry[].selection LINESTRING
+    // (same as src/lib/routing/chain.ts). Normalise to array — 2ГИС может
+    // отдать как один объект, так и массив путей под одним манёвром.
     const segments: RouteSegment[] = [];
-    let distanceM = 0;
-    let durationSec = 0;
-    for (const leg of legs) {
-      for (const step of leg.steps || []) {
-        for (const p of step.geometry?.points || []) {
-          segments.push({ lat: p.lat, lon: p.lon });
+    const maneuvers = route.maneuvers || [];
+    for (const m of maneuvers) {
+      const rawPaths = m.outcoming_path;
+      const paths: Array<{
+        distance?: number;
+        duration?: number;
+        geometry?: Array<{ selection?: string }>;
+      }> = Array.isArray(rawPaths) ? rawPaths : rawPaths ? [rawPaths] : [];
+      for (const path of paths) {
+        const pathDistance = Number(path.distance) || 0;
+        const pathDuration = Number(path.duration) || 0;
+        const geometry = path.geometry || [];
+        const pathCoords: Array<{ lat: number; lon: number }> = [];
+        for (const g of geometry) {
+          if (g.selection) {
+            const coords = g.selection
+              .replace("LINESTRING(", "")
+              .replace(")", "")
+              .split(",");
+            for (const c of coords) {
+              const [lon, lat] = c.trim().split(" ").map(Number);
+              if (!isNaN(lat) && !isNaN(lon)) {
+                pathCoords.push({ lat, lon });
+              }
+            }
+          }
+        }
+        const n = pathCoords.length;
+        if (n === 0) continue;
+        const perDist = pathDistance / n;
+        const perDur = pathDuration / n;
+        for (const { lat, lon } of pathCoords) {
+          segments.push({
+            lat,
+            lon,
+            distanceM: Math.round(perDist * 100) / 100,
+            durationSec: Math.round(perDur * 100) / 100,
+            planSpeedKmh: perDur > 0 ? Math.round((perDist / perDur) * 3.6 * 10) / 10 : undefined,
+            trafficSpeedKmh: perDur > 0 ? Math.round((perDist / perDur) * 3.6 * 10) / 10 : undefined,
+            trafficSource: "2gis",
+          });
         }
       }
-      distanceM += leg.distance || 0;
-      durationSec += leg.duration || 0;
     }
     recordSuccess("2gis");
     return {

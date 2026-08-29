@@ -37,19 +37,23 @@ export function setSecurityHeaders(response: NextResponse) {
   response.headers.set("X-Content-Type-Options", "nosniff");
   response.headers.set("X-Frame-Options", "DENY");
   response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
-  response.headers.set("Permissions-Policy", "geolocation=(), camera=(), microphone=()");
+  // R5.5: geolocation=(self) — needed for the device GPS capture flow on /m;
+  // camera/microphone/payment explicitly disabled. Updated from `geolocation=()`.
+  response.headers.set("Permissions-Policy", "geolocation=(self), camera=(), microphone=(), payment=()");
   response.headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
   response.headers.set("X-XSS-Protection", "1; mode=block");
-  // CSP: разрешаем self + inline styles (Tailwind) + leaflet CDN при необходимости
+  // R5.5: Content-Security-Policy — relaxed enough for Leaflet tile servers
+  // (OSM, OpenTopoMap, Esri ArcGIS, CartoDB) and Google Fonts, strict on
+  // everything else. frame-ancestors 'none' = clickjacking hard-block.
   response.headers.set(
     "Content-Security-Policy",
     [
       "default-src 'self'",
       "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
-      "style-src 'self' 'unsafe-inline' https://unpkg.com",
-      "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://unpkg.com",
-      "connect-src 'self' https://router.project-osrm.org https://*.2gis.ru",
-      "font-src 'self' data:",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "img-src 'self' data: https:",
+      "connect-src 'self' https://*.tile.openstreetmap.org https://*.tile.opentopomap.org https://server.arcgisonline.com https://*.cartocdn.com",
+      "font-src 'self' https://fonts.gstatic.com",
       "frame-ancestors 'none'",
     ].join("; ")
   );

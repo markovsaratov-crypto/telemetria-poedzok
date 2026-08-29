@@ -16,9 +16,10 @@ export async function GET(request: NextRequest) {
   if (!key) return json({ error: "No TWO_GIS_API_KEY" }, 400, { "X-Request-Id": requestId });
 
   const proxyUrl = getSettingSync("TWO_GIS_PROXY_URL");
-  const apiUrl = proxyUrl
-    ? `${proxyUrl}?key=${key}`
-    : `https://routing.api.2gis.ru/carrouting/6.0.0/global?key=${key}`;
+  // R5.1: align with src/lib/routing/chain.ts — routing.api.2gis.ru is dead,
+  // the live 2ГИС routing host is catalog.api.2gis.ru (works globally with this key).
+  const baseUrl = proxyUrl || "https://catalog.api.2gis.ru";
+  const apiUrl = `${baseUrl}/carrouting/6.0.0/global?key=${key}`;
 
   try {
     const res = await fetch(apiUrl, {

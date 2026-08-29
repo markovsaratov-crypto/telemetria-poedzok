@@ -50,12 +50,12 @@ export function SettingsCard() {
   }
 
   return (
-    <Card>
+    <Card className="elev-1">
       <CardHeader>
         <div className="flex items-center justify-between gap-2">
           <div>
             <CardTitle className="flex items-center gap-2 text-base">
-              <SettingsIcon className="h-4 w-4 text-primary" />
+              <span className="icon-chip h-6 w-6"><SettingsIcon className="h-4 w-4" /></span>
               Настройки маршрутизации
             </CardTitle>
             <CardDescription className="text-xs mt-1">
@@ -77,11 +77,12 @@ export function SettingsCard() {
         {isLoading ? (
           <div className="space-y-3">
             {Array.from({ length: 3 }).map((_, i) => (
-              <Skeleton key={i} className="h-16 w-full" />
+              <Skeleton key={i} className="h-16 w-full shimmer" />
             ))}
           </div>
         ) : settings.length === 0 ? (
-          <div className="text-center py-6 text-xs text-muted-foreground">
+          <div className="empty-state py-8 text-xs text-muted-foreground">
+            <SettingsIcon className="h-8 w-8 mb-2 opacity-30" />
             Настроек не найдено
           </div>
         ) : (
@@ -96,10 +97,12 @@ export function SettingsCard() {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: i * 0.04 }}
                 className={cn(
-                  "rounded-lg border p-3 space-y-2",
-                  dirty ? "border-primary/40 bg-primary/5" : "bg-card/40"
+                  "metric-tile relative overflow-hidden rounded-lg border p-3 space-y-2",
+                  dirty ? "border-primary/40 bg-primary/5" : "bg-card/40 hover:bg-card"
                 )}
               >
+                {/* акцентная линия сверху (ярче при dirty) */}
+                <div className={cn("absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r to-transparent", dirty ? "from-primary/60" : "from-primary/30 opacity-60")} />
                 <div className="flex items-center justify-between gap-2">
                   <Label htmlFor={`set-${s.key}`} className="text-xs font-mono">
                     {s.key}

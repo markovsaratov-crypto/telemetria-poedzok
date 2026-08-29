@@ -379,10 +379,33 @@ function GroupDetail({ group }: { group: RouteGroupInfo }) {
 }
 
 // === Карточка группы ===
-function GroupCard({ group, index }: { group: RouteGroupInfo; index: number }) {
+function GroupCard({
+  group,
+  index,
+  autoExpand,
+}: {
+  group: RouteGroupInfo;
+  index: number;
+  autoExpand?: string | null;
+}) {
   const [expanded, setExpanded] = React.useState(false);
+  const cardRef = React.useRef<HTMLLIElement>(null);
+
+  // v2.9.7: deep-link из виджета «Тяжёлые участки» — авто-раскрытие + прокрутка
+  React.useEffect(() => {
+    if (autoExpand && autoExpand === group.routeHash) {
+      setExpanded(true);
+      // Прокрутка после раскрытия (высота меняется)
+      const t = setTimeout(() => {
+        cardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 250);
+      return () => clearTimeout(t);
+    }
+  }, [autoExpand, group.routeHash]);
+
   return (
     <motion.li
+      ref={cardRef}
       layout
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
@@ -481,7 +504,7 @@ function GroupCard({ group, index }: { group: RouteGroupInfo; index: number }) {
 }
 
 // === Главный компонент ===
-export function RouteGroups() {
+export function RouteGroups({ expandHash }: { expandHash?: string | null } = {}) {
   const { data, isLoading, isError, refetch, isRefetching } = useRouteGroups();
   const groups = data?.groups || [];
 
@@ -546,7 +569,7 @@ export function RouteGroups() {
           <div className="max-h-[560px] overflow-y-auto scroll-telem -mx-2">
             <ul className="space-y-2 px-2">
               {groups.map((g, i) => (
-                <GroupCard key={g.routeHash} group={g} index={i} />
+                <GroupCard key={g.routeHash} group={g} index={i} autoExpand={expandHash} />
               ))}
             </ul>
           </div>

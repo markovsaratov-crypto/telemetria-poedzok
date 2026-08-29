@@ -22,10 +22,12 @@ export interface HotspotOverlay {
 }
 
 // Цвет severity-подсветки сегмента по P75 (методология §10.6)
+// v2.9.7 (стайлинг-раунд 8): красный затемнён 0.55→0.48 — белый текст бейджа
+// «P75 X.XX» проходит WCAG AA (контраст ≥ 4.5:1)
 export function severityColor(p75: number): string {
-  if (p75 < 0.25) return "oklch(0.55 0.20 25)"; // тяжёлая пробка — красный
-  if (p75 < 0.4) return "oklch(0.70 0.15 60)"; // средняя — оранжевый
-  return "oklch(0.75 0.15 95)"; // лёгкая — жёлтый
+  if (p75 < 0.25) return "oklch(0.48 0.19 25)"; // тяжёлая пробка — красный (глубокий)
+  if (p75 < 0.4) return "oklch(0.66 0.15 60)"; // средняя — оранжевый
+  return "oklch(0.78 0.14 95)"; // лёгкая — жёлтый
 }
 
 export interface MiniMapProps {

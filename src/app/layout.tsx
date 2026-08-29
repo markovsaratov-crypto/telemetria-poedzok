@@ -18,9 +18,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Телеметрия поездок — v2.9",
+  title: "Телематика Маркова",
   description:
-    "Платформа ingestion и анализа GPS-телеметрии поездок. Сессии, маршруты, пробки, экспорт GPX/KML/JSON.",
+    "Дашборд поездок и аналитика телеметрии: сессии, маршруты, плавность вождения, пробки и качество данных.",
   keywords: ["телеметрия", "GPS", "поездки", "маршруты", "Telemetria"],
   authors: [{ name: "Telemetria" }],
   icons: {
@@ -30,13 +30,12 @@ export const metadata: Metadata = {
     ],
     apple: "/icons/apple-touch-icon.png",
   },
-  // v2.9.8: installable PWA
   manifest: "/manifest.webmanifest",
-  applicationName: "Телеметрия поездок",
+  applicationName: "Телематика Маркова",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Телеметрия",
+    title: "Телематика",
   },
 };
 

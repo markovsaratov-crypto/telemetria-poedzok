@@ -1,6 +1,8 @@
-// src/components/v4/telematika-layout.tsx — каркас v4: шапка + 3 таба + период + фильтр поездки.
-// v2.10.0 R1: фильтр поездки переведён на live API /api/sessions (useSessions из hooks.ts).
-// selectedTripId (mock "t1".."t8") заменён на selectedSessionId (real UUID).
+// src/components/v4/telematika-layout.tsx — каркас v4: единственный горизонтальный
+// top-bar (бренд + 3 bookmark-вкладки + активная-вкладка слово + utility иконки
+// + тема + выход). На мобильных — те же 3 bookmark-вкладки + bottom-nav вместо
+// hamburger/Sheet drawer. Период-селектор + фильтр поездки согласованы: клик по
+// period-pill сбрасывает selectedSessionId, клик по trip-pill открывает dropdown.
 
 "use client";
 
@@ -15,16 +17,12 @@ import {
   Moon,
   ChevronDown,
   RefreshCw,
-  Menu,
+  BarChart3,
+  Car,
+  Settings as SettingsIcon,
 } from "lucide-react";
 import { useV4Tipbox, bindTips } from "./use-v4-tipbox";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
-import { type PeriodKey } from "@/lib/telematika-v4-mock";
+import { type PeriodKey } from "@/lib/v4-utils";
 import { useSessions } from "@/lib/hooks";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
@@ -47,17 +45,17 @@ interface LayoutProps {
   children: React.ReactNode;
 }
 
-const TABS: { id: V4Tab; label: string }[] = [
-  { id: "analytics", label: "Аналитика" },
-  { id: "trips", label: "Поездки" },
-  { id: "admin", label: "Админ" },
+const TABS: { id: V4Tab; label: string; icon: React.ReactNode }[] = [
+  { id: "analytics", label: "Аналитика", icon: <BarChart3 className="h-3.5 w-3.5" /> },
+  { id: "trips", label: "Поездки", icon: <Car className="h-3.5 w-3.5" /> },
+  { id: "admin", label: "Админ", icon: <SettingsIcon className="h-3.5 w-3.5" /> },
 ];
 
 const PERIOD_LIST: { id: Period; label: string }[] = [
-  { id: "today", label: "Сегодня · 28 авг" },
-  { id: "week", label: "7 дней · 22–28 авг" },
+  { id: "today", label: "Сегодня" },
+  { id: "week", label: "7 дней" },
   { id: "d30", label: "30 дней" },
-  { id: "month", label: "Август" },
+  { id: "month", label: "Месяц" },
   { id: "all", label: "Всё время" },
 ];
 
@@ -111,11 +109,10 @@ export function TelematikaLayout(props: LayoutProps) {
   const queryClient = useQueryClient();
   const [tripFilterOpen, setTripFilterOpen] = React.useState(false);
   const [tripFilterQuery, setTripFilterQuery] = React.useState("");
-  const [drawerOpen, setDrawerOpen] = React.useState(false);
   const tripFilterRef = React.useRef<HTMLDivElement>(null);
   const layoutRef = React.useRef<HTMLDivElement>(null);
 
-  // v2.10.0 R1: live sessions list (replaces TRIP_FILTER_LIST mock).
+  // Live sessions list for trip-filter dropdown.
   const sessions = useSessions({ limit: 50 });
   const sessionsList = sessions.data?.sessions ?? [];
 
@@ -160,7 +157,7 @@ export function TelematikaLayout(props: LayoutProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onCmdOpen, onSearchOpen, onHelpOpen, onTabChange]);
 
-  // Re-bind tips после каждого рендера
+  // Re-bind tips after every render (for newly-mounted [data-tip] elements).
   React.useEffect(() => {
     if (layoutRef.current) bindTips(layoutRef.current);
   });
@@ -180,7 +177,6 @@ export function TelematikaLayout(props: LayoutProps) {
     toast.success("Данные обновлены");
   }
 
-  // v2.10.0 R1: selected session из live API list.
   const selectedSession = React.useMemo(
     () => sessionsList.find((s) => s.id === selectedSessionId) ?? null,
     [sessionsList, selectedSessionId]
@@ -197,14 +193,38 @@ export function TelematikaLayout(props: LayoutProps) {
     });
   }, [sessionsList, tripFilterQuery]);
 
+  // Active-tab title indicator — word next to tabs.
+  const activeTabLabel = TABS.find((t) => t.id === tab)?.label ?? "";
+
   return (
     <div className="v4-app" ref={layoutRef}>
       <div className="v4-wrap">
-        {/* === Шапка (без бейджа PROTOTYPE) === */}
+        {/* === Single horizontal top bar ===
+            Brand · 3 bookmark tabs · active-tab word · utility buttons · theme · logout */}
         <header className="topbar">
           <div className="brand">
             <h1>Телематика Маркова</h1>
           </div>
+
+          <nav className="v4-bookmarks" aria-label="Вкладки">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                className={`v4-bookmark ${tab === t.id ? "active" : ""}`}
+                onClick={() => onTabChange(t.id)}
+                title={t.label}
+                aria-current={tab === t.id ? "page" : undefined}
+              >
+                <span className="v4-bookmark-icon">{t.icon}</span>
+                <span className="v4-bookmark-label">{t.label}</span>
+              </button>
+            ))}
+          </nav>
+
+          <div className="v4-topbar-active-label" aria-hidden="true">
+            {activeTabLabel}
+          </div>
+
           <div className="topbar-actions">
             <button
               className="iconbtn"
@@ -217,7 +237,7 @@ export function TelematikaLayout(props: LayoutProps) {
             <button
               className="iconbtn"
               onClick={() => onSearchOpen()}
-              title="Глобальный поиск (Cmd+Shift+F)"
+              title="Глобальный поиск (⌘⇧F)"
               aria-label="Поиск"
             >
               <Search className="h-4 w-4" />
@@ -226,7 +246,7 @@ export function TelematikaLayout(props: LayoutProps) {
             <button
               className="iconbtn"
               onClick={() => onCmdOpen()}
-              title="Команды (Cmd+K)"
+              title="Команды (⌘K)"
               aria-label="Команды"
             >
               <Command className="h-4 w-4" />
@@ -262,84 +282,32 @@ export function TelematikaLayout(props: LayoutProps) {
           </div>
         </header>
 
-        {/* === Вкладки (десктоп) === */}
-        <nav className="tabs v4-desktop-tabs" aria-label="Вкладки">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              className={`tab ${tab === t.id ? "active" : ""}`}
-              onClick={() => onTabChange(t.id)}
-              title={t.label}
-            >
-              {t.label}
-            </button>
-          ))}
-        </nav>
-
-        {/* === Вкладки (мобильные — hamburger + текущая вкладка) === */}
-        <div className="v4-mobile-tabs" aria-label="Мобильное меню">
-          <button
-            type="button"
-            className={`v4-hamburger ${drawerOpen ? "is-open" : ""}`}
-            onClick={() => setDrawerOpen(true)}
-            aria-label="Открыть меню вкладок"
-            aria-haspopup="dialog"
-            aria-expanded={drawerOpen}
-            title="Меню вкладок"
-          >
-            <Menu className="h-4 w-4" />
-          </button>
-          <span className="v4-mobile-current">
-            {TABS.find((t) => t.id === tab)?.label ?? ""}
-          </span>
-        </div>
-
-        {/* === Sheet Drawer с тремя вкладками === */}
-        <Sheet open={drawerOpen} onOpenChange={setDrawerOpen}>
-          <SheetContent side="left" className="v4-drawer">
-            <SheetHeader>
-              <SheetTitle>Меню вкладок</SheetTitle>
-            </SheetHeader>
-            <nav style={{ display: "flex", flexDirection: "column", gap: 0, flex: 1 }}>
-              {TABS.map((t, i) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  className={`v4-drawer-tab ${tab === t.id ? "active" : ""}`}
-                  onClick={() => {
-                    onTabChange(t.id);
-                    setDrawerOpen(false);
-                  }}
-                  aria-current={tab === t.id ? "page" : undefined}
-                >
-                  <span className="v4-drawer-num">0{i + 1}</span>
-                  <span>{t.label}</span>
-                </button>
-              ))}
-            </nav>
-          </SheetContent>
-        </Sheet>
-
-        {/* === Период-селектор + фильтр конкретной поездки (только для Аналитика) === */}
+        {/* === Period-selector + trip-filter (only for Аналитика) === */}
         {tab === "analytics" && (
           <div className="pills-row">
-            <div className="pills">
+            <div className="pills" role="group" aria-label="Выбор периода">
               {PERIOD_LIST.map((p) => (
                 <button
                   key={p.id}
-                  className={`pill ${period === p.id && !selectedSessionId ? "active" : ""}`}
+                  className={`pill ${period === p.id && !selectedSessionId ? "active" : ""} ${selectedSessionId ? "dim" : ""}`}
                   onClick={() => {
                     onPeriodChange(p.id);
                     onSelectedSessionChange(null);
                   }}
+                  title={`Период: ${p.label}`}
                 >
                   {p.label}
                 </button>
               ))}
             </div>
+
+            <div className="pills-divider" aria-hidden="true">
+              |
+            </div>
+
             <div className="trip-filter" ref={tripFilterRef}>
               <button
-                className="trip-filter-btn"
+                className={`trip-filter-btn ${selectedSessionId ? "active" : ""}`}
                 onClick={() => {
                   setTripFilterOpen((v) => !v);
                   setTripFilterQuery("");
@@ -358,7 +326,7 @@ export function TelematikaLayout(props: LayoutProps) {
                 ) : sessionsList.length === 0 ? (
                   <span>Нет поездок</span>
                 ) : (
-                  <span>Выбрать поездку</span>
+                  <span>Поездка…</span>
                 )}
                 <ChevronDown className="chev h-3 w-3" />
               </button>
@@ -403,7 +371,7 @@ export function TelematikaLayout(props: LayoutProps) {
           </div>
         )}
 
-        {/* === Контент === */}
+        {/* === Content === */}
         <AnimatePresence mode="wait">
           <motion.div
             key={tab + (selectedSessionId ?? "") + period}
@@ -416,6 +384,21 @@ export function TelematikaLayout(props: LayoutProps) {
           </motion.div>
         </AnimatePresence>
       </div>
+
+      {/* === Bottom navigation (mobile only, sticky) === */}
+      <nav className="v4-bottom-nav" aria-label="Мобильная навигация">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            className={`v4-bottom-nav-item ${tab === t.id ? "active" : ""}`}
+            onClick={() => onTabChange(t.id)}
+            aria-current={tab === t.id ? "page" : undefined}
+          >
+            <span className="v4-bottom-nav-icon">{t.icon}</span>
+            <span className="v4-bottom-nav-label">{t.label}</span>
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }

@@ -1,47 +1,115 @@
 "use client";
 
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { api, setUnauthorizedHandler } from "@/lib/api-client";
+import { useAuth, useSessions } from "@/lib/hooks";
 import { LoginForm } from "@/components/login-form";
-import { useAuth } from "@/lib/hooks";
-import { BottomNav, type MobileTab } from "@/components/mobile/shared/BottomNav";
-import { SessionListScreen } from "@/components/mobile/SessionList/SessionListScreen";
-import { AnalyticsScreen } from "@/components/mobile/Analytics/AnalyticsScreen";
-import { AdminScreen } from "@/components/mobile/Admin/AdminScreen";
-import { MapScreenWrapper } from "@/components/mobile/Map/MapScreenWrapper";
-import dynamic from "next/dynamic";
-
-const SessionDetailScreen = dynamic(() => import("@/components/mobile/SessionDetail/SessionDetailScreen").then(m => m.SessionDetailScreen), { ssr: false, loading: () => <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Загрузка...</div> });
-const RoutesScreen = dynamic(() => import("@/components/mobile/Routes/RoutesScreen").then(m => m.RoutesScreen), { ssr: false, loading: () => <div className="min-h-screen flex items-center justify-center text-sm text-muted-foreground">Загрузка...</div> });
+import { CommandPalette } from "@/components/command-palette";
+import { ShortcutsHelp } from "@/components/shortcuts-help";
+import { GlobalSearch } from "@/components/global-search";
+import { TelematikaLayout, type V4Tab, type Period } from "@/components/v4/telematika-layout";
+import { AnalyticsView } from "@/components/v4/analytics-view";
+import { TripsView } from "@/components/v4/trips-view";
+import { AdminViewV4 } from "@/components/v4/admin-view-v4";
 
 export default function MobilePage() {
   const auth = useAuth();
-  const [tab, setTab] = React.useState<MobileTab>("analytics");
-  const [selectedSession, setSelectedSession] = React.useState<string | null>(null);
-  // v2.9.7: deep-link из «Тяжёлых участков» — раскрыть конкретную группу на «Маршрутах»
-  const [routesExpandHash, setRoutesExpandHash] = React.useState<string | null>(null);
-  const isAuthenticated = auth.data?.authenticated === true;
+  const queryClient = useQueryClient();
+  const [tab, setTab] = React.useState<V4Tab>("analytics");
+  const [period, setPeriod] = React.useState<Period>("today");
+  const [selectedSessionId, setSelectedSessionId] = React.useState<string | null>(null);
+  const [cmdOpen, setCmdOpen] = React.useState(false);
+  const [helpOpen, setHelpOpen] = React.useState(false);
+  const [searchOpen, setSearchOpen] = React.useState(false);
 
-  if (!isAuthenticated) return <LoginForm onSuccess={() => auth.refetch()} />;
-  if (selectedSession) return <div className="min-h-screen bg-background"><SessionDetailScreen sessionId={selectedSession} onBack={() => setSelectedSession(null)} /></div>;
+  const sessions = useSessions({ limit: 50 });
+
+  const autoSelectedRef = React.useRef(false);
+  React.useEffect(() => {
+    if (autoSelectedRef.current) return;
+    if (selectedSessionId) {
+      autoSelectedRef.current = true;
+      return;
+    }
+    const first = sessions.data?.sessions?.[0];
+    if (first && first.status === "completed") {
+      autoSelectedRef.current = true;
+      setSelectedSessionId(first.id);
+    }
+  }, [sessions.data, selectedSessionId]);
+
+  React.useEffect(() => {
+    setUnauthorizedHandler(() => {
+      if (typeof window !== "undefined") {
+        queryClient.invalidateQueries({ queryKey: ["auth"] });
+      }
+    });
+  }, [queryClient]);
+
+  async function handleLogout() {
+    try {
+      await api.post("/api/auth/logout", undefined, { expect: "none" });
+      toast.success("Вы вышли из системы");
+      setTimeout(() => window.location.reload(), 300);
+    } catch (e) {
+      toast.error("Ошибка выхода", { description: (e as Error).message });
+    }
+  }
+
+  function handleRefresh() {
+    queryClient.invalidateQueries();
+    toast.success("Данные обновлены");
+  }
+
+  function mapLegacyTab(name: string): V4Tab {
+    if (name === "analytics" || name === "overview") return "analytics";
+    if (name === "trips" || name === "sessions") return "trips";
+    return "admin";
+  }
+
+  const isAuthenticated = auth.data?.authenticated === true;
+  if (!isAuthenticated) {
+    return <LoginForm onSuccess={() => auth.refetch()} />;
+  }
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
-      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-      <BottomNav active={tab} onChange={setTab} />
-      <div className="flex-1 overflow-y-auto">
-        {tab === "trips" && <SessionListScreen onSessionTap={(id) => setSelectedSession(id)} onSettingsTap={() => setTab("admin")} />}
-        {tab === "map" && <MapScreenWrapper onSessionTap={(id) => setSelectedSession(id)} />}
+    <>
+      <TelematikaLayout
+        tab={tab}
+        onTabChange={setTab}
+        period={period}
+        onPeriodChange={setPeriod}
+        selectedSessionId={selectedSessionId}
+        onSelectedSessionChange={setSelectedSessionId}
+        onCmdOpen={() => setCmdOpen(true)}
+        onSearchOpen={() => setSearchOpen(true)}
+        onHelpOpen={() => setHelpOpen(true)}
+      >
         {tab === "analytics" && (
-          <AnalyticsScreen
-            onGoToRoutes={(routeHash) => {
-              setRoutesExpandHash(routeHash ?? null);
-              setTab("routes");
-            }}
-          />
+          <AnalyticsView period={period} sessionId={selectedSessionId} />
         )}
-        {tab === "routes" && <RoutesScreen expandHash={routesExpandHash} />}
-        {tab === "admin" && <AdminScreen onBack={() => setTab("trips")} onLogout={() => auth.refetch()} />}
-      </div>
-    </div>
+        {tab === "trips" && <TripsView />}
+        {tab === "admin" && <AdminViewV4 />}
+      </TelematikaLayout>
+
+      <CommandPalette
+        open={cmdOpen}
+        onOpenChange={setCmdOpen}
+        onTabChange={(name) => setTab(mapLegacyTab(name))}
+        onLogout={handleLogout}
+        onRefresh={handleRefresh}
+      />
+      <ShortcutsHelp open={helpOpen} onOpenChange={setHelpOpen} />
+      <GlobalSearch
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        onSelect={(id) => {
+          setSelectedSessionId(id);
+          setTab("analytics");
+        }}
+      />
+    </>
   );
 }

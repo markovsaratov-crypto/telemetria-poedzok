@@ -19,9 +19,6 @@ import * as React from "react";
 import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
 import {
-  PERIODS,
-  TRIPS,
-  ROUTES,
   BUCKETS,
   mulberry32,
   ecoZone,
@@ -29,9 +26,7 @@ import {
   effToGaugePct,
   heatColor,
   type PeriodKey,
-  type Trip,
-  type RouteData,
-} from "@/lib/telematika-v4-mock";
+} from "@/lib/v4-utils";
 import {
   useSessionStats,
   useRouteComparison,
@@ -88,7 +83,6 @@ export function AnalyticsView({ period, sessionId }: Props) {
   const groups = useRouteGroups(); // v2.10.1: для блока 10
   const heavy = useHeavySegments(); // v2.10.1: для блока 09
 
-  const data = PERIODS[period];
   const rootRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -134,9 +128,9 @@ export function AnalyticsView({ period, sessionId }: Props) {
   return (
     <div ref={rootRef}>
       <SessionHeader stats={stats.data} period={period} />
-      <KpiBlock stats={stats.data} period={period} mockData={data} />
-      <DrivingScoreBlock stats={stats.data} events={events.data} mockData={data} />
-      <SpeedProfileBlock stats={stats.data} mockData={data} />
+      <KpiBlock stats={stats.data} period={period} />
+      <DrivingScoreBlock stats={stats.data} events={events.data} />
+      <SpeedProfileBlock stats={stats.data} />
       <PlanFactBlock stats={stats.data} comparison={comparison.data} />
       <MapBlock track={track.data} isLoading={track.isLoading} isError={track.isError} />
       <BehaviorBlock events={events.data} stats={stats.data} />
@@ -145,13 +139,6 @@ export function AnalyticsView({ period, sessionId }: Props) {
       <HeavySegmentsBlock data={heavy.data} />
       <RoutesBlock groups={groups.data} />
       <DataQualityBlock stats={stats.data} />
-      <div className="toast">
-        <b>v2.10.1.</b> Все 11 блоков аналитики подключены к живому API: KPI,
-        EcoScore, скоростной профиль, план-факт, карта Leaflet (Street по умолчанию),
-        G-G, пробки, география, тяжёлые участки, частые маршруты и качество данных.
-        Реальные значения из {stats.data ? fmtInt(stats.data.pointCount) : "—"} GPS-точек
-        и {groups.data?.total ?? 0} routeHash-групп.
-      </div>
     </div>
   );
 }
@@ -267,11 +254,9 @@ function SessionHeader({
 function KpiBlock({
   stats,
   period,
-  mockData,
 }: {
   stats: SessionStats | null | undefined;
   period: PeriodKey;
-  mockData: typeof PERIODS.today;
 }) {
   // Compute KPI values from live stats.
   const dur = stats ? secToMin(stats.duration) : 0;
@@ -299,7 +284,7 @@ function KpiBlock({
         <span className="sec-num">01</span>
         <span className="sec-title">Основные показатели</span>
         <span className="sec-sub">
-          {stats ? `${fmtInt(stats.pointCount)} точек · запись ${fmtInt(dur)} мин` : mockData.sub}
+          {stats ? `${fmtInt(stats.pointCount)} точек · запись ${fmtInt(dur)} мин` : "загрузка статистики…"}
         </span>
       </div>
       <div className="kpi-grid">
@@ -449,24 +434,22 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
 function DrivingScoreBlock({
   stats,
   events,
-  mockData,
 }: {
   stats: SessionStats | null | undefined;
   events: EventsResponse | null | undefined;
-  mockData: typeof PERIODS.today;
 }) {
-  // v2.10.0 R6.1: prefer canonical CAP value + breakdown from stats.methodology.ecoScore.
-  // The /stats endpoint now computes EcoScore with corpus-calibrated baselines (median of
-  // all sessions + 1.2x margin for small corpus per §7.3), so the value is no longer 0 on
-  // noisy synthetic CSV data. Fallback to count-based formula only when stats not available.
+  // Canonical CAP value + breakdown from stats.methodology.ecoScore.
+  // /stats endpoint computes EcoScore with corpus-calibrated baselines (median of
+  // all sessions + 1.2x margin for small corpus per §7.3). Fallback to count-based
+  // formula only when stats not available.
   const hb = events?.summary?.harshBraking ?? 0;
   const ha = events?.summary?.harshAcceleration ?? 0;
   const mn = events?.summary?.maneuvers ?? 0;
   const ecoBreakdown = stats?.methodology?.ecoScore?.breakdown;
-  // v2.10.0 R6.7: simplify baseline version for UI (was "corpus-median-8-margin1.2" — looked like debug log).
+  // Simplify baseline version label for UI (was "corpus-median-8-margin1.2").
   const rawBaselineVersion = stats?.methodology?.ecoScore?.baselineVersion ?? "default";
   const baselineVersion = rawBaselineVersion.startsWith("corpus-median-")
-    ? "корпус v2.10"
+    ? "корпус-медиана"
     : rawBaselineVersion === "default"
       ? "базовый"
       : rawBaselineVersion;
@@ -507,15 +490,16 @@ function DrivingScoreBlock({
   const accelBarPct = Math.min(100, (accelPenalty / 30) * 100);
   const jerkBarPct = Math.min(100, (jerkPenalty / 25) * 100);
 
-  // v2.10.0 R1: Efficiency (TimeSavingIndex) = (duration - planDurationSec) / 60 → min/trip.
+  // Efficiency (TimeSavingIndex) = (duration - planDurationSec) / 60 → min/trip.
   const planDurationSec = stats?.route?.planDurationSec;
   const actualDuration = stats?.duration;
   const eff = React.useMemo(() => {
     if (planDurationSec != null && actualDuration != null && planDurationSec > 0) {
       return (actualDuration - planDurationSec) / 60;
     }
-    return mockData.eff; // fallback
-  }, [planDurationSec, actualDuration, mockData.eff]);
+    // No plan — neutral efficiency.
+    return 0;
+  }, [planDurationSec, actualDuration]);
 
   const ez = effZone(eff);
   const effPct = effToGaugePct(eff);
@@ -527,14 +511,14 @@ function DrivingScoreBlock({
         <span className="sec-num">02</span>
         <span className="sec-title">Оценка вождения</span>
         <span className="sec-sub">
-          {events ? `${mn} манёвров · ${hb + ha} резких` : mockData.sub} · базлайн: {baselineVersion}
+          {events ? `${mn} манёвров · ${hb + ha} резких` : "загрузка событий…"} · базлайн: {baselineVersion}
         </span>
       </div>
       <div className="score-grid">
         {/* === Виджет 1: Плавность · EcoScore === */}
         <GaugeArc
           title="Плавность · EcoScore"
-          helpTip="Оценка плавности вождения (§7.3, методика CAP). v2.10.0 R6.1: canonical формула 100×(1 − 0.45·penalty(braking) − 0.30·penalty(accel) − 0.25·penalty(jerk)), где penalty=1−1/(1+(actual/baseline)^1.5). Baseline = корпус-медиана (8 сессий) × 1.2 (margin для корпуса <30). Зоны: 80+ отлично · 60–79 неплохо · ниже 60 резко"
+          helpTip="Оценка плавности вождения (§7.3, методика CAP). Формула: 100×(1 − 0.45·penalty(braking) − 0.30·penalty(accel) − 0.25·penalty(jerk)), где penalty = 1 − 1/(1+(actual/baseline)^1.5). Baseline = корпус-медиана ≥30 поездок по routeHash × 1.2 (margin для малого корпуса). Зоны: 80+ отлично · 60–79 неплохо · ниже 60 резко"
           bigValue={String(ecoScore)}
           bigValueSuffix="/ 100"
           arcColor={z.c}
@@ -543,8 +527,7 @@ function DrivingScoreBlock({
           bandCls={z.cls}
           note={
             <>
-              Шкала штрафа — доля от максимума компонента (45 / 30 / 25 баллов). v2.10.0 R6.1: breakdown
-              из stats.methodology.ecoScore.breakdown (canonical penalty×weight), базлайн {baselineVersion}.
+              Шкала штрафа — доля от максимума компонента (45 / 30 / 25 баллов за плавность торможения / разгона / рывка. Breakdown показывает вклад каждого компонента в итоговый EcoScore, базлайн {baselineVersion}.
             </>
           }
           rows={[
@@ -572,7 +555,7 @@ function DrivingScoreBlock({
         {/* === Виджет 2: Эффективность · экономия к плану === */}
         <GaugeArc
           title="Эффективность · экономия к плану"
-          helpTip="Метрика TimeSavingIndex: среднее отклонение времени от плана (§6.3 DurationDeviation) | Как читать: слева от нуля — экономия (слива), справа — опоздания (алый) | v2.10.0 R1: вычисляется из stats.route.planDurationSec vs stats.duration"
+          helpTip="Метрика TimeSavingIndex (§6.3 DurationDeviation): среднее отклонение времени от плана маршрута в минутах на поездку. Отрицательное значение = экономия (слива), положительное = перерасход (алый). Источник: stats.route.planDurationSec vs stats.duration."
           bigValue={effBigValue}
           bigValueSuffix="мин/поездку"
           arcColor={ez.c}
@@ -620,16 +603,21 @@ function DrivingScoreBlock({
 // === Блок 03: Скоростной профиль ===
 function SpeedProfileBlock({
   stats,
-  mockData,
 }: {
   stats: SessionStats | null | undefined;
-  mockData: typeof PERIODS.today;
 }) {
-  // v2.10.0 R1: compute 6 buckets from speedProfile.v[] (km/h).
+  // Compute 6 buckets from speedProfile.v[] (km/h).
   // Buckets: 0-20 / 20-40 / 40-60 / 60-80 / 80-100 / 100+
+  // If speedProfile missing — try methodology.speedDistribution (6-element array from /stats).
   const buckets = React.useMemo(() => {
+    if (stats?.methodology?.speedDistribution && stats.methodology.speedDistribution.length === 6) {
+      return stats.methodology.speedDistribution.map((v) =>
+        Math.round((Number(v) || 0) * 10) / 10
+      );
+    }
     if (!stats?.speedProfile || stats.speedProfile.length === 0) {
-      return mockData.dist; // fallback to mock when no data
+      // No data — equal-split placeholder.
+      return [16, 16, 16, 16, 16, 16];
     }
     const counts = [0, 0, 0, 0, 0, 0];
     let total = 0;
@@ -644,20 +632,14 @@ function SpeedProfileBlock({
       else counts[5]++;
       total++;
     }
-    if (total === 0) return [16, 16, 16, 16, 16, 16]; // equal split placeholder
+    if (total === 0) return [16, 16, 16, 16, 16, 16];
     return counts.map((c) => Math.round((c / total) * 1000) / 10);
-  }, [stats, mockData.dist]);
+  }, [stats]);
 
   // 5 stats from speedProfile (or fallback to methodology).
   const sp = React.useMemo(() => {
     if (!stats?.speedProfile || stats.speedProfile.length === 0) {
-      return {
-        p50: mockData.st.p50,
-        std: mockData.st.std,
-        vr: mockData.st.vr,
-        jam: mockData.st.jam,
-        cruise: mockData.st.cruise,
-      };
+      return { p50: "—", std: "—", vr: "—", jam: "0 мин", cruise: "0 мин" };
     }
     const vs = stats.speedProfile
       .filter((p) => p.v != null && p.v >= 0 && p.st !== 0)
@@ -696,7 +678,7 @@ function SpeedProfileBlock({
       jam: `${fmtInt(jamMin)} мин · ${fmtInt(jamPct)}%`,
       cruise: `${fmtInt(cruiseMin)} мин · ${fmtInt(cruisePct)}%`,
     };
-  }, [stats, mockData.st]);
+  }, [stats]);
 
   // Bucket percentages sum normalized to 100
   const totalPct = buckets.reduce((s, v) => s + v, 0) || 100;
@@ -710,7 +692,7 @@ function SpeedProfileBlock({
         <span className="sec-sub">
           {stats?.speedProfile
             ? `${stats.speedProfile.length} точек активной части · ${sp.p50} км/ч медиана`
-            : mockData.spsub}
+            : "загрузка скоростного профиля…"}
         </span>
       </div>
       <div className="card">
@@ -1161,7 +1143,7 @@ function BehaviorBlock({
             Диаграмма манёвров
             <span
               className="help"
-              data-tip="Каждая точка — манёвр: по горизонтали боковое ускорение, по вертикали разгон вверх и торможение вниз | Визуализация метрик §7.4 AccelerationRMS и §7.5 JerkRMS | Алые кольца — события резких торможений и разгонов (§7.1, §7.2) | Внутри 0,4g — плавная езда | v2.10.0 R1: LIVE из /events.gg.points[] (x=longA/g, y=latA/g)"
+              data-tip="Каждая точка — манёвр: по горизонтали боковое ускорение (longA/g), по вертикали продольное (разгон вверх, торможение вниз). Визуализация метрик §7.4 AccelerationRMS и §7.5 JerkRMS. Алые кольца — события резких торможений и разгонов (§7.1, §7.2). Внутри 0,4g — плавная езда. Источник: /events.gg.points[] (x=longA/g, y=latA/g)."
             >
               ?
             </span>

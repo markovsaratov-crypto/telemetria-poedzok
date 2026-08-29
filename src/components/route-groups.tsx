@@ -127,15 +127,17 @@ function GroupDetail({ group }: { group: RouteGroupInfo }) {
   const trend = trendQ.data;
   const hotspots = hotspotsQ.data;
 
-  const maxTraffic = Math.max(
-    1,
-    ...(trend?.history.reduce<{ [k: number]: number }>((acc, h) => {
+  // Бакеты выездов по времени суток (8x3ч) — обычный массив длины 8
+  const bucketCounts = React.useMemo(() => {
+    const counts = new Array<number>(8).fill(0);
+    for (const h of trend?.history ?? []) {
       const hour = new Date(h.date).getHours();
       const b = Math.floor(hour / 3);
-      acc[b] = (acc[b] || 0) + 1;
-      return acc;
-    }, {}) as unknown as number[]).map((v) => v ?? 0) ?? [1]
-  );
+      if (b >= 0 && b < 8) counts[b]++;
+    }
+    return counts;
+  }, [trend]);
+  const maxTraffic = Math.max(1, ...bucketCounts);
 
   return (
     <div className="mt-3 space-y-4 rounded-lg border bg-muted/20 p-3">
@@ -231,7 +233,7 @@ function GroupDetail({ group }: { group: RouteGroupInfo }) {
           </h4>
           <div className="flex items-end gap-1 h-14" role="img" aria-label="Распределение выездов по времени суток">
             {["0–3", "3–6", "6–9", "9–12", "12–15", "15–18", "18–21", "21–24"].map((label, i) => {
-              const count = trend.history.filter((h) => Math.floor(new Date(h.date).getHours() / 3) === i).length;
+              const count = bucketCounts[i];
               return (
                 <div key={label} className="flex-1 flex flex-col items-center gap-0.5" title={`${label} ч: ${count} выездов`}>
                   <div

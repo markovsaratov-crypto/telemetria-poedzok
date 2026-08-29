@@ -513,8 +513,11 @@ function DetailedList({
       {groups.map((group, gi) => (
         <div key={gi}>
           {group.label && (
-            <div className="sticky top-0 z-10 bg-muted/60 backdrop-blur-sm px-3 py-1 text-[10px] uppercase tracking-wider text-muted-foreground font-medium border-b">
-              {group.label} · {group.items.length}
+            <div className="sticky top-0 z-10 bg-muted/70 backdrop-blur-md px-3 py-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-semibold border-b flex items-center gap-2">
+              <span className="inline-block h-1 w-1 rounded-full bg-primary/60" />
+              <span>{group.label}</span>
+              <span className="text-muted-foreground/70">· {group.items.length}</span>
+              <span className="flex-1 section-rule ml-2" />
             </div>
           )}
           <ul className="divide-y">
@@ -528,10 +531,10 @@ function DetailedList({
                 <button
                   onClick={() => bulkMode ? (onToggleSelect?.(s.id) ?? onSelect(s.id)) : onSelect(s.id)}
                   className={cn(
-                    "w-full text-left p-3 hover:bg-accent/50 transition-colors flex items-start gap-3 border-l-2",
+                    "w-full text-left p-3 transition-all flex items-start gap-3 border-l-2 metric-tile",
                     selectedId === s.id
-                      ? "bg-primary/10 border-primary"
-                      : "border-transparent"
+                      ? "bg-primary/10 border-primary hover:bg-primary/15"
+                      : "border-transparent hover:bg-accent/50 hover:-translate-y-px"
                   )}
                 >
                   {bulkMode && (

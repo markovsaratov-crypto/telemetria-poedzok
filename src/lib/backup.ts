@@ -6,29 +6,36 @@ import { promises as fs } from "fs";
 import { createHash } from "crypto";
 import path from "path";
 
-export async function runBackup(actorId?: string): Promise<{ backupId: string; filePath: string; checksum: string; fileSize: number }> {
+export async function runBackup(actorId?: string): Promise<{ backupId: string; filePath: string; checksum: string; fileSize: number; tableCounts: Record<string, number> }> {
   // Создаём BackupJob
   const job = await db.backupJob.create({
     data: { status: "running", type: "full", lockedBy: env().WORKER_ID },
   });
 
   try {
-    // Логический дамп: выгружаем все таблицы в JSON
+    // Логический дамп: полные выгрузки ВСЕХ строк всех таблиц напрямую через libsql.
+    // P0-фикс (v2.9.1): db-обёртки findMany имеют тихие лимиты (take=20/50) и
+    // db.session.findMany игнорирует include → бэкап терял GPS-точки и хвосты таблиц.
+    // Спека §8.2/§9.8 требует полного экспорта — прямой SQL гарантирует полноту.
+    const tables = [
+      "Session", "GpsPoint", "Route", "RouteCache", "TrafficJob",
+      "AuditLog", "ExportJob", "BackupJob", "Setting",
+    ] as const;
+    const rows: Record<string, unknown[]> = {};
+    const tableCounts: Record<string, number> = {};
+    for (const table of tables) {
+      const res = await libsql.execute(`SELECT * FROM ${table}`);
+      rows[table] = res.rows as unknown[];
+      tableCounts[table] = res.rows.length;
+    }
     const dump = {
       version: env().APP_VERSION,
       timestamp: new Date().toISOString(),
-      sessions: await db.session.findMany({ include: { gpsPoints: true } }),
-      routes: await db.route.findMany(),
-      routeCaches: (await libsql.execute("SELECT * FROM RouteCache")).rows,
-      trafficJobs: await db.trafficJob.findMany(),
-      auditLogs: await db.auditLog.findMany(),
-      // v2.9 fix: db.exportJob wrapper не определён в db.ts — используем прямой libsql-запрос
-      exportJobs: (await libsql.execute("SELECT * FROM ExportJob")).rows,
-      // v2.9: также включаем BackupJob и Setting для полноты дампа
-      backupJobs: (await libsql.execute("SELECT * FROM BackupJob")).rows,
-      settings: (await libsql.execute("SELECT * FROM Setting")).rows,
+      ...rows,
+      // User: без секретов (passwordHash) — только идентификационные поля
       users: (await libsql.execute("SELECT id, email, role, createdAt, updatedAt FROM User")).rows,
     };
+    tableCounts.User = dump.users.length;
 
     // BigInt-safe serialization: GpsPoint.timestamp is BigInt, JSON.stringify падает
     // Заменяем BigInt на строковое представление
@@ -72,10 +79,10 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
       targetType: "BackupJob",
       actorType: actorId ? "user" : "backup-cron",
       actorId,
-      metadata: { filePath, fileSize, checksum, verified },
+      metadata: { filePath, fileSize, checksum, verified, tableCounts },
     });
 
-    return { backupId: job.id, filePath, checksum, fileSize };
+    return { backupId: job.id, filePath, checksum, fileSize, tableCounts };
   } catch (err) {
     await db.backupJob.update({
       where: { id: job.id },

@@ -126,7 +126,7 @@ export function RoutePlanner() {
   }
 
   const markers = React.useMemo(() => {
-    const arr = [];
+    const arr: { lat: number; lon: number; label: string; variant: "start" | "end" }[] = [];
     if (start) arr.push({ lat: start.lat, lon: start.lon, label: "Старт", variant: "start" as const });
     if (end) arr.push({ lat: end.lat, lon: end.lon, label: "Финиш", variant: "end" as const });
     return arr;

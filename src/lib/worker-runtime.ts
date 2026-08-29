@@ -6,20 +6,40 @@ import { logger } from "./logger";
 import { inc, set } from "./metrics";
 import { routeRequest } from "./routing/chain";
 
-// P0-фикс v2.9.10 (Render build failure, корректная версия без костылей):
-// Турбопак помечает fs-операции с путём, вычисленным из env()-переменной во
-// время выполнения, как "dynamic filesystem access" и трассирует ВЕСЬ проект
-// (включая public/) → build failed. Решение: использовать СТРОКОВЫЙ ЛИТЕРАЛ
-// "/tmp/exports" (то же значение что и env var EXPORT_STORAGE_DIR в render.yaml).
-// Turbopack видит константу — никакой динамической трассировки.
+// P0-фикс v2.9.10 (Render build failure — финальная версия без костылей):
 //
-// ВАЖНО для Edge-совместимости: НЕ добавлять top-level import fs/path —
-// worker-runtime.ts загружается через instrumentation.ts, который Турбопак
-// собирает и для Edge Runtime (где fs/path недоступны). fs и path импортируем
-// ДИНАМИЧЕСКИ внутри pollExportJobs (await import) — оригинальный паттерн,
-// edge-совместимый: код fs-операций выполняется только в Node.js runtime.
-// Env-переопределение EXPORT_STORAGE_DIR намеренно НЕ применяется в fs-вызовах.
-const EXPORT_STORAGE_DIR = "/tmp/exports";
+// КОРНЕВАЯ ПРИЧИНА цепочки ошибок билда на Render:
+//  1) (v2.9.8, стабильно) env().EXPORT_STORAGE_DIR протекал в path.join →
+//     Turbopack warning "Dynamic filesystem access causes tracing of the
+//     whole project" → build failed.
+//  2) (v2.9.9 PR #19, изначально мержённый но упал на билде)
+//  3) (первая попытка v2.9.10, commit 58ac9ad) — добавил top-level
+//     `import fs from "fs"` / `import path from "path"` в этот файл →
+//     Edge Runtime (middleware.ts) бандлит instrumentation.ts + его
+//     динамический import этого файла → Edge не поддерживает Node.js
+//     fs/path → "A Node.js module is loaded which is not supported in
+//     the Edge Runtime" → build failed (line 4).
+//  4) (вторая попытка v2.9.10, commit e914d0c) — заменил top-level
+//     импорты на динамические `await import("fs")` / `await import("path")`
+//     ВНУТРИ pollExportJobs — но Turbopack-у всё равно видно ссылки на
+//     `path`/`fs` и он пытается их бандлить для Edge → та же ошибка
+//     на line 250 (const path = await import("path")).
+//
+// ПРАВИЛЬНЫЙ ФИКС без костылей:
+// Убрать fs/path операции ИЗ ЭТОГО ФАЙЛА ВООБЩЕ. Запись файла экспорта
+// в pollExportJobs была бесполезна — download-роут
+// /api/exports/[jobId]/download (см. src/app/api/exports/[jobId]/download/
+// route.ts:28-29) регенерирует контент на лету через generateExport() из
+// сессии в БД, а НЕ читает файл с диска. Сохраняем только метаданные в БД
+// (fileSize, expiresAt, фиктивный fileUrl для совместимости со схемой).
+// export.ts не использует fs/path — чистая функция, edge-совместимая.
+// const EXPORT_STORAGE_DIR больше не нужен.
+//
+// backup.ts остаётся с fs-операциями — он НЕ загружается через
+// instrumentation.ts (только через /api/admin/backup* API-роуты, у которых
+// runtime=nodejs по умолчанию в Next.js 16) → Edge-bundle его не видит.
+// В backup.ts path/fs импортированы статически на top-level (как в
+// оригинале) — это безопасно.
 
 const GLOBAL_KEY = "__telemetriaWorkerRuntime";
 const g = globalThis as unknown as { [GLOBAL_KEY]?: WorkerRuntime };
@@ -210,8 +230,10 @@ async function pollOnce(rt: WorkerRuntime) {
   }
 }
 
-// P1-8: воркер генерирует файл экспорта в EXPORT_STORAGE_DIR, ставит fileSize и
-// expiresAt = now + EXPORT_URL_TTL_HOURS (§4.12). Download-роут отдаёт файл.
+// P1-8: обработка ExportJob (раньше навсегда оставались pending → «вечные 202»).
+// v2.9.10: запись файла на диск убрана (download-роут регенерирует контент
+// на лету через generateExport). Worker только генерирует контент, считает
+// размер и обновляет метаданные в БД (fileSize, expiresAt).
 async function pollExportJobs(): Promise<void> {
   const now = new Date().toISOString();
   const claim = await libsql.execute({
@@ -243,18 +265,18 @@ async function pollExportJobs(): Promise<void> {
 
       const { generateExport } = await import("./export");
       const { content, ext } = generateExport(session as never, format);
-      // Динамические импорты fs/path ВНУТРИ функции — Edge-совместимый паттерн
-      // (top-level импорты ломают Edge Runtime bundle, см. коммент в начале файла).
-      // Статический строковый литерал EXPORT_STORAGE_DIR — Turbopack-friendly.
-      const fs = await import("fs");
-      const path = await import("path");
-      fs.mkdirSync(EXPORT_STORAGE_DIR, { recursive: true });
-      const filePath = path.join(EXPORT_STORAGE_DIR, `${jobId}.${ext}`);
-      fs.writeFileSync(filePath, content, "utf8");
+      // P0-фикс v2.9.10: запись файла экспорта на диск УБРАНА — она была
+      // бесполезна (download-роут регенерирует контент через generateExport()
+      // из сессии в БД, файл с диска не читается). Теперь worker-runtime.ts
+      // не содержит fs/path импортов вообще → Edge-bundle чистый → build OK.
+      // Сохраняем только метаданные в БД (fileSize, expiresAt). fileUrl
+      // хранит логический путь (для совместимости со схемой и логами), но
+      // это просто строка — fs-операций по ней нет.
+      const logicalFileRef = `export://${jobId}.${ext}`;
       const expiresAt = Date.now() + env().EXPORT_URL_TTL_HOURS * 3600 * 1000;
       await libsql.execute({
         sql: `UPDATE ExportJob SET status = 'completed', fileUrl = ?, fileSize = ?, expiresAt = ?, completedAt = ?, error = NULL, updatedAt = ? WHERE id = ?`,
-        args: [filePath, Buffer.byteLength(content), expiresAt, now, now, jobId],
+        args: [logicalFileRef, Buffer.byteLength(content), expiresAt, now, now, jobId],
       });
       inc("export_completed_total", "Exports completed", 1, format);
       logger.info("export job completed", { jobId, sessionId, format, bytes: Buffer.byteLength(content) });

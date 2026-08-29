@@ -19,3 +19,17 @@ f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-pro
 # Note: backup generated locally from fresh main clone + prod Turso dump.
 # /api/admin/backup на проде был запущен, но выявил предсуществующий v2.7 баг
 # (libsql is not defined) — пофикшен в commit e04a81d, redeploy запущен.
+
+# ── v2.9.1 addendum (2026-08-29) ────────────────────────────────────────────
+# Релиз v2.9.1 (feature round): GPX-экспорт канонического маршрута группы
+# (GET /api/routes/[id]/gpx), мини-карты групп (polylineSample + severity-
+# подсветка хотспотов §10.6), elevation-система UI (elev-1/2/3, metric-tile).
+# Полнота бэкапа: P0-фикс runBackup (все 10 таблиц + tableCounts) — PR #5.
+# Документы в репо изменились ПОСЛЕ бэкап-артефактов выше:
+#   ADMIN_SPEC.md (текущий, v2.9.1):
+#   da06c26b9e99ee112e03264b7ecf6f5cb3cb94fb398a6ce31d16e9e431d84cc1  docs/ADMIN_SPEC.md
+#   METHODOLOGY.md — без изменений:
+#   7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b  docs/METHODOLOGY.md
+#   OPERATIONS.md — без изменений:
+#   8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a  docs/OPERATIONS.md
+# Следующий полный бэкап (/api/admin/backup) зафиксирует новые SHA256 целиком.

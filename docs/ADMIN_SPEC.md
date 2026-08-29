@@ -1318,6 +1318,7 @@ libsql dump.sql -u libsql://... -t token
 | /api/routes/[id]/trend                    | GET              | Cookie/API_KEY      | Theil-Sen-тренд activeDuration по сессиям routeId + CI 95% |
 | /api/routes/[id]/hotspots                 | GET              | Cookie/API_KEY      | HotspotSegments (P75 < 0.5) по сессиям routeId          |
 | /api/routes/[id]/gpx                      | GET              | Cookie/API_KEY      | GPX 1.1-трек канонического маршрута группы routeHash (v2.9.1) |
+| /api/routes/grouped/export                | GET              | Cookie/API_KEY      | CSV-экспорт агрегатов всех routeHash-групп (v2.9.2)        |
 | /api/exports/[jobId]                      | GET              | Cookie/API_KEY      | Статус экспорта                                         |
 | /api/exports/[jobId]/download             | GET              | token               | Скачивание файла                                        |
 | /api/admin/backup                         | POST             | Bearer ADMIN_TOKEN  | Резервная копия                                         |
@@ -1346,6 +1347,8 @@ libsql dump.sql -u libsql://... -t token
 > Endpoints `/api/sessions/[id]/route-comparison`, `/api/routes/[id]/trend`, `/api/routes/[id]/hotspots`, `/api/routes/grouped` — реализованы в v2.9 (см. `src/lib/route-comparison.ts`): группировка по `Session.routeHash` (§10.0), агрегаты по `activeDuration` с фильтром `SessionReliability ≥ 0.6` (§10.1), Theil-Sen + bootstrap (§10.5), P75-хотспоты (§10.6). Для `[id]` trend/hotspots принимают routeHash (16-hex) либо UUID админского Route (fallback по FK).
 >
 > v2.9.1: `GET /api/routes/[id]/gpx` ([id] = routeHash) — GPX 1.1-экспорт канонического полилийна группы: сегменты последнего completed TrafficJob, fallback — активная часть первой сессии (прорежено до ~40 точек). Ответ: `application/gpx+xml`, `Content-Disposition: attachment; filename="route-<routeHash>.gpx"`; 404 при отсутствии группы или полилийна. Тот же канонический полилийн используется UI для мини-карты группы; хотспоты-эндпоинт дополнительно возвращает геометрию сегментов (`a`/`b`) для severity-подсветки (§10.6).
+>
+> v2.9.2: `GET /api/routes/grouped/export?format=csv` — CSV-экспорт агрегатов всех routeHash-групп (12 колонок: routeHash, topologyHash, sessionCount, avg/best/worst/stdDev ActiveDurationSec, avgDistanceM, firstSeen, lastSeen, deviceIds, sessionIds). Ответ: `text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="route-groups-<timestamp>.csv"`. 400 при `format != csv`.
 
 ## Приложение Б. Глоссарий
 

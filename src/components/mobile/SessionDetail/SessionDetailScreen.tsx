@@ -3,14 +3,19 @@
 // src/components/mobile/SessionDetail/SessionDetailScreen.tsx
 // ТЗ §2.4: Экран 2 — Детали поездки + Карта
 // Header + Map (240pt) + 6 MetricTiles + 5 tabs
+// v2.9.5: связка карта↔график (как на десктопе v2.9.4): тап по графику →
+// пульсирующий маркер на карте; тап по карте → кросхейр на графиках.
+// v2.9.5: полноэкранный экран «Карта + профили» (кнопка развернуть).
+// v2.9.5: вкладка «Сегменты» — реальные данные таймлайна (движение/стоянка/разрыв)
+// вместо заглушки; список стоянок с переходом к точке на карте.
 
 import * as React from "react";
 import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
-import { ArrowLeft, MoreVertical, Download, Trash2 } from "lucide-react";
+import { ArrowLeft, MoreVertical, Maximize2, X, Clock, MapPin, AlertTriangle, Gauge } from "lucide-react";
 import { useSession, useSessionStats } from "@/lib/hooks";
 import { MetricTile } from "../shared/MetricTile";
-import { SpeedProfileChart } from "@/components/speed-profile-chart";
+import { SpeedProfileChart, type SpeedProfilePointView } from "@/components/speed-profile-chart";
 import { AltitudeProfileChart } from "@/components/altitude-profile-chart";
 const MapTrack = dynamic(() => import("@/components/map-track"), { ssr: false, loading: () => <div className="h-full flex items-center justify-center text-xs text-muted-foreground">Загрузка карты…</div> });
 import { Skeleton } from "@/components/ui/skeleton";
@@ -18,7 +23,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 // Leaflet removed — using MapTrack instead
 import { cn } from "@/lib/utils";
-
 
 
 
@@ -37,7 +41,18 @@ interface SessionDetailScreenProps {
   onBack: () => void;
 }
 
+function fmtClock(startMs: number, tSec: number): string {
+  const d = new Date(startMs + tSec * 1000);
+  return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+}
 
+function fmtDur(sec: number): string {
+  if (sec < 60) return `${Math.round(sec)}с`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  if (m < 60) return s === 0 ? `${m}м` : `${m}м ${s}с`;
+  return `${Math.floor(m / 60)}ч ${m % 60}м`;
+}
 
 export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenProps) {
   const [tab, setTab] = React.useState<DetailTab>("speed");
@@ -45,13 +60,57 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
   const { data: stats } = useSessionStats(sessionId);
 
   const points = (session as any)?.points || [];
+  const profile = (stats?.speedProfile as SpeedProfilePointView[] | undefined) ?? undefined;
+  const startMs = stats?.startTime ? new Date(stats.startTime).getTime() : 0;
+
+  // v2.9.5: связка карта↔график (паритет с десктопом)
+  const [pinnedIdx, setPinnedIdx] = React.useState<number | null>(null);
+  const [mapClickIdx, setMapClickIdx] = React.useState<number | null>(null);
+  const [mapFullscreen, setMapFullscreen] = React.useState(false);
+  const mapWrapRef = React.useRef<HTMLDivElement>(null);
+
+  // точка фокуса на карте — закреплённая точка графика (или тап по карте)
+  const focusSample = pinnedIdx != null && profile ? profile[pinnedIdx] : null;
+  const focusPoint = focusSample?.lat != null && focusSample?.lng != null
+    ? { lat: focusSample.lat, lon: focusSample.lng }
+    : null;
+
+  // тап по графику: закрепить точку + показать на карте (скролл к карте)
+  const handlePin = React.useCallback((idx: number | null) => {
+    setPinnedIdx(idx);
+    if (idx != null) {
+      setMapClickIdx(null);
+      mapWrapRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, []);
+
+  // тап по карте: ближайший сэмпл по lat/lng → кросхейр на графиках
+  const handleMapClick = React.useCallback((lat: number, lon: number) => {
+    if (!profile || profile.length === 0) return;
+    let idx = 0;
+    let best = Infinity;
+    for (let i = 0; i < profile.length; i++) {
+      const s = profile[i];
+      if (s.lat == null || s.lng == null) continue;
+      const d = (s.lat - lat) ** 2 + (s.lng - lon) ** 2;
+      if (d < best) { best = d; idx = i; }
+    }
+    setMapClickIdx(idx);
+  }, [profile]);
+
+  const linkProps = {
+    onPinIdx: handlePin,
+    onHoverIdx: undefined,
+    externalIdx: mapClickIdx,
+    pinnedIdx,
+  };
 
   return (
     <div className="flex flex-col h-full pb-16">
       {/* Header (56pt) */}
       <header className="sticky top-0 z-20 bg-card/95 backdrop-blur-md border-b safe-top">
         <div className="flex items-center justify-between px-2 h-14">
-          <button onClick={onBack} className="flex items-center gap-1 p-2 min-w-[44px] min-h-[44px]">
+          <button onClick={onBack} className="flex items-center gap-1 p-2 min-w-[44px] min-h-[44px]" aria-label="Назад">
             <ArrowLeft className="h-5 w-5" />
           </button>
           <div className="flex-1 text-center">
@@ -60,25 +119,64 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
             </div>
             {stats && <div className="text-[11px] text-muted-foreground">{Math.round(stats.duration / 60)} мин</div>}
           </div>
-          <button className="p-2 min-w-[44px] min-h-[44px]">
+          <button className="p-2 min-w-[44px] min-h-[44px]" aria-label="Ещё">
             <MoreVertical className="h-5 w-5 text-muted-foreground" />
           </button>
         </div>
       </header>
 
       <div className="flex-1 overflow-y-auto scroll-telem">
-        {/* Map (240pt) */}
-        <div className="relative h-[240px] bg-muted">
+        {/* Map (240pt) — v2.9.5: кнопка развернуть + маркер фокуса */}
+        <div className="relative h-[240px] bg-muted" ref={mapWrapRef}>
           {isLoading ? (
             <Skeleton className="h-full w-full shimmer" />
           ) : points.length > 0 ? (
-            <MapTrack points={points} height="240px" fitToPoints />
+            <MapTrack
+              points={points}
+              height="240px"
+              fitToPoints
+              focusPoint={focusPoint}
+              panToFocus={pinnedIdx != null}
+              onMapClick={profile && profile.length > 0 ? handleMapClick : undefined}
+            />
           ) : (
             <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
               Нет GPS данных
             </div>
           )}
+          {/* v2.9.5: полноэкранный режим карты */}
+          {points.length > 0 && (
+            <button
+              onClick={() => setMapFullscreen(true)}
+              className="absolute bottom-3 right-3 z-[1001] flex items-center gap-1.5 px-3 py-2 rounded-lg bg-background/95 backdrop-blur-sm border shadow-sm text-[11px] font-medium min-h-[36px]"
+              aria-label="Развернуть карту"
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+              Во весь экран
+            </button>
+          )}
         </div>
+
+        {/* v2.9.5: индикатор закреплённой точки (подсказка связки) */}
+        {pinnedIdx != null && profile && profile[pinnedIdx] && (
+          <div className="mx-4 mt-2 flex items-center gap-2 rounded-lg border bg-primary/5 px-3 py-2 text-[11px]">
+            <MapPin className="h-3.5 w-3.5 shrink-0 text-primary" />
+            <span className="text-muted-foreground">Точка закреплена:</span>
+            <span className="font-semibold tabular-nums">
+              {startMs > 0 ? fmtClock(startMs, profile[pinnedIdx].t) : `+${fmtDur(profile[pinnedIdx].t)}`}
+            </span>
+            {profile[pinnedIdx].v != null && (
+              <span className="tabular-nums text-muted-foreground">· {profile[pinnedIdx].v} км/ч</span>
+            )}
+            <button
+              onClick={() => setPinnedIdx(null)}
+              className="ml-auto p-1 -m-1 shrink-0"
+              aria-label="Открепить точку"
+            >
+              <X className="h-3.5 w-3.5 text-muted-foreground" />
+            </button>
+          </div>
+        )}
 
         {/* Metric tiles (6, 3 in row) — v2.9: поля из methodology/route (были top-level в v2.7) */}
         {stats && (
@@ -127,23 +225,127 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
 
         {/* Tab content */}
         <div className="px-4 pb-4">
-          {tab === "speed" && <SpeedTabContent points={points} stats={stats} />}
-          {tab === "segments" && <SegmentsTabContent />}
+          {tab === "speed" && <SpeedTabContent points={points} stats={stats} linkProps={linkProps} />}
+          {tab === "segments" && <SegmentsTabContent stats={stats} profile={profile} startMs={startMs} onFocusStop={handlePin} />}
           {tab === "deviations" && <DeviationsTabContent stats={stats} />}
-          {tab === "altitude" && <AltitudeTabContent points={points} stats={stats} />}
+          {tab === "altitude" && <AltitudeTabContent points={points} stats={stats} linkProps={linkProps} />}
           {tab === "summary" && <SummaryTabContent stats={stats} />}
         </div>
       </div>
+
+      {/* v2.9.5: полноэкранный экран «Карта + профили» */}
+      {mapFullscreen && (
+        <FullscreenMapScreen
+          points={points}
+          stats={stats}
+          onClose={() => setMapFullscreen(false)}
+          pinnedIdx={pinnedIdx}
+          mapClickIdx={mapClickIdx}
+          onPin={handlePin}
+          onMapClick={handleMapClick}
+        />
+      )}
     </div>
+  );
+}
+
+// === v2.9.5: полноэкранный экран карты с профилями снизу ===
+function FullscreenMapScreen({
+  points,
+  stats,
+  onClose,
+  pinnedIdx,
+  mapClickIdx,
+  onPin,
+  onMapClick,
+}: {
+  points: any[];
+  stats: any;
+  onClose: () => void;
+  pinnedIdx: number | null;
+  mapClickIdx: number | null;
+  onPin: (idx: number | null) => void;
+  onMapClick: (lat: number, lon: number) => void;
+}) {
+  const profile = (stats?.speedProfile as SpeedProfilePointView[] | undefined) ?? undefined;
+  const focusSample = pinnedIdx != null && profile ? profile[pinnedIdx] : null;
+  const focusPoint = focusSample?.lat != null && focusSample?.lng != null
+    ? { lat: focusSample.lat, lon: focusSample.lng }
+    : null;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="fixed inset-0 z-[60] bg-background flex flex-col safe-top"
+      role="dialog"
+      aria-label="Карта и профили поездки"
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-2 h-14 border-b shrink-0">
+        <div className="px-2 text-sm font-semibold">
+          Карта · профили
+          {stats && <span className="ml-2 text-[11px] font-normal text-muted-foreground">{(stats.distance / 1000).toFixed(1)} км</span>}
+        </div>
+        <button onClick={onClose} className="p-2 m-1 min-w-[44px] min-h-[44px] flex items-center justify-center" aria-label="Закрыть">
+          <X className="h-5 w-5" />
+        </button>
+      </div>
+
+      {/* Map — flex-1 */}
+      <div className="flex-1 min-h-0 relative">
+        <MapTrack
+          points={points}
+          height="100%"
+          fitToPoints
+          focusPoint={focusPoint}
+          panToFocus={pinnedIdx != null}
+          onMapClick={profile && profile.length > 0 ? onMapClick : undefined}
+        />
+      </div>
+
+      {/* Профили снизу — связаны с картой */}
+      <div className="shrink-0 border-t bg-card px-3 pt-2 pb-3 space-y-2 max-h-[46vh] overflow-y-auto scroll-telem">
+        {profile && profile.length >= 2 ? (
+          <>
+            <SpeedProfileChart
+              profile={profile}
+              startIso={stats?.startTime}
+              avgKmh={stats?.avgSpeed != null ? stats.avgSpeed * 3.6 : null}
+              maxKmh={stats?.maxSpeed != null ? stats.maxSpeed * 3.6 : null}
+              height={150}
+              compact
+              onPinIdx={onPin}
+              externalIdx={mapClickIdx}
+              pinnedIdx={pinnedIdx}
+            />
+            {stats?.hasAltitude && (
+              <AltitudeProfileChart
+                profile={profile}
+                startIso={stats?.startTime}
+                height={120}
+                compact
+                onPinIdx={onPin}
+                externalIdx={mapClickIdx}
+                pinnedIdx={pinnedIdx}
+              />
+            )}
+          </>
+        ) : (
+          <div className="text-xs text-muted-foreground py-6 text-center">Недостаточно данных</div>
+        )}
+      </div>
+    </motion.div>
   );
 }
 
 // === Tab contents ===
 
-function SpeedTabContent({ points, stats }: { points: any[]; stats: any }) {
+function SpeedTabContent({ points, stats, linkProps }: { points: any[]; stats: any; linkProps: any }) {
   const maxSpeed = stats?.maxSpeed ? Math.round(stats.maxSpeed * 3.6) : 0;
   const avgSpeed = stats?.avgSpeed ? Math.round(stats.avgSpeed * 3.6) : 0;
-  const profile = stats?.speedProfile as Array<{ t: number; v: number | null; st: 0 | 1 | 2; alt?: number | null; lat?: number; lng?: number }> | undefined;
+  const profile = stats?.speedProfile as SpeedProfilePointView[] | undefined;
 
   return (
     <div className="space-y-3">
@@ -155,7 +357,8 @@ function SpeedTabContent({ points, stats }: { points: any[]; stats: any }) {
           <div><span className="text-muted-foreground">Круиз: </span><span className="font-bold tabular-nums">{Math.round(stats.methodology.timeAtCruise / 60)} мин</span></div>
         )}
       </div>
-      {/* v2.9.3: спидограмма — общий компонент с таймлайном состояний и кросхейром */}
+      {/* v2.9.3: спидограмма — общий компонент с таймлайном состояний и кросхейром.
+          v2.9.5: связка с картой — тап по графику закрепляет точку (маркер на карте) */}
       {profile && profile.length >= 2 ? (
         <SpeedProfileChart
           profile={profile}
@@ -164,6 +367,7 @@ function SpeedTabContent({ points, stats }: { points: any[]; stats: any }) {
           maxKmh={stats?.maxSpeed != null ? stats.maxSpeed * 3.6 : null}
           height={150}
           compact
+          {...linkProps}
         />
       ) : (
         <div className="text-xs text-muted-foreground py-8 text-center">
@@ -177,16 +381,192 @@ function SpeedTabContent({ points, stats }: { points: any[]; stats: any }) {
           startIso={stats?.startTime}
           height={120}
           compact
+          {...linkProps}
         />
+      )}
+      {/* v2.9.5: подсказка связки */}
+      {profile && profile.length >= 2 && (
+        <p className="text-[10px] text-muted-foreground text-center">
+          Нажмите на график — точка появится на карте выше
+        </p>
       )}
     </div>
   );
 }
 
-function SegmentsTabContent() {
+// === v2.9.5: Сегменты — реальный таймлайн движения/стоянок/разрывов (§4.6) ===
+interface SegRun { st: 0 | 1 | 2; t0: number; t1: number; idx0: number; idx1: number; }
+
+function computeRuns(profile: SpeedProfilePointView[]): SegRun[] {
+  const runs: SegRun[] = [];
+  let start = 0;
+  for (let i = 1; i <= profile.length; i++) {
+    if (i === profile.length || profile[i].st !== profile[start].st) {
+      runs.push({
+        st: profile[start].st,
+        t0: profile[start].t,
+        t1: profile[Math.min(i, profile.length - 1)].t,
+        idx0: start,
+        idx1: Math.min(i, profile.length - 1),
+      });
+      start = i;
+    }
+  }
+  return runs;
+}
+
+function SegmentsTabContent({
+  stats,
+  profile,
+  startMs,
+  onFocusStop,
+}: {
+  stats: any;
+  profile?: SpeedProfilePointView[];
+  startMs: number;
+  onFocusStop: (idx: number | null) => void;
+}) {
+  if (!profile || profile.length < 2) {
+    return <div className="text-xs text-muted-foreground py-8 text-center">Нет данных сегментов</div>;
+  }
+
+  const runs = computeRuns(profile);
+  const totalT = Math.max(profile[profile.length - 1].t, 1);
+  const sumBy = (st: 0 | 1 | 2) => runs.filter(r => r.st === st).reduce((a, r) => a + (r.t1 - r.t0), 0);
+  const moving = sumBy(1);
+  const idle = sumBy(0);
+  const gap = sumBy(2);
+
+  // стоянки ≥ 60с — карточки с тапом → маркер на карте
+  const stops = runs.filter(r => r.st === 0 && r.t1 - r.t0 >= 60);
+  const gaps = runs.filter(r => r.st === 2);
+
+  const STATE_META: Record<0 | 1 | 2, { label: string; bg: string; text: string }> = {
+    1: { label: "Движение", bg: "bg-emerald-500/85", text: "text-emerald-700 dark:text-emerald-400" },
+    0: { label: "Стоянка", bg: "bg-amber-400/85", text: "text-amber-700 dark:text-amber-400" },
+    2: { label: "Разрыв", bg: "bg-red-500/85", text: "text-red-700 dark:text-red-400" },
+  };
+
   return (
-    <div className="text-xs text-muted-foreground py-8 text-center">
-      Сегментный анализ будет доступен после построения маршрута
+    <div className="space-y-4">
+      {/* Сводка состояний */}
+      <div className="grid grid-cols-3 gap-2">
+        <div className="rounded-xl border bg-card p-2.5 text-center">
+          <div className="text-lg font-bold tabular-nums leading-none">{fmtDur(moving)}</div>
+          <div className="text-[10px] text-muted-foreground uppercase tracking-wide mt-1">в движении</div>
+        </div>
+        <div className="rounded-xl border bg-card p-2.5 text-center">
+          <div className="text-lg font-bold tabular-nums leading-none">{fmtDur(idle)}</div>
+          <div className="text-[10px] text-muted-foreground uppercase tracking-wide mt-1">стоянки</div>
+        </div>
+        <div className="rounded-xl border bg-card p-2.5 text-center">
+          <div className="text-lg font-bold tabular-nums leading-none">{gap > 0 ? fmtDur(gap) : "0с"}</div>
+          <div className="text-[10px] text-muted-foreground uppercase tracking-wide mt-1">разрывы</div>
+        </div>
+      </div>
+
+      {/* Таймлайн-полоса (пропорционально времени) */}
+      <div>
+        <div className="flex items-center justify-between mb-1.5">
+          <h4 className="text-xs font-semibold">Таймлайн поездки</h4>
+          <div className="flex gap-2.5 text-[10px] text-muted-foreground">
+            {([1, 0, 2] as const).map(st => (
+              <span key={st} className="inline-flex items-center gap-1">
+                <span className={cn("h-2 w-2 rounded-full", STATE_META[st].bg)} />
+                {STATE_META[st].label.toLowerCase()}
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="flex h-6 rounded-lg overflow-hidden border bg-muted/50">
+          {runs.map((r, i) => {
+            const w = ((r.t1 - r.t0) / totalT) * 100;
+            if (w <= 0) return null;
+            return (
+              <button
+                key={i}
+                className={cn(STATE_META[r.st].bg, "h-full min-w-[2px] transition-opacity active:opacity-70")}
+                style={{ width: `${w}%` }}
+                onClick={() => onFocusStop(r.idx0)}
+                aria-label={`${STATE_META[r.st].label}: ${startMs > 0 ? fmtClock(startMs, r.t0) : fmtDur(r.t0)} — ${fmtDur(r.t1 - r.t0)}`}
+                title={`${STATE_META[r.st].label} · ${fmtDur(r.t1 - r.t0)}`}
+              />
+            );
+          })}
+        </div>
+        <div className="flex justify-between mt-1 text-[10px] text-muted-foreground tabular-nums">
+          <span>{startMs > 0 ? fmtClock(startMs, 0) : "0с"}</span>
+          <span>{fmtDur(totalT)}</span>
+        </div>
+      </div>
+
+      {/* Стоянки ≥ 1 мин */}
+      {stops.length > 0 && (
+        <div>
+          <h4 className="text-xs font-semibold mb-2 flex items-center gap-1.5">
+            <Clock className="h-3.5 w-3.5 text-amber-500" />
+            Стоянки ({stops.length})
+          </h4>
+          <div className="space-y-1.5">
+            {stops.map((r, i) => (
+              <button
+                key={i}
+                onClick={() => onFocusStop(Math.round((r.idx0 + r.idx1) / 2))}
+                className="w-full flex items-center gap-3 rounded-lg border bg-card px-3 py-2.5 text-left active:bg-accent transition-colors"
+              >
+                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/15 shrink-0">
+                  <Clock className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+                </span>
+                <span className="flex-1 min-w-0">
+                  <span className="block text-xs font-medium tabular-nums">
+                    {startMs > 0 ? fmtClock(startMs, r.t0) : `+${fmtDur(r.t0)}`} — {startMs > 0 ? fmtClock(startMs, r.t1) : `+${fmtDur(r.t1)}`}
+                  </span>
+                  <span className="block text-[10px] text-muted-foreground">нажмите, чтобы увидеть место на карте</span>
+                </span>
+                <span className="text-sm font-bold tabular-nums text-amber-700 dark:text-amber-400 shrink-0">
+                  {fmtDur(r.t1 - r.t0)}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Разрывы записи */}
+      {gaps.length > 0 && (
+        <div>
+          <h4 className="text-xs font-semibold mb-2 flex items-center gap-1.5">
+            <AlertTriangle className="h-3.5 w-3.5 text-red-500" />
+            Разрывы записи ({gaps.length})
+          </h4>
+          <div className="space-y-1.5">
+            {gaps.map((r, i) => (
+              <button
+                key={i}
+                onClick={() => onFocusStop(r.idx0)}
+                className="w-full flex items-center gap-3 rounded-lg border bg-card px-3 py-2.5 text-left active:bg-accent transition-colors"
+              >
+                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-red-500/15 shrink-0">
+                  <AlertTriangle className="h-4 w-4 text-red-600 dark:text-red-400" />
+                </span>
+                <span className="flex-1 min-w-0 text-xs font-medium tabular-nums">
+                  {startMs > 0 ? fmtClock(startMs, r.t0) : `+${fmtDur(r.t0)}`} — {startMs > 0 ? fmtClock(startMs, r.t1) : `+${fmtDur(r.t1)}`}
+                </span>
+                <span className="text-sm font-bold tabular-nums text-red-700 dark:text-red-400 shrink-0">
+                  {fmtDur(r.t1 - r.t0)}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {stops.length === 0 && gaps.length === 0 && (
+        <div className="flex items-center gap-2 rounded-lg border bg-card px-3 py-3 text-xs text-muted-foreground">
+          <Gauge className="h-4 w-4 shrink-0 text-emerald-500" />
+          Поездка без длительных стоянок и разрывов — равномерное движение
+        </div>
+      )}
     </div>
   );
 }
@@ -217,8 +597,8 @@ function DeviationsTabContent({ stats }: { stats: any }) {
   );
 }
 
-function AltitudeTabContent({ points, stats }: { points: any[]; stats: any }) {
-  const profile = stats?.speedProfile as Array<{ t: number; v: number | null; st: 0 | 1 | 2; alt?: number | null }> | undefined;
+function AltitudeTabContent({ points, stats, linkProps }: { points: any[]; stats: any; linkProps: any }) {
+  const profile = stats?.speedProfile as SpeedProfilePointView[] | undefined;
   const altPoints = points.filter((p: any) => p.altitude != null);
   if (altPoints.length < 2 || !profile) {
     return <div className="text-xs text-muted-foreground py-8 text-center">Нет данных о высоте</div>;
@@ -232,12 +612,14 @@ function AltitudeTabContent({ points, stats }: { points: any[]; stats: any }) {
         <div><span className="text-muted-foreground">Набор: </span><span className="font-bold tabular-nums">{stats?.elevationGain ? Math.round(stats.elevationGain) : "—"} м</span></div>
         <div><span className="text-muted-foreground">Снижение: </span><span className="font-bold tabular-nums">{stats?.elevationLoss ? Math.round(stats.elevationLoss) : "—"} м</span></div>
       </div>
-      {/* v2.9.4: общий высотный профиль с кросхейром/тултипом вместо базового SVG */}
+      {/* v2.9.4: общий высотный профиль с кросхейром/тултипом вместо базового SVG.
+          v2.9.5: связка с картой (тап → маркер на карте). */}
       <AltitudeProfileChart
         profile={profile}
         startIso={stats?.startTime}
         height={160}
         compact
+        {...linkProps}
       />
     </div>
   );

@@ -32,6 +32,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { fmtDate, fmtBytes, fmtNumber, avgSpeed, trackDistance } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { ActivityHeatmap } from "./activity-heatmap";
 import { WeeklyStatsChart } from "./weekly-stats-chart";
 import { LastUpdated } from "./last-updated";
@@ -106,42 +107,77 @@ export function DashboardOverview({
           icon={<Cpu className="h-4 w-4" />}
           label="Uptime системы"
           value={health ? `${Math.round(health.uptime / 60)} мин` : null}
-          subtitle={`v${health?.version ?? "2.9.0"}`}
+          subtitle={`v${health?.version ?? "2.9.3"}`}
           color="zinc"
         />
       </div>
 
-      {/* Capacity alert / health strip */}
-      {stats?.capacity && (
-        <Card className="border-emerald-500/30 bg-emerald-500/5">
-          <CardContent className="py-3 px-4 flex items-center gap-3 flex-wrap text-xs">
-            <div className="flex items-center gap-1.5 text-emerald-700 dark:text-emerald-400 font-medium">
-              <Zap className="h-3.5 w-3.5" />
-              Пропускная способность
-            </div>
-            <span className="text-muted-foreground">|</span>
-            <span>
-              Цель: <span className="font-mono font-semibold">{stats.capacity.targetLoadRpm}</span> сесс/мин
-            </span>
-            <span className="text-muted-foreground">·</span>
-            <span>
-              Rate limit: <span className="font-mono font-semibold">{stats.capacity.rateLimitMaxIngest}</span>/мин
-            </span>
-            <span className="text-muted-foreground">·</span>
-            <span>
-              Headroom:{" "}
-              <span className="font-mono font-semibold text-emerald-600 dark:text-emerald-400">
-                +{stats.capacity.headroom}
-              </span>{" "}
-              ({Math.round((stats.capacity.headroom / stats.capacity.targetLoadRpm) * 100)}%)
-            </span>
-            <Badge variant="outline" className="border-emerald-500/30 text-emerald-700 dark:text-emerald-400 ml-auto">
-              OK
-            </Badge>
-            <LastUpdated queryKey="stats" className="ml-2" />
-          </CardContent>
-        </Card>
-      )}
+      {/* Capacity alert / health strip — v2.9.3: live-индикатор + семантика headroom */}
+      {stats?.capacity && (() => {
+        const headroomPct = Math.round((stats.capacity.headroom / stats.capacity.targetLoadRpm) * 100);
+        const level = headroomPct < 10 ? "critical" : headroomPct < 20 ? "tight" : "ok";
+        const levelCls =
+          level === "critical"
+            ? "border-red-500/30 bg-red-500/5"
+            : level === "tight"
+            ? "border-amber-500/30 bg-amber-500/5"
+            : "border-emerald-500/30 bg-emerald-500/5";
+        const headroomCls =
+          level === "critical"
+            ? "text-red-600 dark:text-red-400"
+            : level === "tight"
+            ? "text-amber-600 dark:text-amber-400"
+            : "text-emerald-600 dark:text-emerald-400";
+        return (
+          <Card className={levelCls}>
+            <CardContent className="py-3 px-4 flex items-center gap-3 flex-wrap text-xs">
+              <div className="flex items-center gap-2 font-medium text-foreground/80">
+                {/* v2.9.3: пульсирующая точка — система жива */}
+                <span
+                  className={cn(
+                    "live-dot",
+                    level === "tight" && "live-dot--warn",
+                    level === "critical" && "live-dot--crit"
+                  )}
+                  aria-hidden
+                />
+                <Zap className="h-3.5 w-3.5 text-primary" />
+                Пропускная способность
+              </div>
+              <span className="text-muted-foreground">|</span>
+              <span>
+                Цель: <span className="font-mono font-semibold">{stats.capacity.targetLoadRpm}</span> сесс/мин
+              </span>
+              <span className="text-muted-foreground">·</span>
+              <span>
+                Rate limit: <span className="font-mono font-semibold">{stats.capacity.rateLimitMaxIngest}</span>/мин
+              </span>
+              <span className="text-muted-foreground">·</span>
+              <span>
+                Headroom:{" "}
+                <span className={cn("font-mono font-semibold", headroomCls)}>
+                  +{stats.capacity.headroom}
+                </span>{" "}
+                ({headroomPct}%)
+              </span>
+              <Badge
+                variant="outline"
+                className={cn(
+                  "ml-auto",
+                  level === "critical"
+                    ? "border-red-500/30 text-red-700 dark:text-red-400"
+                    : level === "tight"
+                    ? "border-amber-500/30 text-amber-700 dark:text-amber-400"
+                    : "border-emerald-500/30 text-emerald-700 dark:text-emerald-400"
+                )}
+              >
+                {level === "ok" ? "OK" : level === "tight" ? "Тесно" : "Критично"}
+              </Badge>
+              <LastUpdated queryKey="stats" className="ml-2" />
+            </CardContent>
+          </Card>
+        );
+      })()}
 
       {/* Pending jobs alert */}
       {stats && stats.pendingJobs > 0 && (
@@ -185,11 +221,11 @@ export function DashboardOverview({
             {sessions[0] ? (
               <LastSessionMap sessionId={sessions[0].id} onOpen={() => onOpenSession(sessions[0].id)} />
             ) : (
-              <div className="h-[260px] rounded-lg bg-muted/40 flex items-center justify-center text-sm text-muted-foreground border border-dashed">
+              <div className="empty-state h-[260px] text-sm text-muted-foreground">
                 <div className="text-center space-y-1">
                   <MapPin className="h-8 w-8 mx-auto opacity-30" />
                   <div>Нет сессий</div>
-                  <Button size="sm" variant="outline" onClick={onGoToSessions} className="mt-2">
+                  <Button size="sm" onClick={onGoToSessions} className="mt-2">
                     Перейти к импорту CSV
                   </Button>
                 </div>
@@ -374,12 +410,12 @@ function StatCard({
         )}
       </div>
       <div className="space-y-0.5">
-        <div className="text-xs text-muted-foreground truncate">{label}</div>
+        <div className="text-[10px] text-muted-foreground uppercase tracking-wide font-medium truncate">{label}</div>
         <div className="text-xl font-semibold tabular-nums">
           {value === null ? <Skeleton className="h-5 w-16 shimmer" /> : value}
         </div>
         {subtitle && (
-          <div className="text-[10px] text-muted-foreground truncate">{subtitle}</div>
+          <div className="text-[10px] text-muted-foreground/80 truncate">{subtitle}</div>
         )}
       </div>
     </motion.div>
@@ -435,7 +471,7 @@ function LastSessionMap({
   }
   if (points.length === 0) {
     return (
-      <div className="h-[260px] rounded-lg bg-muted/40 flex items-center justify-center text-sm text-muted-foreground border border-dashed">
+      <div className="empty-state h-[260px] text-sm text-muted-foreground">
         Нет GPS-точек
       </div>
     );
@@ -444,20 +480,20 @@ function LastSessionMap({
     <div className="space-y-3">
       <MapTrack points={points} height="260px" fitToPoints />
       <div className="grid grid-cols-3 gap-3 text-xs">
-        <div className="rounded-lg bg-muted/40 p-2">
-          <div className="text-muted-foreground text-[10px] mb-0.5">Ср. скорость</div>
+        <div className="rounded-lg bg-muted/40 p-2 border border-border/50">
+          <div className="text-muted-foreground text-[10px] mb-0.5 uppercase tracking-wide">Ср. скорость</div>
           <div className="font-semibold tabular-nums">
             {meta?.speed != null ? `${fmtNumber(meta.speed, 1)} км/ч` : "—"}
           </div>
         </div>
-        <div className="rounded-lg bg-muted/40 p-2">
-          <div className="text-muted-foreground text-[10px] mb-0.5">Дистанция</div>
+        <div className="rounded-lg bg-muted/40 p-2 border border-border/50">
+          <div className="text-muted-foreground text-[10px] mb-0.5 uppercase tracking-wide">Дистанция</div>
           <div className="font-semibold tabular-nums">
             {meta && meta.dist > 0 ? `${fmtNumber(meta.dist / 1000, 2)} км` : "—"}
           </div>
         </div>
-        <div className="rounded-lg bg-muted/40 p-2">
-          <div className="text-muted-foreground text-[10px] mb-0.5">Длительность</div>
+        <div className="rounded-lg bg-muted/40 p-2 border border-border/50">
+          <div className="text-muted-foreground text-[10px] mb-0.5 uppercase tracking-wide">Длительность</div>
           <div className="font-semibold tabular-nums">
             {meta?.duration ? formatDuration(meta.duration) : "—"}
           </div>

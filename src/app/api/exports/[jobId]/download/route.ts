@@ -22,7 +22,8 @@ export async function GET(
     });
     if (!job) return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     if (job.status !== "completed") return json({ error: "Not ready" }, 202, { "X-Request-Id": requestId });
-    if (job.expiresAt && job.expiresAt < new Date()) return json({ error: "Expired" }, 410, { "X-Request-Id": requestId });
+    // v2.9.4 fix: expiresAt — ISO-строка; new Date() парсит и строку, и легаси-число
+    if (job.expiresAt && new Date(job.expiresAt) < new Date()) return json({ error: "Expired" }, 410, { "X-Request-Id": requestId });
 
     // Генерируем контент на лету (в sandbox нет файлового хранилища)
     const { content, mime, ext } = generateExport(job.session as never, job.format as "gpx" | "kml" | "json");

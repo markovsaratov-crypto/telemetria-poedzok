@@ -145,6 +145,7 @@ export function SessionListScreen({ onSessionTap, onSettingsTap }: SessionListSc
                 distance={statsMap.get(s.id)?.distanceM}
                 avgSpeed={statsMap.get(s.id)?.avgSpeedMs}
                 durationMin={statsMap.get(s.id)?.durationSec ? Math.round(statsMap.get(s.id).durationSec / 60) : undefined}
+                track={statsMap.get(s.id)?.track ?? null}
                 onTap={() => onSessionTap(s.id)}
               />
             </motion.div>

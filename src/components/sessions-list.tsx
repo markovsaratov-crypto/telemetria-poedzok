@@ -22,6 +22,7 @@ import {
   Trash2,
   CheckSquare,
   Square,
+  Download,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useSessions, useRoutes, useBulkDeleteSessions } from "@/lib/hooks";
@@ -231,6 +232,16 @@ export function SessionsList({ selectedId, onSelect }: SessionsListProps) {
           )}
         </div>
         <div className="flex items-center gap-1">
+          {/* v2.9.3: CSV-экспорт списка сессий (метаданные + план-факт из TrafficJob) */}
+          <a
+            href="/api/sessions/export?format=csv"
+            download
+            className="inline-flex items-center justify-center h-7 w-7 rounded-md text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
+            title="Экспорт CSV (все сессии)"
+            aria-label="Экспорт CSV"
+          >
+            <Download className="h-3 w-3" />
+          </a>
           <Button
             variant="ghost"
             size="sm"

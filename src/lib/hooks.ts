@@ -153,6 +153,8 @@ export interface SessionStats {
   duration: number;
   movingTime: number;
   idleTime: number;
+  // v2.9.3: спидограмма — даунсемпл ≤240 точек {t: сек от старта, v: км/ч|null, st: 0 idle/1 moving/2 gap}
+  speedProfile?: Array<{ t: number; v: number | null; st: 0 | 1 | 2 }>;
   // v2.9 §4.6: gapTime из state machine (контрольная сумма MovingTime + IdleTime + GapTime = Duration)
   gapTime?: number;
   // v2.9 §10.0: детерминированные хэши маршрута (вычисляются в ворчере, персистятся на session)

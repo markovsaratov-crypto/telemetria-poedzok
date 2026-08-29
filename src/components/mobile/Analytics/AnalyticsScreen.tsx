@@ -11,13 +11,21 @@ import { BarChart3, FileText, Clock, Gauge, Activity, Timer, AlertTriangle, Traf
 import { useStats, useRoutes, useSessions, useSessionStats, useSession, useAggregateStats, useSpeedDistribution } from "@/lib/hooks";
 import { SPEED_BUCKETS } from "@/lib/kpi"; // P2-13: единая схема бакетов
 import { MetricTile } from "../shared/MetricTile";
+import { HeavySegmentsBlock } from "./HeavySegmentsBlock";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { fmtNumber } from "@/lib/format";
 
 type ViewMode = "aggregate" | "detail";
 
-export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => void }) {
+export function AnalyticsScreen({
+  onRouteTap,
+  onGoToRoutes,
+}: {
+  onRouteTap?: (id: string) => void;
+  // v2.9.7: переход на экран «Маршруты» (из блока «Тяжёлые участки», с опц. deep-link)
+  onGoToRoutes?: (routeHash?: string) => void;
+}) {
   const [mode, setMode] = React.useState<ViewMode>("aggregate");
   const [selectedSession, setSelectedSession] = React.useState<string | null>(null);
 
@@ -249,6 +257,9 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
                 </div>
               </div>
             )}
+
+            {/* === v2.9.7: Тяжёлые участки — паритет с desktop-виджетом === */}
+            {mode === "aggregate" && <HeavySegmentsBlock onGoToRoutes={onGoToRoutes} />}
           </>
         ) : null}
       </div>

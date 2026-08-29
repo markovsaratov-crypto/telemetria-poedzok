@@ -32,9 +32,19 @@ function toCamel(row: Record<string, unknown>): Record<string, unknown> {
   return result;
 }
 
-// P1-10: унификация временных аргументов — Date → epoch ms (числа хранятся как INTEGER)
-function toTs(v: Date | number): number {
-  return v instanceof Date ? v.getTime() : v;
+// P1-10 → v2.9.4 fix: унификация временных аргументов SQL-фильтров.
+// Дата-время в Session/ExportJob/BackupJob хранится как TEXT ISO-8601 UTC
+// («2026-08-16T09:46:40.747Z») — libsql сериализует Date в ISO при INSERT.
+// Раньше возвращались epoch-ms ЧИСЛА: в SQLite text всегда > integer,
+// из-за чего фильтры startTime >= ?/deletedAt < ? молча матчили ВСЕ text-строки
+// (todaySessions считал все сессии, perDay был нулями, retention-purge не находил
+// grace-истёкшие строки). Prod-БД нормализована миграцией v2.9.4 (все datetime — text),
+// здесь приводим аргументы к тому же формату.
+// NB: GpsPoint.timestamp — INTEGER ms (BigInt) и фильтрами через toTs не проходит.
+function toTs(v: Date | number): string {
+  if (v instanceof Date) return v.toISOString();
+  // число трактуем как epoch-ms (Prisma-стиль вызовы)
+  return new Date(v).toISOString();
 }
 
 // P1: undefined-значения недопустимы для libsql («Unsupported type of value») — вырезаем их из data

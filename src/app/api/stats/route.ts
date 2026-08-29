@@ -41,6 +41,7 @@ export async function GET(request: NextRequest) {
 
     // Per-day buckets for last 7 days
     // v2.9.4: +durationSec — сумма длительностей сессий за день (спарклайн KPI «Длительность» в мобильной аналитике)
+    // v2.9.4 fix: startTime из БД приходит ISO-строкой — сравниваем через new Date (раньше string vs Date давал NaN → все бакеты были нулями)
     const perDay: { date: string; count: number; points: number; durationSec: number }[] = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
@@ -48,7 +49,9 @@ export async function GET(request: NextRequest) {
       d.setHours(0, 0, 0, 0);
       const next = new Date(d);
       next.setDate(next.getDate() + 1);
-      const dayItems = recentSessions.filter((s) => s.startTime >= d && s.startTime < next);
+      const dayItems = recentSessions.filter(
+        (s) => new Date(s.startTime) >= d && new Date(s.startTime) < next
+      );
       perDay.push({
         date: d.toISOString().slice(0, 10),
         count: dayItems.length,

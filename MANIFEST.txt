@@ -197,3 +197,31 @@ f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-pro
 #   ADMIN_SPEC.md: 2e0f6995126c8f1207960dc0f166b75af5f13e44f5b5dba5eb8f2bb54becfdfc
 #   METHODOLOGY.md: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
 #   OPERATIONS.md: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a
+
+# ── v2.9.8 addendum (2026-08-29, round 10) ─────────────────────────────────
+# Релиз v2.9.8: тепловая карта скорости + installable PWA + фикс P2 единиц.
+# 1) MapTrack prop speedTrack — трек по 5 бакетам скорости (0-30/30-60/60-90/
+#    90-120/120+ км/ч: emerald/lime-600/yellow/orange/rose) поверх белого
+#    касинга; multi-polyline на бакет (≤5 SVG-путей на любую длину трека);
+#    легенда «км/ч» на карте; переключатель «Трек/Скорость» (desktop кнопки
+#    над картой, mobile плавающие top-center + полноэкранный overlay).
+# 2) PWA: manifest.webmanifest (standalone, /m, иконки 192/512/maskable,
+#    shortcuts), sw.js (cache-first /_next/static + /icons, network-first
+#    навигация, API и тайлы — всегда сеть), PwaRegister (prod-only),
+#    themeColor #c73a63/#17151a, apple-touch-icon, карточка «Установить
+#    приложение» в мобильном Админ-экране (beforeinstallprompt + iOS-инструкция).
+# 3) Фикс P2: SpeedChart (desktop «Скорость по треку») показывал м/с с подписью
+#    «км/ч» (макс 47.1 вместо 169.6) — добавлен ×3.6.
+# 4) Стайлинг-раунд 9: легенда крупнее (11px, чипы h-2.5 w-4, shadow-md),
+#    lime 500→600, линия 4→5/касинг 8×0.65, зум-кнопки Leaflet light —
+#    плашка border-radius 8 + shadow (паритет с оверлеями).
+#
+# Прод-бэкап для v2.9.8 не выполнялся (rate-limit 1/час — предыдущий бэкап
+# 43fa9406 был ~3 часа назад, но endpoint дал 429 на оба метода; релиз
+# UI-only, БД-схема и данные не менялись). Следующий полный бэкап — после
+# накопления изменений.
+#
+# Документы в репо (текущие, v2.9.8):
+#   docs/ADMIN_SPEC.md: e0e20bfefb2cce7ce521c9716ca38b047b4ae93d6bfdd3f1020a0c8a79f60d98
+#   docs/METHODOLOGY.md: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
+#   docs/OPERATIONS.md: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a

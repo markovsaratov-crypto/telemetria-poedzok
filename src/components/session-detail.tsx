@@ -12,6 +12,8 @@ import {
   Download,
   MapPin,
   AlertCircle,
+  Route,
+  Gauge,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useSession, useDeleteSession, useSessionStats } from "@/lib/hooks";
@@ -35,6 +37,7 @@ import { SpeedHistogram } from "@/components/speed-histogram";
 import { SessionReplay } from "@/components/session-replay";
 import { SessionStatsCard } from "@/components/session-stats-card";
 import { fmtDate } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 const MapTrack = dynamic(() => import("@/components/map-track"), {
   ssr: false,
@@ -67,6 +70,8 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
   const [pinnedIdx, setPinnedIdx] = React.useState<number | null>(null); // клик по графику
   const [mapClickIdx, setMapClickIdx] = React.useState<number | null>(null); // клик по карте
   const mapWrapRef = React.useRef<HTMLDivElement>(null);
+  // v2.9.8: режим карты — обычный трек или тепловая карта скорости
+  const [trackMode, setTrackMode] = React.useState<"plain" | "speed">("plain");
 
   // сброс фокуса при смене сессии
   React.useEffect(() => {
@@ -161,6 +166,9 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
   }
 
   const points = session.points || [];
+  // v2.9.8: есть ли данные о скорости (для тепловой карты трека).
+  // Без useMemo: после условных return'ов хуки нельзя; проход по ≤4к точек дешёвый.
+  const hasSpeedData = points.some((p) => p.speed != null && p.speed >= 0);
 
   return (
     <motion.div
@@ -241,14 +249,46 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
       {/* Карта */}
       <div className="p-4" ref={mapWrapRef}>
         {points.length > 0 ? (
-          <MapTrack
-            points={points}
-            height="360px"
-            fitToPoints
-            focusPoint={focusPoint}
-            panToFocus={panToFocus}
-            onMapClick={profile ? handleMapClick : undefined}
-          />
+          <>
+            {/* v2.9.8: переключатель режима трека — обычный / тепловая карта скорости */}
+            {hasSpeedData && (
+              <div className="flex items-center justify-end gap-1 mb-2" role="group" aria-label="Режим отображения трека">
+                <button
+                  onClick={() => setTrackMode("plain")}
+                  className={cn(
+                    "flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-md border transition-colors",
+                    trackMode === "plain"
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "text-muted-foreground hover:text-foreground hover:bg-accent"
+                  )}
+                  title="Обычный трек"
+                >
+                  <Route className="h-3 w-3" /> Трек
+                </button>
+                <button
+                  onClick={() => setTrackMode("speed")}
+                  className={cn(
+                    "flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-medium rounded-md border transition-colors",
+                    trackMode === "speed"
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "text-muted-foreground hover:text-foreground hover:bg-accent"
+                  )}
+                  title="Тепловая карта скорости — цвет трека по скорости"
+                >
+                  <Gauge className="h-3 w-3" /> Скорость
+                </button>
+              </div>
+            )}
+            <MapTrack
+              points={points}
+              height="360px"
+              fitToPoints
+              focusPoint={focusPoint}
+              panToFocus={panToFocus}
+              onMapClick={profile ? handleMapClick : undefined}
+              speedTrack={trackMode === "speed" && hasSpeedData ? points : null}
+            />
+          </>
         ) : (
           <div className="h-[200px] rounded-lg bg-muted flex items-center justify-center text-sm text-muted-foreground">
             <MapPin className="h-5 w-5 mr-2" /> В поездке нет GPS-точек

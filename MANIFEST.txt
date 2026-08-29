@@ -250,3 +250,35 @@ f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-pro
 docs/ADMIN_SPEC.md: 751f05f3851c3c1b5a977425fed4e622e806af049d4a571bcc6461fc9734b4d3
 docs/METHODOLOGY.md: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
 docs/OPERATIONS.md: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a
+
+# ===== v2.9.10 (2026-08-29, hotfix) =====
+# HOTFIX: Render build failure из-за Turbopack "dynamic filesystem access"
+# (PR #19 v2.9.9 успешно смержен в main, но Render-деплой упал на билде).
+# Симптом: warning "Dynamic filesystem access causes tracing of the whole
+# project" → build failed 🙁 (ссылка: render.com/docs/troubleshooting_deploys).
+# Корень: в src/lib/worker-runtime.ts и src/lib/backup.ts пути для fs-операций
+# вычислялись из env().EXPORT_STORAGE_DIR / env().BACKUP_STORAGE_DIR —
+# Turbopack не может статически определить значение env-переменной во время
+# сборки, поэтому трассирует ВЕСЬ проект (включая public/), что ломает билд.
+# Фикс:
+# 1) EXPORT_STORAGE_DIR (worker-runtime.ts:233) — замена на СТАТИЧЕСКИЙ путь
+#    path.join(process.cwd(), "data", "exports"). Turbopack знает возвращаемое
+#    значение process.cwd() + литеральные подстроки → путь статически
+#    анализируем, вся проектная трассировка не запускается.
+# 2) BACKUP_STORAGE_DIR (backup.ts:49-52) — то же лечение: статический путь
+#    path.join(process.cwd(), "data", "backups").
+# 3) Динамические imports fs/path внутри pollExportJobs() удалены, переведены
+#    на top-level static imports (fs и path — core Node-модули, минимальная
+#    нагрузка на instrumentation startup).
+# 4) Env-переопределения EXPORT_STORAGE_DIR / BACKUP_STORAGE_DIR в env.ts
+#    сохранены для обратной совместимости (другие потребители могут читать
+#    значения, но в fs-операциях больше не используются).
+# Поведение на проде: файлы экспорта и бэкапы теперь пишутся в
+# <cwd>/data/exports и <cwd>/data/backups внутри инстанса Render.
+# Download-роут /api/exports/[jobId]/download регенерирует контент на лету
+# (не читает файл) — изменение расположения файла безопасно. Restore-роут
+# /api/admin/restore возвращает job.filePath как info (не читает файл).
+# Версии: package.json 2.9.10, SW-кэш telem-v2.9.10.
+docs/ADMIN_SPEC.md: 751f05f3851c3c1b5a977425fed4e622e806af049d4a571bcc6461fc9734b4d3
+docs/METHODOLOGY.md: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
+docs/OPERATIONS.md: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a

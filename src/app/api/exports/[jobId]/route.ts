@@ -29,8 +29,9 @@ export async function GET(
       return json({ status: job.status, jobId }, 202, { "X-Request-Id": requestId });
     }
 
-    // Если expired
-    if (job.expiresAt && job.expiresAt < new Date()) {
+    // Если expired (v2.9.4 fix: expiresAt хранится ISO-строкой — сравнение строки с Date давало NaN;
+    // new Date() корректно парсит и ISO-строку, и легаси-число)
+    if (job.expiresAt && new Date(job.expiresAt) < new Date()) {
       return json({ error: "Export expired", jobId }, 410, { "X-Request-Id": requestId });
     }
 

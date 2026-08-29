@@ -1,4 +1,10 @@
-// Telemetria поездок — Prisma schema v3.0 (multi-user)
+// Telemetria поездок — Prisma schema v3.1 (multi-user, methodology v2.9)
+// v2.9: added Session.routeHash (deterministic hash for grouping conceptual-same
+// routes per §10.0 methodology) + Session.topologyHash (8-char hash of key
+// route points, also per §10.0). Note: existing Session.routeId is the FK to
+// admin-created Route — conceptually different from methodology's "routeId".
+// In API responses, "routeHash" returns the v2.9 deterministic hash; "routeId"
+// returns the admin FK (unchanged from v2.7).
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
@@ -32,6 +38,8 @@ model Session {
   deletedAt    DateTime?
   purgedAt     DateTime?
   routeId      String?
+  routeHash    String?   // v2.9 §10.0: deterministic 16-char hash for grouping conceptual-same routes (snap-to-grid + topology)
+  topologyHash String?   // v2.9 §10.0: 8-char hash of key route points (intermediate value, indexed for debugging)
   trafficJobId String?
   notes        String?
   tags         String?
@@ -48,6 +56,8 @@ model Session {
   @@unique([deviceId, clientId])
   @@index([status, endTime])
   @@index([routeId])
+  @@index([routeHash])     // v2.9: для сравнительных метрик (RouteAvgDuration, RouteTrend, HotspotSegments)
+  @@index([topologyHash])  // v2.9: для отладки и группировки по топологии
   @@index([deletedAt])
   @@index([startTime])
 }

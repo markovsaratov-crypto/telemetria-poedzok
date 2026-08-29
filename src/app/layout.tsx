@@ -3,6 +3,8 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
 import { PwaRegister } from "@/components/pwa-register";
+// v2.9.9: баннер «Доступна новая версия» (управляемое обновление SW)
+import { SwUpdateToast } from "@/components/sw-update-toast";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -59,6 +61,7 @@ export default function RootLayout({
       >
         <Providers>{children}</Providers>
         <PwaRegister />
+        <SwUpdateToast />
       </body>
     </html>
   );

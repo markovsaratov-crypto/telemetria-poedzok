@@ -52,10 +52,32 @@ f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-pro
 # Открытый пункт «прогнать свежий /api/admin/backup» (Task 10 final) — закрыт.
 #
 # Документы в репо (текущие, v2.9.2):
-#   ADMIN_SPEC.md: 96a50fc1cef039da596106ea5686a4dc0381f87596f3ceeec3faa2e5ddd85ebb
+#   ADMIN_SPEC.md (v2.9.2): 96a50fc1cef039da596106ea5686a4dc0381f87596f3ceeec3faa2e5ddd85ebb
 #   METHODOLOGY.md — без изменений: 7990e0f1e40e532487aa5a6a573b4a9dacbeae224798e46c007a30207329143b
 #   OPERATIONS.md — без изменений: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a
 #
 # Бэкап-артефакты выше (v2.9 backup от 2026-08-29T00:56:25) — без изменений.
 # Файл prod-бэкапа лежит в эфемерном volume Render; скачивание — через
-# /api/exports/[jobId]/download с токеном из BackupJob.
+# /api/exports/[jobId]/download с токеном из BackupJob.#
+# ── v2.9.3 addendum (2026-08-29, round 4) ──────────────────────────────────
+# Релиз v2.9.3 (feature round 4 — спидограмма + CSV сессий + стайлинг):
+#   1. Спидограмма поездки: GET /api/sessions/[id]/stats возвращает speedProfile
+#      (даунсемпл ≤240 сэмплов {t, v км/ч, st idle/moving/gap}); общий компонент
+#      src/components/speed-profile-chart.tsx (SVG: градиентная заливка,
+#      таймлайн состояний §4.6, референс ср. скорости, маркер максимума,
+#      hover-кросхейр с тултипом). Интеграции: десктоп session-stats-card +
+#      мобильный SessionDetail/SpeedTab (замена базового графика).
+#   2. CSV-экспорт списка сессий: GET /api/sessions/export?format=csv
+#      (13 колонок, план-факт из последнего completed TrafficJob);
+#      кнопки в desktop sessions-list и мобильной аналитике.
+#   3. Стайлинг (VLM-аудит 6.5/10): .empty-state без пунктира (радиальный влив),
+#      live-dot пульсирующий индикатор + семантика headroom (OK/Тесно/Критично),
+#      акцентная полоска активного таба, uppercase-микротипографика метрик,
+#      фикс цвета HealthIndicator pulse (currentColor перекрывал emerald).
+#
+# Документы в репо (текущие, v2.9.3): пересчитываются при следующем полном
+# бэкапе (/api/admin/backup, rate-limit 1/час). Бэкап-артефакты v2.9/v2.9.2 —
+# без изменений.
+#   ADMIN_SPEC.md (v2.9.3): cd2cbcca4bc5c4cf9720236adeacdef9b24479d89e8962e0e5caf3892a7bd7ae
+#   METHODOLOGY.md — без изменений: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
+#   OPERATIONS.md — без изменений: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a

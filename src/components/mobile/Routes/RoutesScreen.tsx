@@ -286,9 +286,9 @@ export function RoutesScreen({ onRouteTap }: RoutesScreenProps) {
               ))}
             </div>
           ) : groups.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-8 text-center rounded-xl border border-dashed bg-gradient-to-b from-primary/[0.04] to-transparent">
-              <Layers className="h-10 w-10 text-muted-foreground/40 mb-2" />
-              <p className="text-xs text-muted-foreground">Группы появятся после 2+ поездок по одному маршруту</p>
+            <div className="empty-state py-8 text-xs text-muted-foreground">
+              <Layers className="h-10 w-10 mb-2 text-muted-foreground/40" />
+              <p>Группы появятся после 2+ поездок по одному маршруту</p>
             </div>
           ) : (
             <div className="space-y-2">
@@ -314,9 +314,9 @@ export function RoutesScreen({ onRouteTap }: RoutesScreenProps) {
               ))}
             </div>
           ) : routes.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-8 text-center rounded-xl border border-dashed bg-gradient-to-b from-amber-500/[0.04] to-transparent">
-              <RouteIcon className="h-10 w-10 text-muted-foreground/40 mb-2" />
-              <p className="text-xs text-muted-foreground">Нет избранных маршрутов</p>
+            <div className="empty-state py-8 text-xs text-muted-foreground" style={{ border: "1px solid oklch(0.75 0.13 85 / 0.25)", background: "radial-gradient(120% 80% at 50% 0%, oklch(0.75 0.13 85 / 0.06), transparent 70%)" }}>
+              <RouteIcon className="h-10 w-10 mb-2 text-muted-foreground/40" />
+              <p>Нет избранных маршрутов</p>
               <button className="mt-2 inline-flex items-center gap-1 text-xs text-primary font-medium">
                 <Plus className="h-3.5 w-3.5" /> Создать маршрут
               </button>

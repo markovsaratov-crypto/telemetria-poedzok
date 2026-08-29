@@ -1310,6 +1310,7 @@ libsql dump.sql -u libsql://... -t token
 | /api/sessions/batch-stats                 | POST             | Cookie/API_KEY      | Пакетная статистика                                     |
 | /api/sessions/bulk-delete                 | POST             | Cookie/API_KEY      | Массовое удаление                                       |
 | /api/sessions/search                      | GET              | Cookie/API_KEY      | Поиск                                                   |
+| /api/sessions/export                      | GET              | Cookie/API_KEY      | CSV-экспорт списка сессий + план-факт (v2.9.3)          |
 | /api/plan                                 | POST             | Cookie/API_KEY      | Построение маршрута                                    |
 | /api/plan/[sessionId]                     | GET              | Cookie/API_KEY      | План/сегменты сессии (с результатом HMM map matching)   |
 | /api/routes                               | GET/POST         | Cookie/API_KEY      | CRUD маршрутов                                          |
@@ -1349,6 +1350,8 @@ libsql dump.sql -u libsql://... -t token
 > v2.9.1: `GET /api/routes/[id]/gpx` ([id] = routeHash) — GPX 1.1-экспорт канонического полилийна группы: сегменты последнего completed TrafficJob, fallback — активная часть первой сессии (прорежено до ~40 точек). Ответ: `application/gpx+xml`, `Content-Disposition: attachment; filename="route-<routeHash>.gpx"`; 404 при отсутствии группы или полилийна. Тот же канонический полилийн используется UI для мини-карты группы; хотспоты-эндпоинт дополнительно возвращает геометрию сегментов (`a`/`b`) для severity-подсветки (§10.6).
 >
 > v2.9.2: `GET /api/routes/grouped/export?format=csv` — CSV-экспорт агрегатов всех routeHash-групп (12 колонок: routeHash, topologyHash, sessionCount, avg/best/worst/stdDev ActiveDurationSec, avgDistanceM, firstSeen, lastSeen, deviceIds, sessionIds). Ответ: `text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="route-groups-<timestamp>.csv"`. 400 при `format != csv`.
+>
+> v2.9.3: (1) `GET /api/sessions/export?format=csv` — CSV-экспорт всех живых (не soft-deleted) сессий: 13 колонок (id, status, deviceName, deviceId, startTime, endTime, pointCount, payloadBytes, routeHash, topologyHash, trafficProvider, planDistanceM, planDurationSec); план-факт — из последнего completed TrafficJob сессии. (2) `GET /api/sessions/[id]/stats` дополнительно возвращает `speedProfile` — даунсемпл GPS-точек до 240 сэмплов `{t: сек от старта, v: км/ч|null, st: 0 idle/1 moving/2 gap}` для спидограммы (скорость-время) в UI десктопа и мобильной версии; st вычисляется по порогам §4.6 (гистерезис 2 км/ч для idle, gap > 30 сек).
 
 ## Приложение Б. Глоссарий
 

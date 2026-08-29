@@ -166,11 +166,11 @@ export function SessionCompare() {
       </CardHeader>
       <CardContent className="space-y-3">
         {selectedIds.length === 0 ? (
-          <div className="h-[280px] rounded-lg border border-dashed flex items-center justify-center text-sm text-muted-foreground">
+          <div className="empty-state h-[280px] text-sm text-muted-foreground">
             <div className="text-center space-y-2">
               <GitCompare className="h-8 w-8 mx-auto opacity-30" />
               <div>Выберите поездки для сравнения</div>
-              <Button size="sm" variant="outline" onClick={() => setPickerOpen(true)}>
+              <Button size="sm" onClick={() => setPickerOpen(true)}>
                 <Plus className="h-3.5 w-3.5" /> Добавить поездку
               </Button>
             </div>

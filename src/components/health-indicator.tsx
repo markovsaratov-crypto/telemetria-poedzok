@@ -54,14 +54,9 @@ export function HealthIndicator() {
           className="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded-md hover:bg-accent transition-colors"
           title="Состояние системы"
         >
-          <span className="relative">
+          <span className="relative flex h-2 w-2">
             <span className={cn("block h-2 w-2 rounded-full", color)} />
-            {ok && (
-              <span
-                className={cn("absolute inset-0 rounded-full pulse-dot", color)}
-                style={{ background: "currentColor" }}
-              />
-            )}
+            {ok && <span className={cn("absolute inset-0 rounded-full pulse-dot", color)} aria-hidden />}
           </span>
           <span className="text-muted-foreground hidden sm:inline">{label}</span>
         </button>

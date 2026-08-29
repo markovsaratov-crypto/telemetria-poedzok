@@ -10,6 +10,7 @@ import { motion } from "framer-motion";
 import { ArrowLeft, MoreVertical, Download, Trash2 } from "lucide-react";
 import { useSession, useSessionStats } from "@/lib/hooks";
 import { MetricTile } from "../shared/MetricTile";
+import { SpeedProfileChart } from "@/components/speed-profile-chart";
 const MapTrack = dynamic(() => import("@/components/map-track"), { ssr: false, loading: () => <div className="h-full flex items-center justify-center text-xs text-muted-foreground">Загрузка карты…</div> });
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -139,10 +140,9 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
 // === Tab contents ===
 
 function SpeedTabContent({ points, stats }: { points: any[]; stats: any }) {
-  // Downsample for performance
-  const sampled = points.length > 500 ? points.filter((_, i) => i % Math.ceil(points.length / 500) === 0) : points;
   const maxSpeed = stats?.maxSpeed ? Math.round(stats.maxSpeed * 3.6) : 0;
   const avgSpeed = stats?.avgSpeed ? Math.round(stats.avgSpeed * 3.6) : 0;
+  const profile = stats?.speedProfile as Array<{ t: number; v: number | null; st: 0 | 1 | 2 }> | undefined;
 
   return (
     <div className="space-y-3">
@@ -150,46 +150,24 @@ function SpeedTabContent({ points, stats }: { points: any[]; stats: any }) {
       <div className="flex gap-4 text-xs">
         <div><span className="text-muted-foreground">Макс: </span><span className="font-bold tabular-nums">{maxSpeed} км/ч</span></div>
         <div><span className="text-muted-foreground">Сред: </span><span className="font-bold tabular-nums">{avgSpeed} км/ч</span></div>
+        {stats?.methodology?.timeAtCruise != null && (
+          <div><span className="text-muted-foreground">Круиз: </span><span className="font-bold tabular-nums">{Math.round(stats.methodology.timeAtCruise / 60)} мин</span></div>
+        )}
       </div>
-      {/* Speed chart (SVG) */}
-      {sampled.length > 1 && (
-        <svg viewBox="0 0 100 40" className="w-full h-[180px]" preserveAspectRatio="none">
-          <defs>
-            <linearGradient id="speedGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="oklch(0.55 0.18 350)" stopOpacity="0.4" />
-              <stop offset="100%" stopColor="oklch(0.55 0.18 350)" stopOpacity="0" />
-            </linearGradient>
-          </defs>
-          <motion.path
-            d={(() => {
-              const maxS = Math.max(...sampled.map(p => (p.speed || 0) * 3.6), 1);
-              return sampled.map((p, i) => {
-                const x = (i / (sampled.length - 1)) * 100;
-                const y = 40 - ((p.speed || 0) * 3.6 / maxS) * 35;
-                return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
-              }).join(" ") + ` L 100 40 L 0 40 Z`;
-            })()}
-            fill="url(#speedGrad)"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-          />
-          <motion.path
-            d={(() => {
-              const maxS = Math.max(...sampled.map(p => (p.speed || 0) * 3.6), 1);
-              return sampled.map((p, i) => {
-                const x = (i / (sampled.length - 1)) * 100;
-                const y = 40 - ((p.speed || 0) * 3.6 / maxS) * 35;
-                return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
-              }).join(" ");
-            })()}
-            fill="none"
-            stroke="oklch(0.55 0.18 350)"
-            strokeWidth="0.8"
-            initial={{ pathLength: 0 }}
-            animate={{ pathLength: 1 }}
-            transition={{ duration: 0.5 }}
-          />
-        </svg>
+      {/* v2.9.3: спидограмма — общий компонент с таймлайном состояний и кросхейром */}
+      {profile && profile.length >= 2 ? (
+        <SpeedProfileChart
+          profile={profile}
+          startIso={stats?.startTime}
+          avgKmh={stats?.avgSpeed != null ? stats.avgSpeed * 3.6 : null}
+          maxKmh={stats?.maxSpeed != null ? stats.maxSpeed * 3.6 : null}
+          height={150}
+          compact
+        />
+      ) : (
+        <div className="text-xs text-muted-foreground py-8 text-center">
+          Недостаточно данных о скорости
+        </div>
       )}
     </div>
   );

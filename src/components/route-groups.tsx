@@ -536,8 +536,8 @@ export function RouteGroups() {
             Не удалось загрузить группы маршрутов
           </div>
         ) : groups.length === 0 ? (
-          <div className="text-center py-8 text-sm text-muted-foreground rounded-xl border border-dashed bg-gradient-to-b from-primary/[0.03] to-transparent">
-            <Layers className="h-10 w-10 mx-auto mb-2 opacity-30" />
+          <div className="empty-state py-8 text-sm text-muted-foreground">
+            <Layers className="h-10 w-10 mb-2 opacity-30" />
             Пока нет групп маршрутов
             <p className="text-xs mt-1">
               Группы формируются автоматически: завершите две поездки по одному маршруту

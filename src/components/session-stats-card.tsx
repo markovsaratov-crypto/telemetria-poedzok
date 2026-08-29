@@ -47,6 +47,7 @@ import {
 } from "lucide-react";
 import { useSessionStats, useRouteComparison } from "@/lib/hooks";
 import { SpeedProfileChart } from "@/components/speed-profile-chart";
+import { AltitudeProfileChart } from "@/components/altitude-profile-chart";
 import {
   Card,
   CardContent,
@@ -60,6 +61,12 @@ import { cn } from "@/lib/utils";
 
 interface SessionStatsCardProps {
   sessionId: string;
+  // v2.9.4: связка карта↔профили (десктоп-деталь) — проброс в графики
+  focusIdx?: number | null; // эффективный индекс: hover > pin > клик по карте (для подсказки)
+  pinnedIdx?: number | null; // закреплённая точка (клик по графику)
+  mapClickIdx?: number | null; // индекс, выбранный кликом по карте
+  onHoverIdx?: (idx: number | null) => void;
+  onPinIdx?: (idx: number | null) => void;
 }
 
 // ——— v2.9.1: тайл метрики с иконкой-чипом и hover-подъёмом ———
@@ -115,7 +122,14 @@ function SectionLabel({ icon, children }: { icon: React.ReactNode; children: Rea
   );
 }
 
-export function SessionStatsCard({ sessionId }: SessionStatsCardProps) {
+export function SessionStatsCard({
+  sessionId,
+  focusIdx,
+  pinnedIdx,
+  mapClickIdx,
+  onHoverIdx,
+  onPinIdx,
+}: SessionStatsCardProps) {
   const { data: stats, isLoading } = useSessionStats(sessionId);
 
   if (isLoading) {
@@ -241,16 +255,44 @@ export function SessionStatsCard({ sessionId }: SessionStatsCardProps) {
         </div>
 
         {/* v2.9.3: спидограмма — скорость по времени с таймлайном движения/стоянок/разрывов */}
+        {/* v2.9.4: + высотный профиль (сглаженный) и связка с картой */}
         {stats.speedProfile && stats.speedProfile.length >= 2 && (
-          <div className="pt-1">
-            <SectionLabel icon={<Gauge className="h-3 w-3" />}>Спидограмма поездки</SectionLabel>
-            <SpeedProfileChart
-              profile={stats.speedProfile}
-              startIso={stats.startTime}
-              avgKmh={stats.avgSpeed != null ? stats.avgSpeed * 3.6 : null}
-              maxKmh={stats.maxSpeed != null ? stats.maxSpeed * 3.6 : null}
-              height={200}
-            />
+          <div className="pt-1 space-y-3">
+            <div>
+              <SectionLabel icon={<Gauge className="h-3 w-3" />}>Спидограмма поездки</SectionLabel>
+              <SpeedProfileChart
+                profile={stats.speedProfile}
+                startIso={stats.startTime}
+                avgKmh={stats.avgSpeed != null ? stats.avgSpeed * 3.6 : null}
+                maxKmh={stats.maxSpeed != null ? stats.maxSpeed * 3.6 : null}
+                height={200}
+                onHoverIdx={onHoverIdx}
+                onPinIdx={onPinIdx}
+                externalIdx={mapClickIdx ?? null}
+                pinnedIdx={pinnedIdx ?? null}
+              />
+            </div>
+            {stats.hasAltitude && (
+              <div>
+                <SectionLabel icon={<Mountain className="h-3 w-3" />}>Высотный профиль</SectionLabel>
+                <AltitudeProfileChart
+                  profile={stats.speedProfile}
+                  startIso={stats.startTime}
+                  height={140}
+                  onHoverIdx={onHoverIdx}
+                  onPinIdx={onPinIdx}
+                  externalIdx={mapClickIdx ?? null}
+                  pinnedIdx={pinnedIdx ?? null}
+                />
+              </div>
+            )}
+            {/* v2.9.4: подсказка связки карта↔график */}
+            {focusIdx != null && (
+              <p className="text-[10px] text-muted-foreground flex items-center gap-1.5">
+                <MapPin className="h-3 w-3 text-primary/70" />
+                Точка синхронизирована с картой — клик по графику закрепляет маркер, клик по треку двигает кросхейр
+              </p>
+            )}
           </div>
         )}
 

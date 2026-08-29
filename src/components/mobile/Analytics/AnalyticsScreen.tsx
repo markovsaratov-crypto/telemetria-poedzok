@@ -31,6 +31,12 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
 
   const sessions = sessionsData?.sessions || [];
 
+  // v2.9.4: ряды за 7 дней для спарклайнов KPI (aggregate-режим)
+  const perDay = stats?.perDay;
+  const sparkCount = perDay?.map((d) => d.count) ?? [];
+  const sparkPoints = perDay?.map((d) => d.points) ?? [];
+  const sparkDuration = perDay?.map((d) => Math.round(d.durationSec / 60)) ?? [];
+
   // Aggregate KPIs: use what's available from aggregate + speed distribution
   const aggKpis = {
     duration: aggregateStats?.totalDurationSec ?? 0,
@@ -141,6 +147,7 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
         ) : currentStats ? (
           <>
             {/* === Блок 1: KPI плитки (6 шт, 3 в ряд) — REAL METRICS === */}
+            {/* v2.9.4: спарклайны за 7 дней в aggregate-режиме (длительность/поездки/точки) */}
             <div>
               <h2 className="text-sm font-semibold mb-3 text-muted-foreground">KPI</h2>
               <div className="grid grid-cols-3 gap-2">
@@ -148,6 +155,7 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
                   label="Длительность"
                   value={Math.round((currentStats as any).duration / 60)}
                   unit="мин"
+                  spark={mode === "aggregate" ? sparkDuration : undefined}
                 />
                 <MetricTile
                   label="Дистанция"
@@ -177,6 +185,7 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
                     label="Поездок"
                     value={(currentStats as any).sessionCount ?? "—"}
                     status={(currentStats as any).sessionCount > 0 ? "success" : "neutral"}
+                    spark={sparkCount}
                   />
                 ) : (
                   <MetricTile
@@ -192,6 +201,7 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
                     label="GPS точек"
                     value={(currentStats as any).totalPoints ? fmtNumber((currentStats as any).totalPoints) : "—"}
                     status={(currentStats as any).totalPoints > 0 ? "success" : "neutral"}
+                    spark={sparkPoints}
                   />
                 ) : (
                   <MetricTile

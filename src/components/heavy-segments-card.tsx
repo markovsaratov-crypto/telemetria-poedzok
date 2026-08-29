@@ -14,7 +14,8 @@ import { MiniMap, severityColor, type HotspotOverlay } from "@/components/mini-m
 import { useHeavySegments } from "@/lib/hooks";
 
 interface HeavySegmentsCardProps {
-  onGoToRoutes: () => void;
+  // v2.9.7: переход на вкладку «Маршруты» с опциональным раскрытием конкретной группы
+  onGoToRoutes: (routeHash?: string) => void;
 }
 
 export function HeavySegmentsCard({ onGoToRoutes }: HeavySegmentsCardProps) {
@@ -61,9 +62,9 @@ export function HeavySegmentsCard({ onGoToRoutes }: HeavySegmentsCardProps) {
                     initial={{ opacity: 0, y: 6 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: Math.min(i * 0.05, 0.2) }}
-                    onClick={onGoToRoutes}
+                    onClick={() => onGoToRoutes(g.routeHash)}
                     className="group text-left space-y-1.5"
-                    aria-label={`Маршрут ${g.routeHash.slice(0, 8)}: ${g.hotspotCount} тяжёлых сегментов`}
+                    aria-label={`Маршрут ${g.routeHash.slice(0, 8)}: ${g.hotspotCount} тяжёлых сегментов — раскрыть на вкладке Маршруты`}
                   >
                     <MiniMap
                       points={g.polylineSample}
@@ -107,7 +108,7 @@ export function HeavySegmentsCard({ onGoToRoutes }: HeavySegmentsCardProps) {
                 </span>
               </div>
               <button
-                onClick={onGoToRoutes}
+                onClick={() => onGoToRoutes(undefined)}
                 className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
               >
                 Все маршруты <ArrowRight className="h-3.5 w-3.5" />

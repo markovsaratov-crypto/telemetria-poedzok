@@ -35,6 +35,8 @@ import { cn } from "@/lib/utils";
 
 interface RoutesScreenProps {
   onRouteTap?: (routeId: string) => void;
+  // v2.9.7: deep-link из блока «Тяжёлые участки» — авто-раскрытие группы
+  expandHash?: string | null;
 }
 
 function fmtDur(sec: number | null | undefined): string {
@@ -54,13 +56,33 @@ function fmtDate(iso: string): string {
   return new Date(iso).toLocaleDateString("ru-RU", { day: "2-digit", month: "short" });
 }
 
-function MobileGroupCard({ group, index }: { group: RouteGroupInfo; index: number }) {
+function MobileGroupCard({
+  group,
+  index,
+  autoExpand,
+}: {
+  group: RouteGroupInfo;
+  index: number;
+  autoExpand?: string | null;
+}) {
   const [expanded, setExpanded] = React.useState(false);
+  const cardRef = React.useRef<HTMLDivElement>(null);
   const trendQ = useRouteTrend(group.routeHash);
   const hotspotsQ = useRouteHotspots(group.routeHash);
   const trend = trendQ.data;
   const hotspots = hotspotsQ.data;
   const [gpxState, setGpxState] = React.useState<"idle" | "loading" | "error">("idle");
+
+  // v2.9.7: deep-link — авто-раскрытие + прокрутка к группе
+  React.useEffect(() => {
+    if (autoExpand && autoExpand === group.routeHash) {
+      setExpanded(true);
+      const t = setTimeout(() => {
+        cardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 250);
+      return () => clearTimeout(t);
+    }
+  }, [autoExpand, group.routeHash]);
 
   const downloadGpx = React.useCallback(async () => {
     setGpxState("loading");
@@ -86,6 +108,7 @@ function MobileGroupCard({ group, index }: { group: RouteGroupInfo; index: numbe
 
   return (
     <motion.div
+      ref={cardRef}
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: Math.min(index * 0.05, 0.3) }}
@@ -237,7 +260,7 @@ function MobileGroupCard({ group, index }: { group: RouteGroupInfo; index: numbe
   );
 }
 
-export function RoutesScreen({ onRouteTap }: RoutesScreenProps) {
+export function RoutesScreen({ onRouteTap, expandHash }: RoutesScreenProps) {
   const { data, isLoading } = useRoutes();
   const routes = data?.routes || [];
   const { data: groupsData, isLoading: groupsLoading, refetch, isRefetching } = useRouteGroups();
@@ -293,7 +316,7 @@ export function RoutesScreen({ onRouteTap }: RoutesScreenProps) {
           ) : (
             <div className="space-y-2">
               {groups.map((g, i) => (
-                <MobileGroupCard key={g.routeHash} group={g} index={i} />
+                <MobileGroupCard key={g.routeHash} group={g} index={i} autoExpand={expandHash} />
               ))}
             </div>
           )}

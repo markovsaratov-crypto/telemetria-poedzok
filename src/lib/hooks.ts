@@ -62,7 +62,7 @@ export interface StatsResponse {
   pendingJobs: number;
   todaySessions: number;
   totalPayloadBytes: number;
-  perDay: { date: string; count: number; points: number }[];
+  perDay: { date: string; count: number; points: number; durationSec: number }[];
   heatmapSessions: { startTime: string; pointCount: number }[];
   capacity: { targetLoadRpm: number; rateLimitMaxIngest: number; headroom: number };
   version: string;
@@ -154,7 +154,10 @@ export interface SessionStats {
   movingTime: number;
   idleTime: number;
   // v2.9.3: спидограмма — даунсемпл ≤240 точек {t: сек от старта, v: км/ч|null, st: 0 idle/1 moving/2 gap}
-  speedProfile?: Array<{ t: number; v: number | null; st: 0 | 1 | 2 }>;
+  // v2.9.4: сэмплы дополнены alt (м, сглаженная) и lat/lng (5 знаков) — высотный профиль + связка с картой
+  speedProfile?: Array<{ t: number; v: number | null; st: 0 | 1 | 2; alt?: number | null; lat?: number; lng?: number }>;
+  // v2.9.4: есть ли высотные данные у сэмплов (иначе профиль высоты не рендерим)
+  hasAltitude?: boolean;
   // v2.9 §4.6: gapTime из state machine (контрольная сумма MovingTime + IdleTime + GapTime = Duration)
   gapTime?: number;
   // v2.9 §10.0: детерминированные хэши маршрута (вычисляются в ворчере, персистятся на session)

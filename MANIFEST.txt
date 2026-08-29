@@ -225,3 +225,28 @@ f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-pro
 #   docs/ADMIN_SPEC.md: e0e20bfefb2cce7ce521c9716ca38b047b4ae93d6bfdd3f1020a0c8a79f60d98
 #   docs/METHODOLOGY.md: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
 #   docs/OPERATIONS.md: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a
+
+# ===== v2.9.9 (2026-08-29, PR #19) =====
+# Релиз UI-only (БД-схема и данные не менялись): 3 фичи PWA/визуализации.
+# 1) Управляемое обновление PWA: sw.js без skipWaiting на install (новый SW
+#    уходит в waiting), message-хэндлер SKIP_WAITING по подтверждению;
+#    PwaRegister детектит waiting (reg.waiting + updatefound/installed),
+#    хук useSwUpdate(); SwUpdateToast — плавающий баннер «Доступна новая
+#    версия» (Framer Motion, градиентная полоса, кнопка «Обновить» →
+#    SKIP_WAITING → controllerchange → авторелоад с защитой от цикла);
+#    проверка обновлений раз в час + на visibilitychange.
+# 2) Спидограмма с бакетной окраской (паритет с heat-картой v2.9.8):
+#    SpeedProfileChart — линия по 5 бакетам км/ч (единая шкала
+#    SPEED_BUCKETS из map-track), пробеги со стыковкой без щелей,
+#    переменная толщина по бакету, пунктирные пороги 30/60/90/120 с
+#    цветными подписями справа, легенда-чипы присутствующих бакетов.
+#    VLM-аудит: desktop 9/10, dark 8/10, mobile цвета 10/10.
+# 3) Офлайн-заглушка PWA: public/offline.html (light/dark по
+#    prefers-color-scheme) — SW-fallback навигации при отсутствии сети;
+#    localStorage-снимок telem:offline-summary (useStats/useSessions/
+#    useAggregateStats/useSpeedDistribution → saveOfflineSummary) —
+#    2×2 KPI-сетка + последняя поездка; PRECACHE += /offline.html.
+# Версии: package.json 2.9.9, SW-кэш telem-v2.9.9.
+docs/ADMIN_SPEC.md: 751f05f3851c3c1b5a977425fed4e622e806af049d4a571bcc6461fc9734b4d3
+docs/METHODOLOGY.md: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
+docs/OPERATIONS.md: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a

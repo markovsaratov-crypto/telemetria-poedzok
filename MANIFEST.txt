@@ -176,3 +176,24 @@ f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-pro
 #   ADMIN_SPEC.md (v2.9.6): e19de1e774cf542a1a6ab3f52e3d10e55d98448112d83ea112d384df54a8e3f0
 #   METHODOLOGY.md — без изменений: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
 #   OPERATIONS.md — без изменений: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a
+
+# ── v2.9.7 addendum (2026-08-29, round 9) ──────────────────────────────────
+# Релиз v2.9.7: сравнение поездок — цветные треки на одной карте (MapTrack
+# tracks-API: до 4 полилиний emerald/teal/amber/rose с белым касингом и
+# чередованием solid/dashed для цветовой слепоты; маркеры старт/финиш цвета
+# сессии, подписи в Tooltip) + сравнительная таблица Δ (5 метрик, Δ% к базе,
+# корона лучшему, zebra) + deep-link из виджета «Тяжёлые участки» на раскрытие
+# конкретной группы (desktop RouteGroups + mobile RoutesScreen, expandHash +
+# scrollIntoView) + мобильный блок «Тяжёлые участки» (горизонтальная snap-лента
+# мини-карт в /m-аналитике, паритет с desktop-виджетом) + стайлинг-раунд 8
+# (VLM 6-7/10 → 8-8.5/10: semibold-значения и py-2.5 в таблице, пастельные
+# Δ-цвета dark 300/85, severityColor красный 0.55→0.48 — WCAG AA бейджей).
+#
+# Прод-бэкап для v2.9.7 не выполнялся (rate-limit 1/час; данные не менялись —
+# релиз не затрагивает БД-схему и данные, только UI). Следующий полный бэкап —
+# после накопления изменений.
+#
+# Документы в репо (текущие, v2.9.7):
+#   ADMIN_SPEC.md: 2e0f6995126c8f1207960dc0f166b75af5f13e44f5b5dba5eb8f2bb54becfdfc
+#   METHODOLOGY.md: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
+#   OPERATIONS.md: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a

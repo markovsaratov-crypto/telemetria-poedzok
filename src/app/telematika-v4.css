@@ -528,14 +528,14 @@ html.dark .v4-app .ml-gap {
   position: absolute;
   z-index: 1000;
   max-width: 320px;
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--line2);
+  background: var(--panel, #FFFFFF);
+  color: var(--text, #2B1420);
+  border: 1px solid var(--line2, #D9C6D2);
   border-radius: 8px;
   padding: 11px 13px;
   font-size: 12px;
   line-height: 1.55;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
   display: none;
   pointer-events: none;
   font-family: 'Arial Narrow', Arial, sans-serif;
@@ -544,12 +544,12 @@ html.dark .v4-app .ml-gap {
   -webkit-backdrop-filter: none;
 }
 html.dark .v4-tipbox {
-  background: var(--panel);
-  color: var(--text);
-  border-color: var(--line2);
-  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+  background: var(--panel, #18121A);
+  color: var(--text, #F4E8EE);
+  border-color: var(--line2, #443548);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
 }
-.v4-tipbox b { color: var(--plum); }
+.v4-tipbox b { color: var(--plum, #8E2D4E); }
 .v4-tipbox .t-line { display: block; margin-top: 5px; }
 .v4-tipbox .t-line:first-child { margin-top: 0; }
 

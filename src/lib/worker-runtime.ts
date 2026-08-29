@@ -1,10 +1,21 @@
 // src/lib/worker-runtime.ts — In-process Worker (runs inside Next.js via instrumentation.ts).
 import pLimit from "p-limit";
+import fs from "fs";
+import path from "path";
 import { libsql } from "./db";
 import { env } from "./env";
 import { logger } from "./logger";
 import { inc, set } from "./metrics";
 import { routeRequest } from "./routing/chain";
+
+// P0-фикс v2.9.10 (Render build failure):
+// Turbopack/webpack static analysis помечает fs-операции с путями, вычисленными
+// из env() во время выполнения, как "dynamic filesystem access" и трассирует
+// ВЕСЬ проект (включая public/), что ломает сборку на Render.
+// Решение: использовать СТАТИЧЕСКИЙ путь, конструируемый из process.cwd()
+// (Turbopack знает это возвращаемое значение) + литеральных подстрок.
+// Env-переопределение EXPORT_STORAGE_DIR намеренно НЕ применяется в fs-вызовах.
+const EXPORT_STORAGE_DIR = path.join(process.cwd(), "data", "exports");
 
 const GLOBAL_KEY = "__telemetriaWorkerRuntime";
 const g = globalThis as unknown as { [GLOBAL_KEY]?: WorkerRuntime };
@@ -228,11 +239,9 @@ async function pollExportJobs(): Promise<void> {
 
       const { generateExport } = await import("./export");
       const { content, ext } = generateExport(session as never, format);
-      const fs = await import("fs");
-      const path = await import("path");
-      const dir = env().EXPORT_STORAGE_DIR;
-      fs.mkdirSync(dir, { recursive: true });
-      const filePath = path.join(dir, `${jobId}.${ext}`);
+      // Статический путь (см. коммент в начале файла) — Turbopack-friendly.
+      fs.mkdirSync(EXPORT_STORAGE_DIR, { recursive: true });
+      const filePath = path.join(EXPORT_STORAGE_DIR, `${jobId}.${ext}`);
       fs.writeFileSync(filePath, content, "utf8");
       const expiresAt = Date.now() + env().EXPORT_URL_TTL_HOURS * 3600 * 1000;
       await libsql.execute({

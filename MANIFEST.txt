@@ -112,3 +112,29 @@ f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-pro
 #   ADMIN_SPEC.md (v2.9.4): 5d91947367e3d70a49e771e8b473952cf57c3430b0dd159459bb913cde45f237
 #   METHODOLOGY.md — без изменений: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
 #   OPERATIONS.md — без изменений: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a
+
+# ── v2.9.4 P1-hotfix addendum (2026-08-29, round 6, PR #12 ea300aa) ────────
+# P1-фикс несовпадения типов datetime: Session/ExportJob/BackupJob хранили
+# дата-время как TEXT ISO (libsql сериализует Date в ISO), а db.ts toTs()
+# передавал в SQL-фильтры epoch-ms ЧИСЛА. В SQLite text всегда > integer:
+#   - todaySessions считал ВСЕ сессии (дашборд «+5 сегодня» при нуле за сегодня)
+#   - perDay-бакеты были нулями (спарклайны/недельные данные мертвы)
+#   - retention-purge не находил grace-истёкшие soft-delete строки
+#   - пагинация olderThan/before матчила не те строки
+#   - персистентный RouteCache-слой никогда не срабатывал (string vs Date NaN)
+#   - проверка экспирации ExportJob ломалась после нормализации типов
+# Фиксы: toTs() → ISO-строки; perDay-фильтр через new Date(); экспирация
+# ExportJob и RouteCache через new Date(x) < / > new Date().
+#
+# Миграция данных на проде (2026-08-29, до фикса сделан бэкап):
+#   backupId:    65d9c9c7-370d-4b7b-a773-e603eb787839
+#   status:      completed, checksum 4bd8ffc0540d1b576be03bb0e91037018fbb7dba4c469d8e5814167aabd24c7b
+#   fileSize:    9 783 232 байт; tableCounts: Session=46, GpsPoint=25998, BackupJob=11
+# Конвертация integer ms → ISO text (strftime unixepoch): Session.startTime
+# (22 строки), Session.endTime (22), Session.deletedAt (10), ExportJob.expiresAt
+# (5), BackupJob.completedAt (10). 5 тест-фикстурных строк, хранившихся СЕКУНДАМИ
+# (1788000000), восстановлены в секунды-интерпретацию (2026-08-29T17:20:00Z).
+# Верификация пост-миграции: все datetime-колонки text; todaySessions=0;
+# perDay 2026-08-28: count=1, points=226, durationSec=1968.295; retention
+# candidates=0; пагинация endTime<cutoff корректна; MIN/MAX(startTime) по
+# группам маршрутов — лексикографика ISO = хронология.

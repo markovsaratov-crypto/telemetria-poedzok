@@ -6,9 +6,13 @@
 // Общий для десктопа (session-stats-card) и мобильной версии (SessionDetailScreen).
 // v2.9.4: связка карта↔график — сэмплы несут lat/lng; onHoverIdx/onPinIdx/externalIdx
 // синхронизируют кросхейр с маркером на карте (клик по графику = закрепление точки).
+// v2.9.9: паритет с тепловой картой — линия скорости окрашена по бакетам км/ч
+// (та же шкала 0–30/30–60/60–90/90–120/120+, что и на карте: SPEED_BUCKETS из map-track),
+// плюс пунктирные пороги бакетов с цветными подписями справа и легенда-чипы.
 
 import * as React from "react";
 import { cn } from "@/lib/utils";
+import { SPEED_BUCKETS, speedBucketFor } from "./map-track";
 
 export interface SpeedProfilePointView {
   t: number; // сек от начала
@@ -105,18 +109,37 @@ export function SpeedProfileChart({
     const x = (t: number) => PAD.left + (t / tMax) * plotW;
     const y = (v: number) => PAD.top + plotH - (Math.max(0, v) / vMax) * plotH;
 
-    // Сегменты линии с пропусками на null-скоростях
-    const segs: Array<Array<{ x: number; y: number }>> = [];
-    let cur: Array<{ x: number; y: number }> = [];
+    // v2.9.9: пробеги линии по бакетам скорости (паритет с heat-картой):
+    // непрерывные отрезки одного цвета; разрыв на null-скоростях;
+    // при смене бакета новый пробег начинается с предыдущей точки (без щелей)
+    const bucketRuns: Array<{ bucket: number; pts: Array<{ x: number; y: number }> }> = [];
+    let run: { bucket: number; pts: Array<{ x: number; y: number }> } | null = null;
+    let prevPt: { x: number; y: number } | null = null;
     for (const p of profile) {
       if (p.v == null) {
-        if (cur.length > 0) segs.push(cur);
-        cur = [];
+        run = null;
+        prevPt = null;
         continue;
       }
-      cur.push({ x: x(p.t), y: y(p.v) });
+      const b = speedBucketFor(p.v);
+      const pt = { x: x(p.t), y: y(p.v) };
+      if (!run || run.bucket !== b) {
+        // начало пробега: стыкуем с предыдущей точкой, чтобы линия не рвалась
+        run = { bucket: b, pts: prevPt ? [prevPt, pt] : [pt] };
+        bucketRuns.push(run);
+      } else {
+        run.pts.push(pt);
+      }
+      prevPt = pt;
     }
-    if (cur.length > 0) segs.push(cur);
+
+    // v2.9.9: какие бакеты реально присутствуют в поездке (для легенды)
+    const presentBuckets = new Set(bucketRuns.map((r) => r.bucket));
+
+    // v2.9.9: пороги бакетов (30/60/90/120 км/ч) в пределах видимой шкалы Y
+    const thresholds = SPEED_BUCKETS.slice(0, -1)
+      .map((b, i) => ({ v: b.maxKmh, color: SPEED_BUCKETS[i + 1].color, y: y(b.maxKmh) }))
+      .filter((t) => t.v < vMax * 0.97 && t.v > 0);
 
     // Путь area (от первой невалидной точки к последней)
     const valid = profile.filter((p) => p.v != null);
@@ -154,7 +177,9 @@ export function SpeedProfileChart({
       vMax,
       x,
       y,
-      segs,
+      bucketRuns,
+      presentBuckets,
+      thresholds,
       areaPath,
       ribbon,
       maxIdx,
@@ -254,6 +279,26 @@ export function SpeedProfileChart({
         )}
       </div>
 
+      {/* v2.9.9: легенда бакетов скорости — паритет с heat-картой.
+          Показываем только присутствующие в поездке бакеты (без шума);
+          компакт: чипы без подписей (экономия ширины), подпись только у крайних. */}
+      {geom && geom.presentBuckets.size > 0 && (
+        <div className="flex items-center gap-1.5 flex-wrap text-[9px] text-muted-foreground mb-1.5">
+          <span className="mr-0.5 opacity-70">км/ч:</span>
+          {SPEED_BUCKETS.map((b, i) =>
+            geom.presentBuckets.has(i) ? (
+              <span
+                key={b.label}
+                className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-muted/30 px-1.5 py-[1px] tabular-nums"
+              >
+                <span className="h-1.5 w-3 rounded-full" style={{ background: b.color }} />
+                {b.label}
+              </span>
+            ) : null
+          )}
+        </div>
+      )}
+
       <div
         ref={wrapRef}
         className={cn(
@@ -319,6 +364,31 @@ export function SpeedProfileChart({
               />
             ))}
 
+          {/* v2.9.9: пороги бакетов скорости (30/60/90/120) — пунктир + цветная подпись справа;
+              цвет подписи = бакет НАД порогом (тот же язык цветов, что на heat-карте) */}
+          {geom.thresholds.map((t) => (
+            <g key={`th${t.v}`}>
+              <line
+                x1={PAD.left}
+                x2={W - PAD.right}
+                y1={t.y}
+                y2={t.y}
+                stroke={t.color}
+                strokeOpacity="0.38"
+                strokeWidth="1"
+                strokeDasharray="2 5"
+              />
+              <text
+                x={W - PAD.right + 3}
+                y={t.y + 2.5}
+                className="chart-axis-label"
+                style={{ fontSize: compact ? 7.5 : 8, fill: t.color, fontWeight: 600 }}
+              >
+                {t.v}
+              </text>
+            </g>
+          ))}
+
           {/* Area */}
           {geom.areaPath && <path d={geom.areaPath} fill="url(#spcFill)" />}
 
@@ -346,19 +416,24 @@ export function SpeedProfileChart({
             </g>
           )}
 
-          {/* Линии скорости (v2.9.5: --chart-speed-line — глубже на светлом, ярче в тёмной) */}
-          {geom.segs.map((seg, i) => (
-            <path
-              key={i}
-              d={seg.map((p, j) => `${j === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ")}
-              fill="none"
-              stroke="var(--chart-speed-line)"
-              strokeWidth={compact ? 1.6 : 2}
-              strokeLinejoin="round"
-              strokeLinecap="round"
-              vectorEffect="non-scaling-stroke"
-            />
-          ))}
+          {/* Линии скорости (v2.9.9: пробеги по бакетам — цвет как на heat-карте;
+              толщина растёт с бакетом: медленнее — тоньше, быстрее — толще) */}
+          {geom.bucketRuns.map((r, i) => {
+            const bucket = SPEED_BUCKETS[r.bucket];
+            const w = (compact ? 1.5 : 1.9) + r.bucket * (compact ? 0.14 : 0.18);
+            return (
+              <path
+                key={`br${i}`}
+                d={r.pts.map((p, j) => `${j === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ")}
+                fill="none"
+                stroke={bucket.color}
+                strokeWidth={w}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+                vectorEffect="non-scaling-stroke"
+              />
+            );
+          })}
 
           {/* Маркер максимума */}
           {geom.maxIdx >= 0 && profile[geom.maxIdx].v != null && (

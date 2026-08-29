@@ -94,21 +94,27 @@ html.dark .v4-app {
 /* === Шапка === */
 .v4-app .topbar {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
+  flex-wrap: nowrap;
   margin-bottom: 6px;
   border-bottom: 2px solid var(--ink);
   padding-bottom: 12px;
 }
+.v4-app .brand {
+  flex: 0 0 auto;
+  min-width: 0;
+}
 .v4-app .brand h1 {
   font-family: var(--cond);
-  font-size: 27px;
+  font-size: 22px;
   font-weight: 700;
   letter-spacing: 0.10em;
   text-transform: uppercase;
   line-height: 1;
   color: var(--ink);
+  white-space: nowrap;
 }
 .v4-app .brand .brand-sub {
   font-size: 11px;
@@ -117,12 +123,64 @@ html.dark .v4-app {
   color: var(--muted);
   margin-top: 5px;
 }
+.v4-app .v4-bookmarks {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.v4-app .v4-bookmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  font-family: var(--cond);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  border-radius: 6px 6px 0 0;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  user-select: none;
+  transition: 0.15s;
+  white-space: nowrap;
+}
+.v4-app .v4-bookmark:hover {
+  color: var(--text);
+  border-color: var(--plum);
+}
+.v4-app .v4-bookmark.active {
+  color: var(--ink);
+  background: var(--plum-dim);
+  border-color: var(--plum);
+  border-bottom-color: var(--plum);
+  font-weight: 800;
+}
+.v4-app .v4-bookmark-icon {
+  display: inline-flex;
+  align-items: center;
+}
+.v4-app .v4-topbar-active-label {
+  font-family: var(--cond);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--plum);
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-left: 4px;
+}
 .v4-app .topbar-actions {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
   justify-content: flex-end;
+  flex: 0 0 auto;
 }
 .v4-app .iconbtn {
   display: inline-flex;
@@ -211,6 +269,13 @@ html.dark .v4-app {
   margin-bottom: 10px;
   flex-wrap: wrap;
 }
+.v4-app .pills-divider {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-weight: 400;
+  font-size: 14px;
+  user-select: none;
+}
 .v4-app .pills {
   display: flex;
   gap: 6px;
@@ -235,6 +300,10 @@ html.dark .v4-app {
   transition: 0.15s;
 }
 .v4-app .pill:hover { border-color: var(--line2); color: var(--text); }
+.v4-app .pill.dim {
+  opacity: 0.55;
+}
+.v4-app .pill.dim:hover { opacity: 0.85; }
 .v4-app .pill.active {
   background: var(--ink);
   border-color: var(--ink);
@@ -264,6 +333,11 @@ html.dark .v4-app {
   white-space: nowrap;
 }
 .v4-app .trip-filter-btn:hover { background: var(--plum); color: var(--fg-on-dark); }
+.v4-app .trip-filter-btn.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--fg-on-dark);
+}
 .v4-app .trip-filter-btn .chev { font-size: 10px; color: inherit; }
 .v4-app .trip-filter-popover {
   position: absolute;
@@ -452,21 +526,31 @@ html.dark .v4-app .ml-gap {
 }
 .v4-tipbox {
   position: absolute;
-  z-index: 90;
-  max-width: 270px;
-  background: var(--tip-bg);
-  color: var(--tip-fg);
-  border-radius: 6px;
-  padding: 10px 12px;
+  z-index: 1000;
+  max-width: 320px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line2);
+  border-radius: 8px;
+  padding: 11px 13px;
   font-size: 12px;
-  line-height: 1.5;
-  box-shadow: 0 12px 30px rgba(43,20,32,0.28);
+  line-height: 1.55;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   display: none;
   pointer-events: none;
   font-family: 'Arial Narrow', Arial, sans-serif;
+  opacity: 1;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
-.v4-tipbox b { color: var(--tip-accent); }
-.v4-tipbox .t-line { display: block; margin-top: 4px; }
+html.dark .v4-tipbox {
+  background: var(--panel);
+  color: var(--text);
+  border-color: var(--line2);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+}
+.v4-tipbox b { color: var(--plum); }
+.v4-tipbox .t-line { display: block; margin-top: 5px; }
 .v4-tipbox .t-line:first-child { margin-top: 0; }
 
 /* === KPI grid === */
@@ -1543,24 +1627,50 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
   .v4-app .v4-wrap { padding: 22px 16px 90px; padding-top: max(22px, env(safe-area-inset-top)); }
 }
 
-/* Topbar — safe-area-top, обертка для узких экранов */
+/* Topbar — single horizontal bar on all viewports.
+   On <768px we keep one row but shrink brand + icon-only utility. */
 .v4-app .topbar {
   padding-top: max(0px, env(safe-area-inset-top));
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   margin-bottom: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
 }
-.v4-app .brand { flex: 1 1 auto; min-width: 0; }
+.v4-app .topbar::-webkit-scrollbar { display: none; }
+.v4-app .brand { flex: 0 0 auto; min-width: 0; }
 .v4-app .brand h1 {
-  font-size: 21px;
-  letter-spacing: 0.08em;
+  font-size: 14px;
+  letter-spacing: 0.06em;
+}
+/* Bookmarks (3 tabs) — compact on mobile */
+.v4-app .v4-bookmarks {
+  flex: 0 0 auto;
+  gap: 3px;
+}
+.v4-app .v4-bookmark {
+  padding: 6px 8px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  border-radius: 5px 5px 0 0;
+}
+.v4-app .v4-bookmark-label { display: none; }
+.v4-app .v4-bookmark-icon { display: inline-flex; }
+.v4-app .v4-topbar-active-label { display: none; }
+@media (min-width: 480px) {
+  .v4-app .brand h1 { font-size: 16px; }
+  .v4-app .v4-bookmark { padding: 7px 10px; font-size: 12px; }
+  .v4-app .v4-bookmark-label { display: inline; }
 }
 @media (min-width: 640px) {
-  .v4-app .brand h1 { font-size: 24px; letter-spacing: 0.10em; }
+  .v4-app .brand h1 { font-size: 18px; letter-spacing: 0.08em; }
 }
 @media (min-width: 768px) {
-  .v4-app .brand h1 { font-size: 27px; }
-  .v4-app .topbar { flex-wrap: nowrap; gap: 10px; margin-bottom: 6px; }
+  .v4-app .brand h1 { font-size: 22px; letter-spacing: 0.10em; }
+  .v4-app .topbar { flex-wrap: nowrap; gap: 10px; margin-bottom: 6px; overflow-x: visible; }
+  .v4-app .v4-bookmark { padding: 7px 12px; font-size: 13px; letter-spacing: 0.08em; }
+  .v4-app .v4-topbar-active-label { display: inline-block; }
 }
 
 /* Topbar-actions: обертка + shrink на мобильном */
@@ -1609,12 +1719,66 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
   .v4-app .textbtn .v4-textbtn-label { display: inline; }
 }
 
-/* Tabs: collapse to drawer на <768px. Десктоп-вариант .v4-desktop-tabs видим md+ */
+/* Tabs: hamburger drawer legacy — теперь не используется.
+   .v4-desktop-tabs и .v4-mobile-tabs убраны, навигация через .v4-bookmarks в topbar.
+   .v4-bottom-nav видим только на <768px (sticky bottom). */
 .v4-app .v4-desktop-tabs { display: none; }
-.v4-app .v4-mobile-tabs { display: flex; align-items: center; gap: 8px; }
+.v4-app .v4-mobile-tabs { display: none; }
+
+.v4-app .v4-bottom-nav {
+  display: flex;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 50;
+  background: var(--panel);
+  border-top: 1px solid var(--line2);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-top: 4px;
+  box-shadow: 0 -2px 12px rgba(43, 20, 32, 0.08);
+}
+html.dark .v4-app .v4-bottom-nav {
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.4);
+}
+.v4-app .v4-bottom-nav-item {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 6px 4px 8px;
+  min-height: 56px;
+  min-width: 44px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--cond);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: 0.15s;
+}
+.v4-app .v4-bottom-nav-item:hover { color: var(--text); }
+.v4-app .v4-bottom-nav-item.active {
+  color: var(--plum);
+}
+.v4-app .v4-bottom-nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+}
+.v4-app .v4-bottom-nav-label {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
 @media (min-width: 768px) {
-  .v4-app .v4-desktop-tabs { display: flex; }
-  .v4-app .v4-mobile-tabs { display: none; }
+  .v4-app .v4-bottom-nav { display: none; }
 }
 
 .v4-app .v4-hamburger {
@@ -1706,18 +1870,18 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
   }
 }
 
-/* KPI grid: 1 col mobile, 2 cols sm, 4 cols md, 7 cols lg */
+/* KPI grid: 2 cols mobile (<768), 4 cols md, 7 cols lg */
 .v4-app .kpi-grid {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, 1fr);
   gap: 8px;
 }
 .v4-app .kpi { padding: 11px 12px 32px; }
-.v4-app .kpi .val { font-size: 24px; }
-@media (min-width: 640px) {
-  .v4-app .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.v4-app .kpi .val { font-size: 22px; }
+@media (min-width: 480px) {
+  .v4-app .kpi .val { font-size: 24px; }
 }
 @media (min-width: 768px) {
-  .v4-app .kpi-grid { grid-template-columns: repeat(4, 1fr); }
+  .v4-app .kpi-grid { grid-template-columns: repeat(4, 1fr); gap: 10px; }
   .v4-app .kpi .val { font-size: 27px; }
   .v4-app .kpi { padding: 12px 12px 34px; }
 }

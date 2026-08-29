@@ -1,19 +1,21 @@
-Backup v2.9 (release) — [TBD after prod backup]
+Backup v2.9 (release) — 2026-08-29T00:56:25.563Z
 Прод: https://telemetria-poedzok.onrender.com
-Prod health: {"status":"ok","db":"ok","worker":"ok","circuits":{},"rateLimiter":{"buckets":0,"backend":"memory"},"version":"2.9.0","uptime":[TBD],"targetLoadRpm":100,"rateLimitMaxIngest":120}
-Код: repo-t2 @ [TBD after merge to main] (release/v2.9), package version 2.9.0
+Prod health: {"status":"ok","db":"ok","worker":"ok","circuits":{},"rateLimiter":{"buckets":1,"backend":"memory"},"version":"2.9.0","uptime":245.347707036,"targetLoadRpm":100,"rateLimitMaxIngest":120}
+Код: repo-t2 @ e04a81d9c04f5ef7bc247945d7b4cdcda6701706 (main), package version 2.9.0
 Git dirty files: 0
-Дамп Turso: таблиц [TBD], строки см. dump_summary.txt
+Дамп Turso: таблиц 10, всего 26173 строк (см. dump_summary.txt)
 ВНИМАНИЕ: creds.env содержит прод-секреты — не публиковать.
 
-# project_repo-t2.tar.gz
-[TBD after prod backup]  [TBD after prod backup]
-# db/turso-dump-<timestamp>.json
-[TBD after prod backup]  [TBD after prod backup]
-# docs/ADMIN_SPEC_v2.9.md (DOCX-издание пропущено по решению пользователя «4 только мд»)
-[TBD after prod backup]  [TBD after prod backup]
-# docs/METHODOLOGY_v2.9.md (DOCX-издание пропущено по решению пользователя «4 только мд»)
-[TBD after prod backup]  [TBD after prod backup]
-# scripts_aux.tar.gz
-[TBD after prod backup]  [TBD after prod backup]
-# Note: placeholders to be filled after prod /api/admin/backup run
+f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-project/download/backup_v2.9_2026-08-29T00-56-20/db/turso-dump-2026-08-29T00-56-20.json
+1b957e71b330dca569de53332c716f3dff011d4c06340641cafabce84a574298  /home/z/my-project/download/backup_v2.9_2026-08-29T00-56-20/project_repo-t2.tar.gz
+7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b  /home/z/my-project/download/backup_v2.9_2026-08-29T00-56-20/docs/METHODOLOGY.md
+7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b  /home/z/my-project/download/backup_v2.9_2026-08-29T00-56-20/docs/METHODOLOGY_v2.9.md
+4a1681f5ed14bf8b6f004442fdb758dca0280b41441b8609a9b5d772dee2b53f  /home/z/my-project/download/backup_v2.9_2026-08-29T00-56-20/docs/ADMIN_SPEC.md
+4a1681f5ed14bf8b6f004442fdb758dca0280b41441b8609a9b5d772dee2b53f  /home/z/my-project/download/backup_v2.9_2026-08-29T00-56-20/docs/ADMIN_SPEC_v2.9.md
+8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a  /home/z/my-project/download/backup_v2.9_2026-08-29T00-56-20/docs/OPERATIONS.md
+8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a  /home/z/my-project/download/backup_v2.9_2026-08-29T00-56-20/docs/OPERATIONS_v2.9.md
+8136b9a5919e8c54a468d3c1556d13da1315e55ad672a8a5c9341dddd81c59f7  /home/z/my-project/download/backup_v2.9_2026-08-29T00-56-20/scripts_aux.tar.gz
+
+# Note: backup generated locally from fresh main clone + prod Turso dump.
+# /api/admin/backup на проде был запущен, но выявил предсуществующий v2.7 баг
+# (libsql is not defined) — пофикшен в commit e04a81d, redeploy запущен.

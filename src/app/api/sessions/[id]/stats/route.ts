@@ -112,6 +112,7 @@ const EARTH_R = 6371000; // (оставлено для совместимост�
 void EARTH_R;
 
 // ——— v2.9.3: спидограмма — даунсемпл GPS-точек для графика скорость-время ———
+// v2.9.4: сэмпл расширен полями alt (высотный профиль) и lat/lng (связка карта↔график).
 // st: 0 = idle (<2 км/ч), 1 = moving, 2 = gap (dt > 30 сек от предыдущей точки).
 // Максимум SPEED_PROFILE_MAX точек; при меньшем числе точек — как есть.
 const SPEED_PROFILE_MAX = 240;
@@ -119,9 +120,18 @@ interface SpeedProfilePoint {
   t: number; // сек от начала сессии
   v: number | null; // км/ч (null — нет GPS-скорости у точки)
   st: 0 | 1 | 2;
+  alt?: number | null; // м над уровнем моря (v2.9.4: высотный профиль)
+  lat?: number; // v2.9.4: координата сэмпла для маркера на карте (5 знаков)
+  lng?: number; // v2.9.4: координата сэмпла для маркера на карте (5 знаков)
 }
 function buildSpeedProfile(
-  points: Array<{ speed: number | null; timestamp: number }>,
+  points: Array<{
+    speed: number | null;
+    timestamp: number;
+    altitude?: number | null;
+    lat?: number;
+    lon?: number;
+  }>,
   startMs: number
 ): SpeedProfilePoint[] {
   if (points.length === 0) return [];
@@ -133,6 +143,20 @@ function buildSpeedProfile(
   }
   const step = Math.max(1, Math.ceil(points.length / SPEED_PROFILE_MAX));
   const out: SpeedProfilePoint[] = [];
+  // v2.9.4: высотный ряд сглаживаем скользящим окном ±2 сэмпла исходного ряда —
+  // GPS-высота шумит сильнее горизонтали, сырые значения дают «пилу» на графике
+  const smoothAlt = (idx: number): number | null => {
+    let sum = 0;
+    let n = 0;
+    for (let j = Math.max(0, idx - 2); j <= Math.min(points.length - 1, idx + 2); j++) {
+      const a = points[j].altitude;
+      if (a != null) {
+        sum += a;
+        n++;
+      }
+    }
+    return n >= 2 ? Math.round((sum / n) * 10) / 10 : points[idx].altitude ?? null;
+  };
   for (let i = 0; i < points.length; i += step) {
     const p = points[i];
     const t = Math.round((p.timestamp - startMs) / 1000);
@@ -148,7 +172,15 @@ function buildSpeedProfile(
       }
     }
     const st: 0 | 1 | 2 = isGap ? 2 : kmh == null || kmh < 2 ? 0 : 1;
-    out.push({ t, v: kmh, st });
+    const sample: SpeedProfilePoint = { t, v: kmh, st };
+    // v2.9.4: высота (сглаженная) и координаты для связки с картой
+    const alt = smoothAlt(i);
+    if (alt != null) sample.alt = alt;
+    if (typeof p.lat === "number" && typeof p.lon === "number") {
+      sample.lat = Math.round(p.lat * 1e5) / 1e5;
+      sample.lng = Math.round(p.lon * 1e5) / 1e5;
+    }
+    out.push(sample);
   }
   // хвостовая точка — чтобы график дотягивался до конца записи
   const last = points[points.length - 1];
@@ -156,7 +188,14 @@ function buildSpeedProfile(
     const t = Math.round((last.timestamp - startMs) / 1000);
     const kmh =
       last.speed != null && last.speed >= 0 ? Math.round(last.speed * 3.6 * 10) / 10 : null;
-    out.push({ t, v: kmh, st: kmh != null && kmh >= 2 ? 1 : 0 });
+    const sample: SpeedProfilePoint = { t, v: kmh, st: kmh != null && kmh >= 2 ? 1 : 0 };
+    const lastAlt = points.length > 0 ? points[points.length - 1].altitude : null;
+    if (lastAlt != null) sample.alt = lastAlt;
+    if (typeof last.lat === "number" && typeof last.lon === "number") {
+      sample.lat = Math.round(last.lat * 1e5) / 1e5;
+      sample.lng = Math.round(last.lon * 1e5) / 1e5;
+    }
+    out.push(sample);
   }
   return out;
 }
@@ -270,7 +309,10 @@ export async function GET(
     // P1-7: план-факт из завершённого TrafficJob
     const route = await computePlanFact(id, distance, durationSec, avgSpeed);
     // v2.9.3: спидограмма (даунсемпл ≤240 точек, сек от старта, км/ч, состояние)
+    // v2.9.4: сэмплы дополнены alt/lat/lng (высотный профиль + связка с картой)
     const speedProfile = buildSpeedProfile(points, startTime);
+    // v2.9.4: флаг наличия высотных данных (для показа высотного профиля в UI)
+    const hasAltitude = speedProfile.some((p) => p.alt != null);
     trackLatency(request); // P2-16: успешный ответ участвует в api_latency_p95
 
     return json(
@@ -281,6 +323,8 @@ export async function GET(
         duration: Math.round(durationSec),
         // v2.9.3: спидограмма для графика скорость-время
         speedProfile,
+        // v2.9.4: есть ли высотные данные у сэмплов (иначе профиль высоты не рендерим)
+        hasAltitude,
         // v2.9: из state machine (§4.6/§4.7)
         movingTime: methodology.movingTime,
         idleTime: methodology.idleTime,

@@ -502,25 +502,24 @@ export function RouteGroups() {
             </CardDescription>
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              className={cn("gap-1.5", groups.length === 0 && "pointer-events-none opacity-50")}
-              asChild
+            {/* v2.9.4: btn-soft — вторичные кнопки с заливкой (стайлинг-раунд 5) */}
+            <a
+              href="/api/routes/grouped/export?format=csv"
+              title="Экспорт агрегатов всех групп в CSV"
+              className={cn("btn-soft", groups.length === 0 && "pointer-events-none opacity-50")}
               aria-disabled={groups.length === 0}
             >
-              <a
-                href="/api/routes/grouped/export?format=csv"
-                title="Экспорт агрегатов всех групп в CSV"
-              >
-                <Download className="h-4 w-4" />
-                CSV
-              </a>
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => refetch()} disabled={isRefetching}>
-              {isRefetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              <Download className="h-3.5 w-3.5" />
+              CSV
+            </a>
+            <button
+              className="btn-soft"
+              onClick={() => refetch()}
+              disabled={isRefetching}
+            >
+              {isRefetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
               Обновить
-            </Button>
+            </button>
           </div>
         </div>
       </CardHeader>

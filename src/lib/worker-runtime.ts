@@ -333,8 +333,13 @@ export function startWorkerRuntime(): WorkerRuntime {
   };
 
   g[GLOBAL_KEY] = rt;
-  process.on("SIGTERM", () => rt.stop());
-  process.on("SIGINT", () => rt.stop());
+  // v2.9.10: process.on("SIGTERM"/"SIGINT") УБРАН — Turbopack хардкодит
+  // Edge-бандл instrumentation.ts (см. коммент в начале этого файла и в
+  // instrumentation.ts), а process.on — Node.js API, не поддерживается в
+  // Edge Runtime → "Ecmascript file had an error" → build failed.
+  // Грейсфул-шатдаун не критичен: воркер in-process, при SIGTERM/SIGINT
+  // операционка убивает весь процесс Next.js, pollTimer (setTimeout) умирает
+  // вместе с ним, никаких утечек. rt.stop() только чистил таймер и логировал.
   logger.info("worker runtime started (in-process)", { workerId: rt.workerId, pollIntervalMs: rt.pollIntervalMs });
   schedulePoll();
   return rt;

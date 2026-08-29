@@ -77,3 +77,7 @@ tool-results/
 /download/
 /.zscripts/
 /*.db
+infra-credentials.xlsx
+creds.env
+*.env.local
+.env

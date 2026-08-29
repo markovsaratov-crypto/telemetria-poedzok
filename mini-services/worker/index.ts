@@ -242,6 +242,13 @@ async function processOneJob(job: JobFromPoll, parentRequestId: string): Promise
       durationSec: result.durationSec,
       trafficFetched: result.trafficFetched,
       trafficUtc: result.trafficUtc,
+      // v2.9: новые поля
+      routeHash: result.routeHash ?? null,
+      topologyHash: result.topologyHash ?? null,
+      activeTrip: result.metrics?.activeTrip ?? null,
+      ecoScore: result.metrics?.ecoScore.value ?? null,
+      sessionReliability: result.metrics?.sessionReliability.value ?? null,
+      mapMatchLogProb: result.mapMatchLogProb ?? null,
       durationMs,
     });
   } catch (completeErr) {
@@ -318,7 +325,7 @@ const server = Bun.serve({
         totalProcessed,
         totalFailed,
         uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
-        version: "2.7.0",
+        version: "2.9.0",
       };
       return Response.json(body, {
         status: 200,

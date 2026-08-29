@@ -1,0 +1,19 @@
+Backup v2.9 (release) — [TBD after prod backup]
+Прод: https://telemetria-poedzok.onrender.com
+Prod health: {"status":"ok","db":"ok","worker":"ok","circuits":{},"rateLimiter":{"buckets":0,"backend":"memory"},"version":"2.9.0","uptime":[TBD],"targetLoadRpm":100,"rateLimitMaxIngest":120}
+Код: repo-t2 @ [TBD after merge to main] (release/v2.9), package version 2.9.0
+Git dirty files: 0
+Дамп Turso: таблиц [TBD], строки см. dump_summary.txt
+ВНИМАНИЕ: creds.env содержит прод-секреты — не публиковать.
+
+# project_repo-t2.tar.gz
+[TBD after prod backup]  [TBD after prod backup]
+# db/turso-dump-<timestamp>.json
+[TBD after prod backup]  [TBD after prod backup]
+# docs/ADMIN_SPEC_v2.9.md (DOCX-издание пропущено по решению пользователя «4 только мд»)
+[TBD after prod backup]  [TBD after prod backup]
+# docs/METHODOLOGY_v2.9.md (DOCX-издание пропущено по решению пользователя «4 только мд»)
+[TBD after prod backup]  [TBD after prod backup]
+# scripts_aux.tar.gz
+[TBD after prod backup]  [TBD after prod backup]
+# Note: placeholders to be filled after prod /api/admin/backup run

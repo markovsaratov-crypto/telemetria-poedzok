@@ -592,10 +592,16 @@ function CompactList({
   sessions,
   selectedId,
   onSelect,
+  bulkMode,
+  selectedIds,
+  onToggleSelect,
 }: {
   sessions: SessionListItem[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  bulkMode?: boolean;
+  selectedIds?: Set<string>;
+  onToggleSelect?: (id: string) => void;
 }) {
   return (
     <ul className="divide-y">
@@ -608,24 +614,30 @@ function CompactList({
             transition={{ delay: Math.min(idx * 0.01, 0.2) }}
           >
             <button
-              onClick={() => onSelect(s.id)}
+              onClick={() => bulkMode ? (onToggleSelect?.(s.id) ?? onSelect(s.id)) : onSelect(s.id)}
               className={cn(
                 "w-full text-left px-3 py-1.5 hover:bg-accent/50 transition-colors flex items-center gap-2 border-l-2",
-                selectedId === s.id
+                (bulkMode && selectedIds?.has(s.id)) || (!bulkMode && selectedId === s.id)
                   ? "bg-primary/10 border-primary"
                   : "border-transparent"
               )}
             >
-              <div
-                className={cn(
-                  "w-1.5 h-1.5 rounded-full shrink-0",
-                  s.status === "active"
-                    ? "bg-emerald-500"
-                    : s.status === "completed"
-                    ? "bg-teal-500"
-                    : "bg-muted-foreground/40"
-                )}
-              />
+              {bulkMode ? (
+                <span className={cn("shrink-0", selectedIds?.has(s.id) ? "text-primary" : "text-muted-foreground")}>
+                  {selectedIds?.has(s.id) ? <CheckSquare className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
+                </span>
+              ) : (
+                <div
+                  className={cn(
+                    "w-1.5 h-1.5 rounded-full shrink-0",
+                    s.status === "active"
+                      ? "bg-emerald-500"
+                      : s.status === "completed"
+                      ? "bg-teal-500"
+                      : "bg-muted-foreground/40"
+                  )}
+                />
+              )}
               <span className="text-xs font-medium truncate flex-1">
                 {s.deviceName || s.deviceId}
               </span>

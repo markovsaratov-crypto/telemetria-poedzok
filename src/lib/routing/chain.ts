@@ -90,7 +90,15 @@ async function route2Gis(
     const polyline: [number, number][] = [];
     const maneuvers = route.maneuvers || [];
     for (const m of maneuvers) {
-      const paths = m.outcoming_path || [];
+      // R5.1: 2ГИС может вернуть outcoming_path как объект (один путь) ИЛИ
+      // как массив путей — нормализуем в массив, иначе `for of` упадёт с
+      // "X is not iterable" на реально полученном ответе.
+      const rawPaths = m.outcoming_path;
+      const paths: any[] = Array.isArray(rawPaths)
+        ? rawPaths
+        : rawPaths
+          ? [rawPaths]
+          : [];
       for (const path of paths) {
         const pathDistance = Number(path.distance) || 0;
         const pathDuration = Number(path.duration) || 0;

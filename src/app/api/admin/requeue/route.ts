@@ -13,12 +13,15 @@ export async function POST(request: NextRequest) {
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
     const body = await request.json().catch(() => ({}));
-    const { jobId } = body as { jobId?: string };
+    const { jobId, force } = body as { jobId?: string; force?: boolean };
     if (!jobId) return json({ error: "jobId required" }, 400, { "X-Request-Id": requestId });
 
     const job = await db.trafficJob.findUnique({ where: { id: jobId } });
     if (!job) return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
-    if (job.status !== "dead" && job.status !== "failed") {
+    // R5.1: force=true allows requeue of completed jobs (e.g. to re-run
+    // routing with a newly configured 2ГИС key). Default (force=false)
+    // preserves backward-compat: only dead/failed can be requeued.
+    if (!force && job.status !== "dead" && job.status !== "failed") {
       return json({ error: "Job is not in dead/failed state" }, 400, { "X-Request-Id": requestId });
     }
 
@@ -33,6 +36,7 @@ export async function POST(request: NextRequest) {
       actorType: auth.via === "cookie" ? "user" : "system",
       actorId: auth.via === "cookie" ? "owner" : "admin-token",
       sessionId: job.sessionId,
+      metadata: force ? { force: true, previousStatus: job.status } : undefined,
     });
     return json({ ok: true, jobId, status: "pending" }, 200, { "X-Request-Id": requestId });
   } catch (err) {

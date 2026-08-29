@@ -62,7 +62,7 @@ services:
       - key: TARGET_LOAD_RPM
         value: "100"
       - key: APP_VERSION
-        value: "2.9.2"
+        value: "2.10.0"
       # v2.9: MovingTime state machine (§4.6 методологии)
       - key: MOVING_TIME_HYSTERESIS_HIGH_KMH
         value: "5"
@@ -103,6 +103,19 @@ services:
       # v2.9: routeHash snap-to-grid (§10.0)
       - key: ROUTE_ID_SNAP_GRID_DEG
         value: "0.0005"
+      # v2.10.0: external services (sync: false — задаётся в дашборде Render)
+      - key: TWO_GIS_API_KEY
+        sync: false
+      - key: TWO_GIS_PROXY_URL
+        value: ""
+      - key: GH_TOKEN
+        sync: false
+      - key: GH_REPO
+        value: markovsaratov-crypto/telemetria-poedzok
+      - key: GH_BRANCH
+        value: main
+      - key: SLACK_WEBHOOK_URL
+        sync: false
 
   # P1-10: retention-cron (§3.7) — ежедневная чистка по grace/purgedAt.
   # BASE_URL и CRON_SECRET задаются в дашборде Render (sync: false значения не подтягиваются в cron-сервис автоматически).
@@ -136,4 +149,60 @@ services:
       - key: CRON_SECRET
         sync: false
       - key: SLACK_WEBHOOK_URL
+        sync: false
+
+  # v2.10.0: backup-cron (§13.2) — ежедневный бэкап в 03:30 UTC (после retention 03:00).
+  # Лимит /api/admin/backup = 1/час, но cron идёт вне rate limit (CRON_SECRET).
+  - type: cron
+    name: telemetria-backup-cron
+    runtime: node
+    plan: starter
+    region: frankfurt
+    schedule: "30 3 * * *"
+    buildCommand: echo "cron: no build needed"
+    startCommand: curl -sf -X POST "$BASE_URL/api/admin/backup" -H "Authorization: Bearer $CRON_SECRET"
+    envVars:
+      - key: BASE_URL
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: GH_TOKEN
+        sync: false
+      - key: GH_REPO
+        value: markovsaratov-crypto/telemetria-poedzok
+
+  # v2.10.0: github-backup-cron (§13.3) — еженедельная воскресная 04:00 UTC.
+  # Создает Release в markovsaratov-crypto/telemetria-poedzok с asset (snapshot БД).
+  - type: cron
+    name: telemetria-github-backup-cron
+    runtime: node
+    plan: starter
+    region: frankfurt
+    schedule: "0 4 * * 0"
+    buildCommand: echo "cron: no build needed"
+    startCommand: curl -sf -X POST "$BASE_URL/api/admin/backup/github" -H "Authorization: Bearer $CRON_SECRET"
+    envVars:
+      - key: BASE_URL
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: GH_TOKEN
+        sync: false
+      - key: GH_REPO
+        value: markovsaratov-crypto/telemetria-poedzok
+
+  # v2.10.0: finalize-sessions-cron (§4.8) — каждые 5 минут закрывает стоянки >30с
+  # и проставляет endTime для открытых сессий (state machine).
+  - type: cron
+    name: telemetria-finalize-sessions-cron
+    runtime: node
+    plan: starter
+    region: frankfurt
+    schedule: "*/5 * * * *"
+    buildCommand: echo "cron: no build needed"
+    startCommand: curl -sf -X POST "$BASE_URL/api/cron/finalize-sessions" -H "Authorization: Bearer $CRON_SECRET"
+    envVars:
+      - key: BASE_URL
+        sync: false
+      - key: CRON_SECRET
         sync: false

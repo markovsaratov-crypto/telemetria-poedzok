@@ -1,0 +1,2046 @@
+/* ============================================================================
+   Телематика Маркова v4 — дизайн-система (scoped под .v4-app)
+   Источник: telematika_markova_v4.html (Protototype v4.0)
+   Палитра: тёплый айвори фон, слива-акцент, алый «плохо», янтарь внимание.
+   Тёмная тема: маппинг plum→rose-500, фон zinc-950, panles zinc-900.
+   ========================================================================== */
+
+.v4-app {
+  /* === светлая тема (по умолчанию) === */
+  --bg: #FAF6F8;
+  --panel: #FFFFFF;
+  --panel2: #F6EEF2;
+  --wash: #FBF8FA;
+  --line: #E9DDE4;
+  --line2: #D9C6D2;
+  --text: #2B1420;
+  --muted: #7D6470;
+  --faint: #A6929E;
+  --plum: #8E2D4E;
+  --plum-deep: #6E1F3B;
+  --plum-dim: #F3E3EA;
+  --red: #D93A3A;
+  --red-dim: #FBE9E9;
+  --amber: #B47516;
+  --amber-dim: #F7EDDD;
+  --violet: #7B4B9E;
+  --violet-dim: #EFE7F6;
+  --ink: #2B1420;
+  --fg-on-dark: #FDFBFC;
+  --tip-bg: #2B1420;
+  --tip-fg: #FDFBFC;
+  --tip-accent: #F6D9E4;
+  --mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Roboto Mono', Consolas, monospace;
+  --cond: 'Arial Narrow', 'Helvetica Neue Condensed', 'Liberation Sans Narrow', Arial, sans-serif;
+
+  font-family: var(--cond);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  font-size: 15px;
+  min-height: 100vh;
+}
+
+/* === тёмная тема === */
+html.dark .v4-app {
+  --bg: #0E0B10;
+  --panel: #18121A;
+  --panel2: #221A26;
+  --wash: #1F1820;
+  --line: #2F2330;
+  --line2: #443548;
+  --text: #F4E8EE;
+  /* v2.10.0 R6.3+R6.7: bumped --muted from #B19FAB → #C9B9C4 → #D4C5CE
+     for AA contrast on all dark backgrounds and to address VLM critique about low-contrast
+     secondary text. New contrast: 11.2:1 on --bg, 11.0:1 on --panel, 10.2:1 on --panel2. */
+  --muted: #D4C5CE;
+  /* v2.10.0 R6.7: bumped --faint from #7E6C7A → #9A8895 → #AC9AA6
+     for AA contrast on dark bg (was 3.99:1, now 7.5:1 on --bg). */
+  --faint: #AC9AA6;
+  --plum: #F8518C;          /* rose-500 for dark contrast */
+  --plum-deep: #C33671;
+  --plum-dim: #2E1822;
+  --red: #FF6B6B;
+  --red-dim: #2A1010;
+  --amber: #F5B342;
+  --amber-dim: #2A1F08;
+  --violet: #B98DD9;
+  --violet-dim: #221432;
+  --ink: #F4E8EE;
+  --fg-on-dark: #FDFBFC;
+  --tip-bg: #221018;
+  --tip-fg: #FDFBFC;
+  --tip-accent: #F6D9E4;
+}
+
+.v4-app * { box-sizing: border-box; }
+.v4-app b { font-weight: 700; }
+.v4-app .muted { color: var(--muted); }
+.v4-app .c-plum { color: var(--plum); }
+.v4-app .c-red { color: var(--red); }
+.v4-app .c-amber { color: var(--amber); }
+.v4-app .c-violet { color: var(--violet); }
+.v4-app .c-faint { color: var(--faint); }
+.v4-app .upc { text-transform: uppercase; }
+
+/* === Wrapper layout === */
+.v4-wrap {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 22px 16px 90px;
+}
+
+/* === Шапка === */
+.v4-app .topbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+  border-bottom: 2px solid var(--ink);
+  padding-bottom: 12px;
+}
+.v4-app .brand h1 {
+  font-family: var(--cond);
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  line-height: 1;
+  color: var(--ink);
+}
+.v4-app .brand .brand-sub {
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 5px;
+}
+.v4-app .topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.v4-app .iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: 1px solid var(--line2);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  transition: 0.15s;
+  font-family: var(--cond);
+  font-size: 12px;
+  font-weight: 700;
+}
+.v4-app .iconbtn:hover {
+  border-color: var(--plum);
+  color: var(--plum);
+}
+.v4-app .iconbtn .kbd-mini {
+  font-family: var(--mono);
+  font-size: 9px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 1px 4px;
+  margin-left: 4px;
+}
+.v4-app .textbtn {
+  font-family: var(--cond);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line2);
+  border-radius: 4px;
+  padding: 6px 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: 0.15s;
+}
+.v4-app .textbtn:hover { color: var(--plum); border-color: var(--plum); }
+
+/* === Вкладки === */
+.v4-app .tabs {
+  display: flex;
+  border-bottom: 1px solid var(--line2);
+  margin: 14px 0 14px;
+}
+.v4-app .tab {
+  flex: 1;
+  text-align: center;
+  padding: 11px 8px 10px;
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 3px solid transparent;
+  transition: 0.15s;
+  background: transparent;
+}
+.v4-app .tab:hover { color: var(--text); }
+/* v2.10.0 R6.7: stronger active tab affordance — VLM noted active tab looked too plain.
+   Use text color (--ink) instead of --plum for clearer "this is selected" semantics, plus
+   thicker 4px bottom border. Plum color is reserved for KPI values only (semantic separation). */
+.v4-app .tab.active {
+  color: var(--ink);
+  border-bottom: 4px solid var(--plum);
+  font-weight: 800;
+}
+
+/* === Период-селектор + фильтр поездки === */
+.v4-app .pills-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.v4-app .pills {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 3px;
+  scrollbar-width: none;
+  flex: 1;
+  min-width: 0;
+}
+.v4-app .pills::-webkit-scrollbar { display: none; }
+.v4-app .pill {
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: 0.15s;
+}
+.v4-app .pill:hover { border-color: var(--line2); color: var(--text); }
+.v4-app .pill.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--fg-on-dark);
+}
+.v4-app .trip-filter {
+  position: relative;
+  flex-shrink: 0;
+}
+.v4-app .trip-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--cond);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  /* v2.10.0 R6.7: use --text color for readable contrast on --plum-dim bg.
+     Old --plum text was 3.85:1 (below AA 4.5:1) on --plum-dim in light theme. */
+  color: var(--text);
+  background: var(--plum-dim);
+  border: 1px solid var(--plum);
+  border-radius: 3px;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: 0.15s;
+  white-space: nowrap;
+}
+.v4-app .trip-filter-btn:hover { background: var(--plum); color: var(--fg-on-dark); }
+.v4-app .trip-filter-btn .chev { font-size: 10px; color: inherit; }
+.v4-app .trip-filter-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 280px;
+  max-width: calc(100vw - 32px);
+  background: var(--panel);
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  box-shadow: 0 12px 30px rgba(43,20,32,0.18);
+  z-index: 50;
+  overflow: hidden;
+}
+.v4-app .trip-filter-search {
+  width: 100%;
+  font-family: var(--cond);
+  font-size: 13px;
+  padding: 8px 10px;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  background: var(--wash);
+  color: var(--text);
+  outline: none;
+}
+.v4-app .trip-filter-search:focus { background: var(--panel); }
+.v4-app .trip-filter-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.v4-app .trip-filter-item {
+  padding: 8px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+  transition: 0.1s;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.v4-app .trip-filter-item:last-child { border-bottom: none; }
+.v4-app .trip-filter-item:hover { background: var(--wash); }
+.v4-app .trip-filter-item.selected { background: var(--plum-dim); color: var(--plum); }
+.v4-app .trip-filter-item .mono { font-family: var(--mono); font-size: 10px; color: var(--faint); }
+.v4-app .trip-filter-empty {
+  padding: 16px 12px;
+  font-size: 11px;
+  color: var(--faint);
+  text-align: center;
+}
+
+/* === Шапка сессии + таймлайн === */
+.v4-app .session {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin-bottom: 18px;
+}
+.v4-app .session-top {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+.v4-app .session-top b {
+  color: var(--text);
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 12.5px;
+}
+.v4-app .s-lab {
+  color: var(--faint);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+}
+.v4-app .caret { margin-left: auto; color: var(--faint); }
+.v4-app .mline {
+  display: flex;
+  height: 10px;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+}
+.v4-app .mline i { height: 100%; cursor: pointer; }
+.v4-app .ml-move { background: var(--plum); }
+.v4-app .ml-idle { background: #DCC9D3; }
+html.dark .v4-app .ml-idle { background: #5A4658; }
+.v4-app .ml-gap {
+  background: repeating-linear-gradient(90deg, #C99A2E 0 3px, #F3E3C9 3px 6px);
+}
+html.dark .v4-app .ml-gap {
+  background: repeating-linear-gradient(90deg, #8B6914 0 3px, #2A2118 3px 6px);
+}
+.v4-app .mline-cap {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.v4-app .mline-cap i {
+  width: 8px;
+  height: 8px;
+  display: inline-block;
+  margin-right: 5px;
+  border-radius: 2px;
+  vertical-align: -1px;
+}
+
+/* === Секции === */
+.v4-app section { margin-bottom: 22px; }
+.v4-app .sec-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 6px;
+}
+.v4-app .sec-num {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--plum);
+  letter-spacing: 0.08em;
+}
+.v4-app .sec-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.v4-app .sec-sub {
+  font-size: 11px;
+  color: var(--faint);
+  margin-left: auto;
+  text-align: right;
+  letter-spacing: 0.02em;
+}
+.v4-app .card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 15px;
+}
+.v4-app .card-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 11px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--ink);
+}
+.v4-app .card-title .chip { margin-left: auto; }
+
+/* === Тултипы (плавающий .v4-tipbox в body, тап mobile, hover desktop) === */
+.v4-app [data-tip] {
+  position: relative;
+  cursor: pointer;
+  border-bottom: 1px dotted var(--line2);
+}
+.v4-app .help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--line2);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 700;
+  cursor: pointer;
+  flex: none;
+  vertical-align: middle;
+}
+.v4-tipbox {
+  position: absolute;
+  z-index: 90;
+  max-width: 270px;
+  background: var(--tip-bg);
+  color: var(--tip-fg);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  box-shadow: 0 12px 30px rgba(43,20,32,0.28);
+  display: none;
+  pointer-events: none;
+  font-family: 'Arial Narrow', Arial, sans-serif;
+}
+.v4-tipbox b { color: var(--tip-accent); }
+.v4-tipbox .t-line { display: block; margin-top: 4px; }
+.v4-tipbox .t-line:first-child { margin-top: 0; }
+
+/* === KPI grid === */
+.v4-app .kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+.v4-app .kpi {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px 12px 34px;
+  position: relative;
+  overflow: hidden;
+  /* v2.10.0 R6.7: subtle elevation per VLM critique — adds visual separation between
+     KPI cards on white background (was flat-looking, cards "merged into a band"). */
+  box-shadow: 0 1px 3px rgba(43, 20, 32, 0.04);
+}
+html.dark .v4-app .kpi {
+  /* v2.10.0 R6.7: stronger shadow on dark for "depth" feeling (VLM noted dark cards
+     look flat). */
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+.v4-app .kpi .label {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  padding-right: 44px;
+  line-height: 1.3;
+}
+.v4-app .kpi .val {
+  font-family: var(--cond);
+  font-size: 27px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin-top: 4px;
+  line-height: 1.05;
+  /* v2.10.0 R6.2: explicit baseline alignment for value + unit (км/ч, мин, км)
+     so all 7 KPI cards share the same baseline regardless of value width or unit length. */
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.v4-app .kpi .unit {
+  font-size: 12.5px;
+  color: var(--muted);
+  font-weight: 400;
+  /* v2.10.0 R6.2: ensure unit sits on the same baseline as the value across all KPI cards. */
+  vertical-align: baseline;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+.v4-app .kpi .trend {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+.v4-app .trend.up { color: var(--plum); background: var(--plum-dim); }
+.v4-app .trend.down { color: var(--red); background: var(--red-dim); }
+.v4-app .trend.neu { color: var(--muted); background: var(--panel2); }
+.v4-app .kpi svg.spark {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: 26px;
+  display: block;
+}
+/* v2.10.0 R6.7: smoother sparklines (VLM noted aliasing/tooth-like edges in dark theme). */
+.v4-app .kpi svg.spark polyline {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.v4-app .kpi.k-red { border-color: #EBC3C3; }
+html.dark .v4-app .kpi.k-red { border-color: #5A2424; }
+.v4-app .kpi.k-red .val { color: var(--red); }
+.v4-app .kpi.k-violet { border-color: #DCC9EC; }
+html.dark .v4-app .kpi.k-violet { border-color: #4A3266; }
+.v4-app .kpi.k-violet .val { color: var(--violet); }
+.v4-app .kpi.k-plum { border-color: #E7C4D1; }
+html.dark .v4-app .kpi.k-plum { border-color: #5A2438; }
+.v4-app .kpi.k-plum .val { color: var(--plum); }
+
+/* === Оценка вождения: два gauge-виджета === */
+.v4-app .score-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  /* v2.10.0 R6.7: VLM noted lack of "air" — add slight padding inside score grid
+     so gauge widgets don't touch KPI section above too tightly. */
+  margin-top: 4px;
+}
+.v4-app .gauge-wrap {
+  position: relative;
+  text-align: center;
+  padding-top: 6px;
+}
+.v4-app .gauge {
+  width: 100%;
+  max-width: 225px;
+}
+.v4-app .gauge-num { margin-top: -46px; }
+.v4-app .gauge-num b {
+  font-family: var(--cond);
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.v4-app .gauge-num span {
+  font-size: 13px;
+  color: var(--muted);
+}
+.v4-app .score-band {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-top: 4px;
+}
+.v4-app .cap-note {
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-top: 9px;
+  line-height: 1.5;
+}
+.v4-app .cap-rows { margin-top: 12px; }
+.v4-app .cap-row {
+  display: grid;
+  grid-template-columns: 74px 1fr 64px;
+  gap: 10px;
+  align-items: center;
+  padding: 5px 0;
+}
+.v4-app .cap-l { font-size: 11.5px; color: var(--muted); }
+.v4-app .cap-bar {
+  height: 7px;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.v4-app .cap-fill { height: 100%; background: var(--plum); }
+html.dark .v4-app .cap-fill { background: var(--plum); }
+.v4-app .cap-v {
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: right;
+  color: var(--muted);
+}
+.v4-app .cap-v b { color: var(--plum); }
+
+/* === Скоростной профиль === */
+.v4-app .spwrap { padding: 2px 0 0; }
+.v4-app .sp-pcts { display: flex; }
+.v4-app .sp-pcts span {
+  flex: none;
+  text-align: center;
+  font-family: var(--cond);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  padding-bottom: 3px;
+  white-space: nowrap;
+}
+.v4-app .sp-pcts span i {
+  font-style: normal;
+  font-size: 9.5px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.v4-app .sp-bar {
+  display: flex;
+  height: 22px;
+  border: 1px solid var(--line2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.v4-app .sp-bar i { height: 100%; flex: none; min-width: 2px; }
+.v4-app .sp-ticks { display: flex; }
+.v4-app .sp-ticks span {
+  flex: none;
+  border-left: 1px solid var(--line2);
+  padding: 4px 0 0 0;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.v4-app .sp-ticks span:first-child { border-left: none; }
+.v4-app .sp-ticks span b {
+  display: block;
+  font-family: var(--cond);
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+.v4-app .s1 { background: #D93A3A; }
+.v4-app .s2 { background: #DB6B5B; }
+.v4-app .s3 { background: #C77B8E; }
+.v4-app .s4 { background: #A85D8A; }
+.v4-app .s5 { background: #7B4B9E; }
+.v4-app .s6 { background: #4A2D6E; }
+html.dark .v4-app .s6 { background: #9377B5; }
+
+.v4-app .stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 9px;
+  margin-top: 13px;
+}
+.v4-app .stat {
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 9px 11px;
+}
+.v4-app .stat .v {
+  font-family: var(--cond);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.v4-app .stat .v .u {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.v4-app .stat .l {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 3px;
+  line-height: 1.35;
+}
+
+/* === План-факт === */
+.v4-app .pf-hero {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr;
+  gap: 14px;
+  margin-bottom: 15px;
+}
+.v4-app .pf-label {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.v4-app .pf-val {
+  font-family: var(--cond);
+  font-size: 46px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.05;
+  margin: 5px 0 3px;
+}
+.v4-app .pf-val .unit {
+  font-size: 16px;
+  color: var(--muted);
+  font-weight: 400;
+}
+.v4-app .pf-sub {
+  font-size: 12px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.v4-app .chip {
+  font-size: 10px;
+  padding: 3px 9px;
+  border-radius: 3px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.v4-app .chip-plum { color: var(--plum); background: var(--plum-dim); }
+.v4-app .chip-red { color: var(--red); background: var(--red-dim); }
+.v4-app .chip-amber { color: var(--amber); background: var(--amber-dim); }
+.v4-app .chip-violet { color: var(--violet); background: var(--violet-dim); }
+.v4-app .chip-gray { color: var(--muted); background: var(--panel2); }
+.v4-app .pf-side {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  justify-content: center;
+}
+.v4-app .pf-mini {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 11px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.v4-app .pf-mini b { font-family: var(--mono); font-size: 13.5px; }
+.v4-app .pf-segs-head {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  margin: 15px 0 3px;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.v4-app .pf-segs-head .muted {
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.v4-app .seg-row {
+  display: grid;
+  grid-template-columns: minmax(104px, 148px) 1fr 128px;
+  gap: 11px;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.v4-app .seg-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.v4-app .seg-name small {
+  display: block;
+  color: var(--faint);
+  font-weight: 400;
+  font-size: 9.5px;
+  margin-top: 1px;
+  letter-spacing: 0.03em;
+}
+.v4-app .bullet {
+  position: relative;
+  height: 14px;
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+}
+.v4-app .bullet .fill { position: absolute; left: 0; top: 0; bottom: 0; }
+.v4-app .fill.save { background: var(--plum); }
+.v4-app .fill.warn { background: #C77B8E; }
+html.dark .v4-app .fill.warn { background: #B6859B; }
+.v4-app .fill.lost { background: var(--red); }
+.v4-app .bullet .tick {
+  position: absolute;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  background: var(--ink);
+  opacity: 0.75;
+}
+.v4-app .seg-delta {
+  font-size: 12px;
+  text-align: right;
+  line-height: 1.3;
+}
+.v4-app .seg-delta b { font-family: var(--mono); font-size: 13px; }
+.v4-app .seg-delta .p {
+  display: block;
+  font-size: 9px;
+  color: var(--faint);
+  font-family: var(--mono);
+}
+.v4-app .seg-delta .spd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+.v4-app .seg-total {
+  display: flex;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 14px;
+  padding-top: 11px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.v4-app .seg-total b { font-family: var(--mono); color: var(--text); }
+.v4-app .pf-note {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 10px;
+  line-height: 1.55;
+}
+
+/* === Карта === */
+.v4-app .map-wrap {
+  overflow: hidden;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+.v4-app .map {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #F7F2F5;
+}
+html.dark .v4-app .map { background: #161018; }
+.v4-app .rt { fill: none; stroke-width: 4.5; stroke-linecap: round; }
+.v4-app .mk-lbl {
+  font-family: var(--cond);
+  font-size: 8.5px;
+  letter-spacing: 0.18em;
+  fill: #B49AA8;
+  text-transform: uppercase;
+}
+html.dark .v4-app .mk-lbl { fill: #7A6878; }
+.v4-app .leg-line {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 10px;
+}
+.v4-app .leg-line .sw {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+.v4-app .leg-line .dash {
+  width: 20px;
+  height: 0;
+  border-top: 3px dashed #C99A2E;
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: 3px;
+}
+.v4-app .leg-line .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+  display: inline-block;
+  margin-right: 5px;
+}
+.v4-app .elev { margin-top: 14px; }
+.v4-app .elev svg { display: block; width: 100%; height: 92px; }
+.v4-app .elev-l {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  margin-top: 5px;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* === Поведение === */
+.v4-app .beh-grid {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+.v4-app .stack-v {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.v4-app #gg, .v4-app .gg-svg {
+  display: block;
+  width: 100%;
+  max-width: 280px;
+  margin: 0 auto;
+}
+.v4-app .gg-legend {
+  font-size: 10px;
+  color: var(--faint);
+  margin-top: 9px;
+  line-height: 1.5;
+  text-align: center;
+}
+.v4-app .ev-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.v4-app .ev {
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 10px 6px;
+  text-align: center;
+}
+.v4-app .ev b {
+  font-family: var(--cond);
+  font-size: 22px;
+  display: block;
+  font-weight: 700;
+}
+.v4-app .ev.hot b { color: var(--red); }
+.v4-app .ev.warm b { color: var(--amber); }
+.v4-app .ev span {
+  font-size: 9px;
+  color: var(--muted);
+  line-height: 1.3;
+  display: block;
+  margin-top: 3px;
+  letter-spacing: 0.04em;
+}
+
+/* === Пробки === */
+.v4-app .jbar {
+  display: flex;
+  height: 16px;
+  border-radius: 2px;
+  overflow: hidden;
+  border: 1px solid var(--line2);
+}
+.v4-app .jb { height: 100%; }
+.v4-app .jb-move { background: var(--plum); }
+.v4-app .jb-jam { background: var(--red); }
+.v4-app .jb-idle { background: #DCC9D3; }
+html.dark .v4-app .jb-idle { background: #5A4658; }
+.v4-app .jb-gap {
+  background: repeating-linear-gradient(90deg, #C99A2E 0 3px, #F3E3C9 3px 6px);
+}
+html.dark .v4-app .jb-gap {
+  background: repeating-linear-gradient(90deg, #8B6914 0 3px, #2A2118 3px 6px);
+}
+.v4-app .jbar-leg {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  color: var(--muted);
+  margin: 8px 0 13px;
+}
+.v4-app .jbar-leg i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+
+/* === Аккордеоны === */
+.v4-app details.acc {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.v4-app .acc summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 15px;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  user-select: none;
+}
+.v4-app .acc summary::-webkit-details-marker { display: none; }
+.v4-app .acc summary:hover { background: var(--wash); }
+.v4-app .acc .acc-badge {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted);
+  background: var(--panel2);
+  border-radius: 3px;
+  padding: 3px 8px;
+  margin-left: 8px;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+.v4-app .acc .chev,
+.v4-app .trip .chev,
+.v4-app .route-row .chev {
+  margin-left: auto;
+  color: var(--faint);
+  font-style: normal;
+  transition: 0.2s;
+  font-size: 15px;
+  line-height: 1;
+}
+.v4-app details[open] .chev { transform: rotate(90deg); }
+.v4-app .acc-body { padding: 0 15px 15px; }
+.v4-app .acc-note {
+  font-size: 11px;
+  color: var(--faint);
+  line-height: 1.55;
+  margin-bottom: 11px;
+}
+.v4-app .hs-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 11px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.v4-app .hs-row:last-child { border-bottom: none; }
+.v4-app .dots { display: flex; gap: 4px; margin-top: 6px; }
+.v4-app .dots i { width: 7px; height: 7px; border-radius: 50%; }
+.v4-app .hs-val { text-align: right; flex: none; }
+.v4-app .hs-lab {
+  font-size: 9px;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.v4-app .hs-val b { font-family: var(--mono); font-size: 16px; }
+.v4-app .prog-row { margin-bottom: 12px; }
+.v4-app .prog-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-bottom: 5px;
+}
+.v4-app .prog-head b { font-family: var(--mono); color: var(--text); }
+.v4-app .prog {
+  height: 8px;
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.v4-app .prog > div { height: 100%; background: var(--plum); }
+
+/* === Частые маршруты + сравнение === */
+.v4-app .route-row {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.v4-app .route-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.v4-app .route-head:hover { background: var(--wash); }
+.v4-app .route-count {
+  font-family: var(--cond);
+  font-weight: 700;
+  font-size: 17px;
+  min-width: 42px;
+  text-align: center;
+  padding: 8px 4px;
+  border-radius: 4px;
+  flex: none;
+  border: 1px solid var(--line);
+}
+.v4-app .rc-1 { background: var(--plum-dim); color: var(--plum); }
+.v4-app .rc-2 { background: var(--violet-dim); color: var(--violet); }
+.v4-app .rc-3 { background: var(--amber-dim); color: var(--amber); }
+.v4-app .rc-4 { background: var(--panel2); color: var(--muted); }
+.v4-app .route-mid { flex: 1; min-width: 0; }
+.v4-app .r-name { font-size: 13.5px; font-weight: 700; }
+.v4-app .r-sub { font-size: 10.5px; color: var(--faint); margin: 1px 0 6px; }
+.v4-app .rbar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--panel2);
+  overflow: hidden;
+}
+.v4-app .rbar > div { height: 100%; background: var(--plum); }
+.v4-app .r-last {
+  font-size: 10.5px;
+  color: var(--faint);
+  white-space: nowrap;
+  flex: none;
+}
+.v4-app .route-body {
+  display: none;
+  padding: 2px 15px 15px;
+  border-top: 1px solid var(--line);
+}
+.v4-app .route-row.open .route-body { display: block; }
+.v4-app .route-row.open .chev { transform: rotate(90deg); }
+.v4-app .cmp-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 12px 0;
+}
+.v4-app .cmp-cell {
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 9px 10px;
+  text-align: center;
+}
+.v4-app .cmp-cell b { font-family: var(--mono); font-size: 16px; display: block; }
+.v4-app .cmp-cell span {
+  font-size: 9px;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  display: block;
+  margin-top: 2px;
+}
+.v4-app .heat-title {
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  margin: 12px 0 6px;
+}
+.v4-app .heat { display: grid; gap: 4px; }
+.v4-app .heat-4c { grid-template-columns: repeat(4, 1fr); }
+.v4-app .heat-7c { grid-template-columns: repeat(7, 1fr); }
+.v4-app .heat i {
+  font-style: normal;
+  text-align: center;
+  border-radius: 3px;
+  padding: 7px 3px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: #FDFBFC;
+}
+.v4-app .heat i small {
+  display: block;
+  font-size: 8px;
+  opacity: 0.85;
+  font-family: var(--cond);
+  letter-spacing: 0.06em;
+}
+.v4-app .trend-svg {
+  display: block;
+  width: 100%;
+  height: 88px;
+  margin-top: 4px;
+}
+.v4-app .trend-cap {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+.v4-app .trend-cap b { font-family: var(--mono); }
+
+/* === Тост === */
+.v4-app .toast {
+  margin-top: 24px;
+  border: 1px solid var(--line2);
+  background: var(--panel);
+  border-left: 3px solid var(--plum);
+  border-radius: 4px;
+  padding: 13px 15px;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.v4-app .toast b { color: var(--plum); }
+
+/* === Поездки === */
+.v4-app .tsum { margin-bottom: 14px; }
+.v4-app .tsum-main {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.v4-app .tsum-main b { font-size: 20px; }
+.v4-app .tsum-main span { font-size: 12px; color: var(--muted); }
+.v4-app .tsum-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 9px;
+}
+.v4-app .tsum-stats > div {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 10px;
+  text-align: center;
+}
+.v4-app .tsum-stats b { font-family: var(--cond); font-size: 18px; display: block; }
+.v4-app .tsum-stats span {
+  font-size: 9.5px;
+  color: var(--faint);
+  letter-spacing: 0.05em;
+}
+.v4-app .trip {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.v4-app .trip-head {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 12px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.v4-app .trip-head:hover { background: var(--wash); }
+.v4-app .trip-date {
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  text-align: center;
+  padding: 7px 9px;
+  flex: none;
+  line-height: 1.05;
+}
+.v4-app .trip-date b { font-family: var(--cond); font-size: 17px; display: block; }
+.v4-app .trip-date span {
+  font-size: 8.5px;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  display: block;
+  margin-top: 2px;
+}
+.v4-app .trip-date small {
+  font-size: 9.5px;
+  color: var(--muted);
+  font-family: var(--mono);
+  display: block;
+  margin-top: 3px;
+}
+.v4-app .trip-info { flex: 1; min-width: 0; }
+.v4-app .t-route { font-size: 14px; font-weight: 700; }
+.v4-app .t-sub { font-size: 10.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+.v4-app .t-eco {
+  text-align: center;
+  flex: none;
+  padding: 7px 10px;
+  border-radius: 4px;
+  line-height: 1.1;
+}
+.v4-app .t-eco b { font-family: var(--cond); font-size: 19px; display: block; }
+.v4-app .t-eco small {
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  display: block;
+  margin-top: 2px;
+  opacity: 0.85;
+}
+.v4-app .s-plum { background: var(--plum-dim); color: var(--plum); border: 1px solid #E7C4D1; }
+html.dark .v4-app .s-plum { border-color: #5A2438; }
+.v4-app .s-amber { background: var(--amber-dim); color: var(--amber); border: 1px solid #EAD9BB; }
+html.dark .v4-app .s-amber { border-color: #4A3210; }
+.v4-app .s-red { background: var(--red-dim); color: var(--red); border: 1px solid #EBC3C3; }
+html.dark .v4-app .s-red { border-color: #5A2424; }
+.v4-app .trip-body {
+  display: none;
+  padding: 2px 15px 15px;
+  border-top: 1px solid var(--line);
+}
+.v4-app .trip.open .trip-body { display: block; }
+.v4-app .trip.open .trip-head .chev { transform: rotate(90deg); }
+.v4-app .t-ev {
+  font-size: 11px;
+  color: var(--muted);
+  padding-top: 11px;
+  border-top: 1px dashed var(--line);
+  margin-top: 2px;
+  line-height: 1.6;
+}
+
+/* === Админ === */
+.v4-app .adm-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+.v4-app .adm-tbl {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11.5px;
+}
+.v4-app .adm-tbl th {
+  text-align: left;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.10em;
+  color: var(--muted);
+  font-weight: 700;
+  padding: 7px 9px;
+  border-bottom: 2px solid var(--line2);
+  white-space: nowrap;
+}
+.v4-app .adm-tbl td {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.v4-app .adm-tbl td.mono {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.v4-app .adm-tbl tr:last-child td { border-bottom: none; }
+.v4-app .param-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 26px;
+}
+.v4-app .param {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 12px;
+}
+.v4-app .param span { color: var(--muted); }
+.v4-app .param b {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: right;
+}
+.v4-app .param small {
+  display: block;
+  font-size: 9.5px;
+  color: var(--faint);
+  font-weight: 400;
+  font-family: var(--cond);
+  margin-top: 1px;
+}
+.v4-app .pipe-bar {
+  display: flex;
+  height: 14px;
+  border-radius: 2px;
+  overflow: hidden;
+  border: 1px solid var(--line2);
+  margin-bottom: 9px;
+}
+.v4-app .pipe-bar i { height: 100%; }
+.v4-app .pipe-leg {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-bottom: 13px;
+}
+.v4-app .pipe-leg em {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: -1px;
+  font-style: normal;
+}
+
+/* === Легаси-блоки (SystemInfo, Settings, GitHub Backup, Backups, Requeue) === */
+.v4-app .legacy-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin-top: 22px;
+  padding-top: 22px;
+  border-top: 2px dashed var(--line2);
+}
+.v4-app .legacy-grid-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.v4-app .legacy-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 15px;
+}
+.v4-app .legacy-card h3 {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink);
+  margin-bottom: 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.v4-app .legacy-card h3 .num {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--plum);
+  letter-spacing: 0.08em;
+}
+.v4-app .legacy-card .desc {
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-bottom: 11px;
+  line-height: 1.5;
+}
+
+/* === Адаптив === */
+@media (max-width: 840px) {
+  .v4-app .beh-grid { grid-template-columns: 1fr; }
+  .v4-app .gg-svg { max-width: 250px; }
+  .v4-app .score-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .v4-app .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+  .v4-app .pf-hero { grid-template-columns: 1fr; }
+  .v4-app .tsum-stats { grid-template-columns: repeat(2, 1fr); }
+  .v4-app .ev-grid { grid-template-columns: repeat(3, 1fr); }
+  .v4-app .cmp-grid { grid-template-columns: repeat(3, 1fr); }
+  .v4-app .param-grid { grid-template-columns: 1fr; }
+  .v4-app .sp-pcts span { font-size: 12px; }
+  .v4-app .sp-ticks span b { font-size: 10px; }
+  .v4-app .sp-ticks span { font-size: 8.5px; }
+  .v4-app .legacy-grid-2col { grid-template-columns: 1fr; }
+}
+@media (max-width: 560px) {
+  .v4-app .seg-row { grid-template-columns: 92px 1fr 112px; gap: 8px; }
+  .v4-app .seg-delta { font-size: 10.5px; }
+  .v4-app .seg-delta b { font-size: 11.5px; }
+  .v4-app .pf-val { font-size: 38px; }
+  .v4-app .r-last { display: none; }
+  .v4-app .adm-tbl { font-size: 10.5px; }
+  .v4-app .adm-tbl td, .v4-app .adm-tbl th { padding: 6px 6px; }
+  .v4-app .brand h1 { font-size: 21px; }
+}
+
+/* === Утилиты для JSX-рендера (Framer Motion-совместимые) === */
+.v4-app .hidden { display: none; }
+.v4-app .block { display: block; }
+
+/* ============================================================================
+   R4 — Mobile-first v4 (Tailwind-style breakpoints: sm:640 md:768 lg:1024 xl:1280)
+   Стратегия: дефолт = 360px (iPhone SE); min-width медиа-запросы на повышение.
+   Безопасные зоны env(safe-area-inset-*), тач-таргеты ≥44×44px, без горизонтального
+   скролла при 360px. Это переопределяет более ранние desktop-first правила
+   @media (max-width: …) за счёт порядка каскада (та же специфичность, но позже в файле).
+   ========================================================================== */
+
+/* Wrapper — мобильные отступы + safe-area top + bottom */
+.v4-app .v4-wrap {
+  padding: 14px 12px calc(80px + env(safe-area-inset-bottom));
+  padding-top: max(14px, env(safe-area-inset-top));
+}
+@media (min-width: 768px) {
+  .v4-app .v4-wrap { padding: 22px 16px 90px; padding-top: max(22px, env(safe-area-inset-top)); }
+}
+
+/* Topbar — safe-area-top, обертка для узких экранов */
+.v4-app .topbar {
+  padding-top: max(0px, env(safe-area-inset-top));
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.v4-app .brand { flex: 1 1 auto; min-width: 0; }
+.v4-app .brand h1 {
+  font-size: 21px;
+  letter-spacing: 0.08em;
+}
+@media (min-width: 640px) {
+  .v4-app .brand h1 { font-size: 24px; letter-spacing: 0.10em; }
+}
+@media (min-width: 768px) {
+  .v4-app .brand h1 { font-size: 27px; }
+  .v4-app .topbar { flex-wrap: nowrap; gap: 10px; margin-bottom: 6px; }
+}
+
+/* Topbar-actions: обертка + shrink на мобильном */
+.v4-app .topbar-actions {
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+/* Touch targets ≥44×44px для всех интерактивных элементов */
+.v4-app .iconbtn {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+/* Прячем kbd-mini «⌘K» / «⌘⇧F» бейджи на мобильном — иконка-only */
+.v4-app .iconbtn .kbd-mini { display: none; }
+@media (min-width: 768px) {
+  .v4-app .iconbtn {
+    width: 32px;
+    height: 32px;
+    border-radius: 6px;
+    font-size: 12px;
+  }
+  .v4-app .iconbtn .kbd-mini { display: inline-block; }
+}
+
+/* Logout button: icon-only на <768px (текст спрятан, title=«Выйти» для тултипа) */
+.v4-app .textbtn {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 10px 12px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+.v4-app .textbtn .v4-textbtn-label { display: none; }
+@media (min-width: 768px) {
+  .v4-app .textbtn {
+    min-height: auto;
+    min-width: auto;
+    padding: 6px 10px;
+    font-size: 11px;
+    border-radius: 4px;
+  }
+  .v4-app .textbtn .v4-textbtn-label { display: inline; }
+}
+
+/* Tabs: collapse to drawer на <768px. Десктоп-вариант .v4-desktop-tabs видим md+ */
+.v4-app .v4-desktop-tabs { display: none; }
+.v4-app .v4-mobile-tabs { display: flex; align-items: center; gap: 8px; }
+@media (min-width: 768px) {
+  .v4-app .v4-desktop-tabs { display: flex; }
+  .v4-app .v4-mobile-tabs { display: none; }
+}
+
+.v4-app .v4-hamburger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  border: 1px solid var(--line2);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+  flex: none;
+  transition: 0.15s;
+}
+.v4-app .v4-hamburger:hover {
+  border-color: var(--plum);
+  color: var(--plum);
+}
+.v4-app .v4-hamburger.is-open {
+  background: var(--ink);
+  color: var(--fg-on-dark);
+  border-color: var(--ink);
+}
+.v4-app .v4-mobile-current {
+  font-family: var(--cond);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--plum);
+}
+
+/* Period-selector pills: horizontal scroll container + snap-x mandatory */
+.v4-app .pills {
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scroll-padding-inline: 4px;
+  scrollbar-width: none;
+}
+.v4-app .pills::-webkit-scrollbar { display: none; }
+.v4-app .pill {
+  scroll-snap-align: start;
+  flex: none;
+  min-height: 36px;
+  padding: 8px 14px;
+}
+
+/* Pills-row: вертикальный стек на мобильном, горизонтально sm+ */
+.v4-app .pills-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.v4-app .pills-row .pills { flex: 1 1 auto; width: 100%; }
+.v4-app .trip-filter { width: 100%; flex-shrink: 1; }
+.v4-app .trip-filter-btn {
+  min-height: 44px;
+  width: 100%;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-size: 12.5px;
+}
+.v4-app .trip-filter-popover {
+  width: calc(100vw - 24px);
+  max-width: calc(100vw - 24px);
+  left: 0;
+  right: auto;
+}
+.v4-app .trip-filter-search {
+  min-height: 44px;
+  font-size: 14px;
+  padding: 12px 14px;
+}
+.v4-app .trip-filter-item {
+  min-height: 44px;
+  padding: 12px;
+}
+@media (min-width: 640px) {
+  .v4-app .pills-row { flex-direction: row; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .v4-app .trip-filter { width: auto; flex-shrink: 0; }
+  .v4-app .trip-filter-btn { width: auto; justify-content: flex-start; padding: 6px 10px; }
+  .v4-app .trip-filter-popover {
+    width: 280px;
+    max-width: calc(100vw - 32px);
+    left: auto;
+    right: 0;
+  }
+}
+
+/* KPI grid: 1 col mobile, 2 cols sm, 4 cols md, 7 cols lg */
+.v4-app .kpi-grid {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+.v4-app .kpi { padding: 11px 12px 32px; }
+.v4-app .kpi .val { font-size: 24px; }
+@media (min-width: 640px) {
+  .v4-app .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+}
+@media (min-width: 768px) {
+  .v4-app .kpi-grid { grid-template-columns: repeat(4, 1fr); }
+  .v4-app .kpi .val { font-size: 27px; }
+  .v4-app .kpi { padding: 12px 12px 34px; }
+}
+@media (min-width: 1024px) {
+  .v4-app .kpi-grid { grid-template-columns: repeat(7, 1fr); }
+}
+
+/* Gauge widgets: вертикальный стек на мобильном, side-by-side на md+ */
+.v4-app .score-grid {
+  grid-template-columns: 1fr;
+  gap: 14px;
+}
+.v4-app .gauge { max-width: 200px; }
+.v4-app .gauge-num b { font-size: 36px; }
+@media (min-width: 768px) {
+  .v4-app .score-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .v4-app .gauge { max-width: 225px; }
+  .v4-app .gauge-num b { font-size: 40px; }
+}
+
+/* G-G diagram: меньше на мобильном, ring labels остаются видимыми */
+.v4-app .gg-svg { max-width: 220px; }
+.v4-app .beh-grid { grid-template-columns: 1fr; gap: 10px; }
+@media (min-width: 840px) {
+  .v4-app .beh-grid { grid-template-columns: 300px 1fr; }
+}
+
+/* Plan-fact segments: 5 буллетов стек вертикально на мобильном */
+.v4-app .seg-row {
+  grid-template-columns: 1fr;
+  gap: 6px;
+  padding: 11px 0;
+}
+.v4-app .seg-row .seg-name { font-size: 13px; }
+.v4-app .seg-row .seg-delta {
+  text-align: left;
+  font-size: 11.5px;
+}
+.v4-app .seg-row .seg-delta .spd {
+  justify-content: flex-start;
+}
+.v4-app .seg-row .bullet { min-width: 0; }
+@media (min-width: 560px) {
+  .v4-app .seg-row {
+    grid-template-columns: minmax(104px, 148px) 1fr 128px;
+    gap: 11px;
+    padding: 9px 0;
+  }
+  .v4-app .seg-row .seg-delta { text-align: right; font-size: 12px; }
+  .v4-app .seg-row .seg-delta .spd { justify-content: flex-end; }
+}
+
+/* pf-hero: 1 col mobile, 2 col sm+ */
+.v4-app .pf-hero {
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+.v4-app .pf-val { font-size: 36px; }
+@media (min-width: 640px) {
+  .v4-app .pf-hero { grid-template-columns: 1.3fr 1fr; gap: 14px; }
+  .v4-app .pf-val { font-size: 46px; }
+}
+
+/* Speed buckets: меньше высота на мобильном, 6 баров остаются */
+.v4-app .sp-bar { height: 14px; }
+.v4-app .sp-pcts span { font-size: 12px; }
+.v4-app .sp-ticks span { font-size: 8.5px; }
+.v4-app .sp-ticks span b { font-size: 10px; }
+@media (min-width: 768px) {
+  .v4-app .sp-bar { height: 22px; }
+  .v4-app .sp-pcts span { font-size: 14px; }
+  .v4-app .sp-ticks span { font-size: 9.5px; }
+  .v4-app .sp-ticks span b { font-size: 11.5px; }
+}
+
+/* stats-grid: 2 col mobile, auto-fit sm+ */
+.v4-app .stats-grid {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+.v4-app .stat .v { font-size: 17px; }
+@media (min-width: 640px) {
+  .v4-app .stats-grid {
+    grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+    gap: 9px;
+  }
+  .v4-app .stat .v { font-size: 19px; }
+}
+
+/* tsum-stats: 2 col mobile, 4 col sm+ */
+.v4-app .tsum-stats {
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+.v4-app .tsum-stats b { font-size: 16px; }
+@media (min-width: 640px) {
+  .v4-app .tsum-stats { grid-template-columns: repeat(4, 1fr); gap: 9px; }
+  .v4-app .tsum-stats b { font-size: 18px; }
+}
+
+/* param-grid: 1 col mobile, 2 col sm+ */
+.v4-app .param-grid {
+  grid-template-columns: 1fr;
+  gap: 0;
+}
+@media (min-width: 640px) {
+  .v4-app .param-grid { grid-template-columns: 1fr 1fr; gap: 0 26px; }
+}
+
+/* legacy-grid-2col: 1 col mobile, 2 col sm+ */
+.v4-app .legacy-grid-2col {
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+@media (min-width: 768px) {
+  .v4-app .legacy-grid-2col { grid-template-columns: 1fr 1fr; }
+}
+
+/* Trip cards: full-width на мобильном, head перетекает в столбик */
+.v4-app .trip-head {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 11px 12px;
+}
+.v4-app .trip-info { width: 100%; order: 3; flex: 1 1 100%; min-width: 0; }
+.v4-app .trip-date { padding: 6px 8px; }
+.v4-app .trip-date b { font-size: 15px; }
+.v4-app .t-eco { padding: 8px 12px; }
+.v4-app .t-eco b { font-size: 17px; }
+.v4-app .trip .chev { flex: none; }
+.v4-app .trip-body { padding: 2px 12px 13px; }
+.v4-app .tsum-main { flex-wrap: wrap; gap: 6px 10px; margin-bottom: 10px; }
+.v4-app .tsum-main b { font-size: 18px; }
+@media (min-width: 560px) {
+  .v4-app .trip-head { flex-wrap: nowrap; gap: 13px; padding: 12px 14px; }
+  .v4-app .trip-info { width: auto; order: initial; flex: 1 1 auto; }
+  .v4-app .trip-date { padding: 7px 9px; }
+  .v4-app .trip-date b { font-size: 17px; }
+  .v4-app .t-eco b { font-size: 19px; }
+  .v4-app .trip-body { padding: 2px 15px 15px; }
+  .v4-app .tsum-main { flex-wrap: nowrap; gap: 10px; margin-bottom: 12px; }
+  .v4-app .tsum-main b { font-size: 20px; }
+}
+
+/* seg-total: стек на мобильном */
+.v4-app .seg-total {
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  padding-top: 9px;
+}
+
+/* Trend SVG: меньше на мобильном */
+.v4-app .trend-svg { height: 64px; }
+@media (min-width: 768px) {
+  .v4-app .trend-svg { height: 88px; }
+}
+
+/* sec-head: sec-sub перетекает вниз на мобильном */
+.v4-app .sec-head {
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding-bottom: 8px;
+}
+.v4-app .sec-sub {
+  margin-left: 0;
+  width: 100%;
+  text-align: left;
+  font-size: 10.5px;
+}
+@media (min-width: 640px) {
+  .v4-app .sec-head { flex-wrap: nowrap; gap: 10px; padding-bottom: 6px; }
+  .v4-app .sec-sub { margin-left: auto; width: auto; text-align: right; }
+}
+
+/* session-top: компактнее на мобильном */
+.v4-app .session-top {
+  font-size: 12px;
+  gap: 6px;
+}
+.v4-app .s-lab { font-size: 9.5px; }
+
+/* cap-row: компактнее на мобильном */
+.v4-app .cap-row {
+  grid-template-columns: 60px 1fr 52px;
+  gap: 8px;
+}
+@media (min-width: 640px) {
+  .v4-app .cap-row { grid-template-columns: 74px 1fr 64px; gap: 10px; }
+}
+
+/* Heat 7c (week) — горизонтальный скролл на узких экранах */
+.v4-app .heat-7c {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+.v4-app .heat i { padding: 6px 2px; font-size: 10px; }
+.v4-app .heat i small { font-size: 7.5px; }
+@media (min-width: 768px) {
+  .v4-app .heat i { padding: 7px 3px; font-size: 10.5px; }
+  .v4-app .heat i small { font-size: 8px; }
+}
+
+/* A1 adm-tbl: горизонтально-скроллимая на мобильном — .adm-tbl-wrap вмещает */
+.v4-app .adm-tbl-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+.v4-app .adm-tbl-wrap .adm-tbl { min-width: 540px; }
+/* th/td touch-friendly: ≥44px по вертикали для строки-кнопки */
+.v4-app .adm-tbl th, .v4-app .adm-tbl td { padding: 9px 8px; }
+@media (min-width: 768px) {
+  .v4-app .adm-tbl th, .v4-app .adm-tbl td { padding: 7px 9px; }
+}
+
+/* route-head / acc summary: тач-таргеты ≥44px на мобильном */
+.v4-app .route-head,
+.v4-app .acc summary,
+.v4-app .trip-head {
+  min-height: 44px;
+}
+
+/* Dark theme: gray-300 вместо gray-400 для вторичного текста на мобильном */
+@media (max-width: 767px) {
+  html.dark .v4-app {
+    --muted: #C8B6C2;
+    --faint: #A1909C;
+  }
+}
+
+/* Sheet Drawer для табов — тема v4 */
+.v4-app .v4-drawer [data-slot="sheet-content"] {
+  background: var(--panel);
+  color: var(--text);
+  border-left: 2px solid var(--ink);
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  width: 100%;
+  max-width: 320px;
+}
+.v4-app .v4-drawer [data-slot="sheet-overlay"] {
+  background: rgba(43,20,32,0.55);
+}
+.v4-app .v4-drawer [data-slot="sheet-title"] {
+  color: var(--ink);
+  font-family: var(--cond);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 16px 18px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.v4-app .v4-drawer [data-slot="sheet-header"] {
+  padding: 0;
+  gap: 0;
+}
+.v4-app .v4-drawer .v4-drawer-tab {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 14px 18px;
+  font-family: var(--cond);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  width: 100%;
+  background: transparent;
+  border-left: 3px solid transparent;
+  border-right: none;
+  border-top: none;
+  transition: 0.15s;
+}
+.v4-app .v4-drawer .v4-drawer-tab:hover { background: var(--wash); color: var(--text); }
+.v4-app .v4-drawer .v4-drawer-tab.active {
+  color: var(--plum);
+  border-left-color: var(--plum);
+  background: var(--plum-dim);
+}
+.v4-app .v4-drawer .v4-drawer-num {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--plum);
+  letter-spacing: 0.08em;
+  flex: none;
+  min-width: 24px;
+}
+.v4-app .v4-drawer [data-slot="sheet-close"] {
+  top: 14px;
+  right: 14px;
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+/* Кнопка закрытия Sheet — touch-friendly */
+.v4-app .v4-drawer [data-slot="sheet-close"]:hover {
+  color: var(--plum);
+}
+
+/* map / trend / svg: max-width 100% чтобы не было горизонтального скролла */
+.v4-app svg { max-width: 100%; }
+.v4-app .map-wrap { overflow: hidden; }
+.v4-app .elev svg { width: 100%; }
+
+/* seg-delta .p (mono small): не уходит за пределы на мобильном */
+.v4-app .seg-delta .p {
+  font-size: 9px;
+  word-break: break-word;
+}
+
+/* Утилиты для показа/скрытия по брейкпоинту */
+.v4-app .v4-show-mobile { display: initial; }
+.v4-app .v4-show-desktop { display: none; }
+@media (min-width: 768px) {
+  .v4-app .v4-show-mobile { display: none; }
+  .v4-app .v4-show-desktop { display: initial; }
+}

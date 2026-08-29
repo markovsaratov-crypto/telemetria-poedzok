@@ -106,7 +106,7 @@ export function DashboardOverview({
           icon={<Cpu className="h-4 w-4" />}
           label="Uptime системы"
           value={health ? `${Math.round(health.uptime / 60)} мин` : null}
-          subtitle={`v${health?.version ?? "2.7.0"}`}
+          subtitle={`v${health?.version ?? "2.9.0"}`}
           color="zinc"
         />
       </div>

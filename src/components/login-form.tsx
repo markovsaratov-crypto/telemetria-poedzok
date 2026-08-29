@@ -174,7 +174,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
             </CardTitle>
             <CardDescription className="flex items-center justify-center gap-1.5">
               <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-              {mode === "login" ? "Войдите для доступа · v2.7" : "Создайте аккаунт · v2.7"}
+              {mode === "login" ? "Войдите для доступа · v2.9" : "Создайте аккаунт · v2.9"}
             </CardDescription>
           </CardHeader>
           <form onSubmit={handleSubmit}>

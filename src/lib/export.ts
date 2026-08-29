@@ -26,7 +26,7 @@ export function toGPX(session: SessionWithPoints): string {
   // P1-8: startTime из обёртки приходит числом (эпоха мс) — toISOString() на числе падал (500 на GPX)
   const startIso = fmtIso(Number(session.startTime));
   return `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="Telemetria v2.7" xmlns="http://www.topografix.com/GPX/1/1">
+<gpx version="1.1" creator="Telemetria v2.9" xmlns="http://www.topografix.com/GPX/1/1">
   <metadata>
     <name>Сессия ${session.deviceId} — ${startIso}</name>
     <time>${startIso}</time>

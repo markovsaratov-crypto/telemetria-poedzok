@@ -1,5 +1,6 @@
 // POST /api/sessions/batch-stats — start/dest coords, distance, duration per session.
 // Body: { ids: string[] }. Returns start/end (first/last GPS point), distanceM, durationSec.
+// v2.9.6: +track — прореженный полилайн (≤40 точек) для мини-карты в списке поездок.
 import { NextRequest } from "next/server";
 import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
@@ -27,6 +28,24 @@ interface SessionStatsOut {
   distanceM: number;
   durationSec: number;
   pointCount: number;
+  track: { lat: number; lon: number }[]; // v2.9.6: ≤40 точек для мини-карты
+}
+
+// Прореживание полилайна до ≤ maxPts равномерной выборкой (первая/последняя всегда включены)
+function downsampleTrack(
+  pts: Array<Record<string, unknown>>,
+  maxPts: number
+): { lat: number; lon: number }[] {
+  if (pts.length <= maxPts) {
+    return pts.map((p) => ({ lat: Number(p.lat), lon: Number(p.lon) }));
+  }
+  const out: { lat: number; lon: number }[] = [];
+  const step = (pts.length - 1) / (maxPts - 1);
+  for (let i = 0; i < maxPts; i++) {
+    const p = pts[Math.round(i * step)];
+    out.push({ lat: Number(p.lat), lon: Number(p.lon) });
+  }
+  return out;
 }
 
 export async function POST(request: NextRequest) {
@@ -98,6 +117,7 @@ export async function POST(request: NextRequest) {
         distanceM: Math.round(distanceM),
         durationSec: Math.round(durationSec),
         pointCount: Number(r.pointCount) || pts.length,
+        track: downsampleTrack(pts, 40),
       });
     }
 

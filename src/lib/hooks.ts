@@ -599,6 +599,7 @@ export interface BatchStatItem {
   distanceM: number;
   durationSec: number;
   pointCount: number;
+  track?: { lat: number; lon: number }[]; // v2.9.6: ≤40 точек для мини-карты в списке поездок
 }
 
 export function useBatchStats(ids: string[]) {
@@ -747,6 +748,42 @@ export function useRouteGroups() {
     queryKey: ["route-groups"],
     queryFn: () => api.get<{ groups: RouteGroupInfo[]; total: number }>("/api/routes/grouped"),
     staleTime: 60_000,
+  });
+}
+
+// ===== v2.9.6: Тяжёлые участки — агрегация худших P75-хотспотов по всем группам =====
+export interface HeavySegmentHotspot {
+  segmentId: string;
+  p75: number;
+  a: { lat: number; lon: number } | null;
+  b: { lat: number; lon: number } | null;
+}
+
+export interface HeavySegmentGroup {
+  routeHash: string;
+  sessionCount: number;
+  totalSegments: number;
+  hotspotCount: number;
+  avgDistanceM: number | null;
+  lastSeen: string;
+  polylineSample: { lat: number; lon: number }[];
+  worstHotspots: HeavySegmentHotspot[];
+}
+
+export interface HeavySegmentsData {
+  groups: HeavySegmentGroup[];
+  groupCount: number;
+  groupsSkipped: number;
+  totalHotspotSegments: number;
+  worstP75: number | null;
+}
+
+export function useHeavySegments() {
+  return useQuery({
+    queryKey: ["heavy-segments"],
+    queryFn: () => api.get<HeavySegmentsData>("/api/routes/heavy-segments"),
+    staleTime: 120_000,
+    retry: 1,
   });
 }
 

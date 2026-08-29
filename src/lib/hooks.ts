@@ -717,3 +717,112 @@ export function useCreateGitHubBackup() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["github-backups"] }),
   });
 }
+
+// ===== v2.9 §10: routeHash-группы и сравнительные метрики =====
+export interface RouteGroupInfo {
+  routeHash: string;
+  topologyHash: string | null;
+  sessionCount: number;
+  firstSeen: string;
+  lastSeen: string;
+  avgActiveDurationSec: number | null;
+  bestActiveDurationSec: number | null;
+  worstActiveDurationSec: number | null;
+  stdDevActiveDurationSec: number | null;
+  avgDistanceM: number | null;
+  startCoord: { lat: number; lon: number } | null;
+  endCoord: { lat: number; lon: number } | null;
+  deviceIds: string[];
+  sessionIds: string[];
+}
+
+export function useRouteGroups() {
+  return useQuery({
+    queryKey: ["route-groups"],
+    queryFn: () => api.get<{ groups: RouteGroupInfo[]; total: number }>("/api/routes/grouped"),
+    staleTime: 60_000,
+  });
+}
+
+export interface RouteComparisonData {
+  sessionId: string;
+  routeHash: string;
+  groupSize: number;
+  stats: {
+    avg: number | null;
+    best: number | null;
+    worst: number | null;
+    stdDev: number | null;
+    eligibleCount: number;
+    totalCount: number;
+  };
+  sessionActiveDurationSec: number;
+  rank: number | null;
+  percentile: number | null;
+  vsAvgPct: number | null;
+  trafficPattern: { bucket: number; label: string; avgActiveDurationSec: number | null; sessionCount: number }[];
+  dayOfWeekPattern: { dow: number; label: string; avgActiveDurationSec: number | null; sessionCount: number }[];
+  trend: {
+    slope: number | null;
+    intercept: number | null;
+    ci95: [number, number] | null;
+    rating: "improving" | "stable" | "degrading" | "insufficient_data";
+    sampleSize: number;
+    method: string;
+  };
+  history: { sessionId: string; date: string; activeDurationSec: number; deviceId: string }[];
+}
+
+export function useRouteComparison(sessionId: string | null) {
+  return useQuery({
+    queryKey: ["route-comparison", sessionId],
+    queryFn: () => api.get<RouteComparisonData>(`/api/sessions/${sessionId}/route-comparison`),
+    enabled: !!sessionId,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+export interface RouteTrendData {
+  routeId: string;
+  groupSize: number;
+  trend: RouteComparisonData["trend"];
+  stats: RouteComparisonData["stats"];
+  history: RouteComparisonData["history"];
+}
+
+export function useRouteTrend(routeHash: string | null) {
+  return useQuery({
+    queryKey: ["route-trend", routeHash],
+    queryFn: () => api.get<RouteTrendData>(`/api/routes/${routeHash}/trend`),
+    enabled: !!routeHash,
+    staleTime: 60_000,
+    retry: false,
+  });
+}
+
+export interface RouteHotspotsData {
+  routeId: string;
+  groupSize: number;
+  totalSegments: number;
+  hotspotCount: number;
+  hotspots: {
+    segmentId: string;
+    p75: number;
+    p25: number;
+    worstSeverity: number;
+    congestedSessionCount: number;
+    totalSessionCount: number;
+  }[];
+  polylineSample: { lat: number; lon: number }[];
+}
+
+export function useRouteHotspots(routeHash: string | null) {
+  return useQuery({
+    queryKey: ["route-hotspots", routeHash],
+    queryFn: () => api.get<RouteHotspotsData>(`/api/routes/${routeHash}/hotspots`),
+    enabled: !!routeHash,
+    staleTime: 60_000,
+    retry: false,
+  });
+}

@@ -86,7 +86,9 @@ export function SpeedProfileChart({
 
   const W = viewW;
   const H = height;
-  const PAD = { top: 14, right: 12, bottom: compact ? 18 : 22, left: compact ? 10 : 34 };
+  // v2.9.5: Y-подписи теперь и в compact-режиме (VLM: «Y-axis labels missing,
+  // forcing the user to guess values») — левый padding расширен
+  const PAD = { top: 14, right: 12, bottom: compact ? 18 : 22, left: compact ? 26 : 34 };
   const ribbonH = 5; // полоса состояний
   const plotW = W - PAD.left - PAD.right;
   const plotH = H - PAD.top - PAD.bottom - ribbonH - 4;
@@ -226,18 +228,18 @@ export function SpeedProfileChart({
 
   return (
     <div className={cn("relative select-none", className)}>
-      {/* Легенда */}
+      {/* Легенда (v2.9.5: крупные чипы-точки h-2 w-4 — VLM: «legend dots tiny») */}
       <div className="flex items-center gap-3 flex-wrap text-[10px] text-muted-foreground mb-1.5">
-        <span className="inline-flex items-center gap-1">
-          <span className="h-1.5 w-3 rounded-full" style={{ background: STATE_COLORS[1] }} />
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-2 w-4 rounded-full" style={{ background: STATE_COLORS[1] }} />
           движение
         </span>
-        <span className="inline-flex items-center gap-1">
-          <span className="h-1.5 w-3 rounded-full" style={{ background: STATE_COLORS[0] }} />
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-2 w-4 rounded-full" style={{ background: STATE_COLORS[0] }} />
           стоянка
         </span>
-        <span className="inline-flex items-center gap-1">
-          <span className="h-1.5 w-3 rounded-full" style={{ background: STATE_COLORS[2] }} />
+        <span className="inline-flex items-center gap-1.5">
+          <span className="h-2 w-4 rounded-full" style={{ background: STATE_COLORS[2] }} />
           разрыв
         </span>
         {avgKmh != null && (
@@ -274,12 +276,12 @@ export function SpeedProfileChart({
         >
           <defs>
             <linearGradient id="spcFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="oklch(0.62 0.19 350)" stopOpacity="0.32" />
-              <stop offset="100%" stopColor="oklch(0.62 0.19 350)" stopOpacity="0.02" />
+              <stop offset="0%" stopColor="var(--chart-speed-fill)" stopOpacity="0.32" />
+              <stop offset="100%" stopColor="var(--chart-speed-fill)" stopOpacity="0.02" />
             </linearGradient>
           </defs>
 
-          {/* Горизонтальная сетка + Y-подписи */}
+          {/* Горизонтальная сетка + Y-подписи (v2.9.5: подписи и в compact, сетка через --chart-grid) */}
           {geom.yTicks.map((tick, i) => (
             <g key={i}>
               <line
@@ -287,21 +289,19 @@ export function SpeedProfileChart({
                 x2={W - PAD.right}
                 y1={tick.y}
                 y2={tick.y}
-                stroke="oklch(0.5 0.02 350 / 0.12)"
+                stroke={i === 0 ? "var(--chart-grid-strong)" : "var(--chart-grid)"}
                 strokeWidth="1"
                 strokeDasharray={i === 0 ? "" : "3 4"}
               />
-              {!compact && (
-                <text
-                  x={PAD.left - 5}
-                  y={tick.y + 3}
-                  textAnchor="end"
-                  className="fill-muted-foreground"
-                  style={{ fontSize: 9 }}
-                >
-                  {tick.v}
-                </text>
-              )}
+              <text
+                x={PAD.left - 5}
+                y={tick.y + 3}
+                textAnchor="end"
+                className="chart-axis-label"
+                style={{ fontSize: compact ? 8.5 : 9 }}
+              >
+                {tick.v}
+              </text>
             </g>
           ))}
 
@@ -322,7 +322,7 @@ export function SpeedProfileChart({
           {/* Area */}
           {geom.areaPath && <path d={geom.areaPath} fill="url(#spcFill)" />}
 
-          {/* Линия средней скорости */}
+          {/* Линия средней скорости (v2.9.5: --chart-ref-line для контраста в тёмной теме) */}
           {avgKmh != null && avgKmh > 0 && (
             <g>
               <line
@@ -330,31 +330,29 @@ export function SpeedProfileChart({
                 x2={W - PAD.right}
                 y1={geom.y(avgKmh)}
                 y2={geom.y(avgKmh)}
-                stroke="oklch(0.55 0.02 350 / 0.5)"
+                stroke="var(--chart-ref-line)"
                 strokeWidth="1"
                 strokeDasharray="5 4"
               />
-              {!compact && (
-                <text
-                  x={W - PAD.right}
-                  y={geom.y(avgKmh) - 3}
-                  textAnchor="end"
-                  className="fill-muted-foreground"
-                  style={{ fontSize: 9 }}
-                >
-                  ср {Math.round(avgKmh)}
-                </text>
-              )}
+              <text
+                x={W - PAD.right}
+                y={geom.y(avgKmh) - 3}
+                textAnchor="end"
+                className="chart-axis-label"
+                style={{ fontSize: compact ? 8.5 : 9 }}
+              >
+                ср {Math.round(avgKmh)}
+              </text>
             </g>
           )}
 
-          {/* Линии скорости */}
+          {/* Линии скорости (v2.9.5: --chart-speed-line — глубже на светлом, ярче в тёмной) */}
           {geom.segs.map((seg, i) => (
             <path
               key={i}
               d={seg.map((p, j) => `${j === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(" ")}
               fill="none"
-              stroke="oklch(0.62 0.19 350)"
+              stroke="var(--chart-speed-line)"
               strokeWidth={compact ? 1.6 : 2}
               strokeLinejoin="round"
               strokeLinecap="round"
@@ -399,7 +397,7 @@ export function SpeedProfileChart({
             />
           ))}
 
-          {/* X-подписи: старт / середина / конец */}
+          {/* X-подписи: старт / середина / конец (v2.9.5: chart-axis-label с контрастом тёмной темы) */}
           {[0, 0.5, 1].map((f, i) => {
             const t = f * geom.tMax;
             const label =
@@ -412,7 +410,7 @@ export function SpeedProfileChart({
                 x={geom.x(t)}
                 y={H - 4}
                 textAnchor={i === 0 ? "start" : i === 2 ? "end" : "middle"}
-                className="fill-muted-foreground"
+                className="chart-axis-label"
                 style={{ fontSize: 9 }}
               >
                 {label}
@@ -428,7 +426,7 @@ export function SpeedProfileChart({
                 x2={tipX}
                 y1={PAD.top}
                 y2={PAD.top + plotH + 4 + ribbonH}
-                stroke={isPinned ? "oklch(0.62 0.19 350)" : "oklch(0.55 0.18 350 / 0.55)"}
+                stroke={isPinned ? "var(--chart-speed-line)" : "var(--chart-crosshair)"}
                 strokeWidth={isPinned ? 1.5 : 1}
                 strokeDasharray={isPinned ? "" : "3 3"}
               />
@@ -437,7 +435,7 @@ export function SpeedProfileChart({
                   cx={tipX}
                   cy={geom.y(tipP.v)}
                   r={isPinned ? 4.5 : 3.5}
-                  fill="oklch(0.62 0.19 350)"
+                  fill="var(--chart-speed-line)"
                   stroke="oklch(0.99 0.005 350)"
                   strokeWidth="1.5"
                 />
@@ -448,7 +446,7 @@ export function SpeedProfileChart({
                   cx={tipX}
                   cy={PAD.top - 5}
                   r={2.5}
-                  fill="oklch(0.62 0.19 350)"
+                  fill="var(--chart-speed-line)"
                 />
               )}
             </g>

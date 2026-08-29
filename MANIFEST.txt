@@ -138,3 +138,22 @@ f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-pro
 # perDay 2026-08-28: count=1, points=226, durationSec=1968.295; retention
 # candidates=0; пагинация endTime<cutoff корректна; MIN/MAX(startTime) по
 # группам маршрутов — лексикографика ISO = хронология.
+
+# ── v2.9.5 addendum (2026-08-29, round 7) ──────────────────────────────────
+# Релиз v2.9.5: мобильная связка карта↔график + полноэкранный экран
+# «Карта + профили» + вкладка «Сегменты» с реальными данными + стайлинг-раунд 6
+# (контраст графиков в тёмной теме по VLM-аудиту, CSS-переменные цветов).
+#
+# Прод-бэкап v2.9.4-состояния (зафиксирован до деплоя v2.9.5):
+#   backupId:    43fa9406-880d-45cc-a386-2e2376239f42
+#   status:      completed, checksum bc2529e64e408273221dab7e5ed08e77b907a75950f3def49a5cac3a38c7ca04
+#   fileSize:    9 785 399 байт
+#   tableCounts: Session=46, GpsPoint=25998, Route=0, RouteCache=0, TrafficJob=45,
+#                AuditLog=60, ExportJob=5, BackupJob=12, Setting=15, User=2
+#   Примечание: AuditLog 56→60 и BackupJob 11→12 — штатная активность
+#   (аудит-записи qa-раундов + сам этот бэкап).
+#
+# Документы в репо (текущие, v2.9.5):
+#   ADMIN_SPEC.md (v2.9.5): 91e3e8693ecb04262328d61c4d397fa97125fb78e80f45a4bbeb879588e409b8
+#   METHODOLOGY.md — без изменений: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
+#   OPERATIONS.md — без изменений: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a

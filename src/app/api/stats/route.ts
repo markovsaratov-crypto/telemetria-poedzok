@@ -35,23 +35,31 @@ export async function GET(request: NextRequest) {
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     const recentSessions = await db.session.findMany({
       where: { startTime: { gte: sevenDaysAgo }, deletedAt: null },
-      select: { startTime: true, pointCount: true, payloadBytes: true },
+      select: { startTime: true, endTime: true, pointCount: true, payloadBytes: true },
       orderBy: { startTime: "asc" },
     });
 
     // Per-day buckets for last 7 days
-    const perDay: { date: string; count: number; points: number }[] = [];
+    // v2.9.4: +durationSec — сумма длительностей сессий за день (спарклайн KPI «Длительность» в мобильной аналитике)
+    // v2.9.4 fix: startTime из БД приходит ISO-строкой — сравниваем через new Date (раньше string vs Date давал NaN → все бакеты были нулями)
+    const perDay: { date: string; count: number; points: number; durationSec: number }[] = [];
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
       d.setHours(0, 0, 0, 0);
       const next = new Date(d);
       next.setDate(next.getDate() + 1);
-      const dayItems = recentSessions.filter((s) => s.startTime >= d && s.startTime < next);
+      const dayItems = recentSessions.filter(
+        (s) => new Date(s.startTime) >= d && new Date(s.startTime) < next
+      );
       perDay.push({
         date: d.toISOString().slice(0, 10),
         count: dayItems.length,
         points: dayItems.reduce((a, s) => a + s.pointCount, 0),
+        durationSec: dayItems.reduce(
+          (a, s) => a + Math.max(0, ((s.endTime ? new Date(s.endTime).getTime() : new Date(s.startTime).getTime()) - new Date(s.startTime).getTime()) / 1000),
+          0
+        ),
       });
     }
 

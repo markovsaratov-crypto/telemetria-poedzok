@@ -1,6 +1,8 @@
 "use client";
 
 // src/components/session-detail.tsx — детали поездки: карта с треком, удаление, экспорт.
+// v2.9.4: связка карта↔профили — hover/клик по спидограмме ставит акцентный маркер на карте,
+// клик по карте двигает кросхейр графиков (общий ряд сэмплов speedProfile с lat/lng).
 
 import * as React from "react";
 import dynamic from "next/dynamic";
@@ -12,7 +14,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useSession, useDeleteSession } from "@/lib/hooks";
+import { useSession, useDeleteSession, useSessionStats } from "@/lib/hooks";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -59,6 +61,68 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
   const { data: session, isLoading, error } = useSession(sessionId);
   const deleteMutation = useDeleteSession();
   const [exportOpen, setExportOpen] = React.useState(false);
+  // v2.9.4: состояние связки карта↔графики
+  const { data: stats } = useSessionStats(sessionId); // тот же query-кеш, что и в SessionStatsCard
+  const [liveFocusIdx, setLiveFocusIdx] = React.useState<number | null>(null); // hover по графику
+  const [pinnedIdx, setPinnedIdx] = React.useState<number | null>(null); // клик по графику
+  const [mapClickIdx, setMapClickIdx] = React.useState<number | null>(null); // клик по карте
+  const mapWrapRef = React.useRef<HTMLDivElement>(null);
+
+  // сброс фокуса при смене сессии
+  React.useEffect(() => {
+    setLiveFocusIdx(null);
+    setPinnedIdx(null);
+    setMapClickIdx(null);
+  }, [sessionId]);
+
+  const profile = (stats?.speedProfile ?? null) as Array<{
+    t: number;
+    v: number | null;
+    st: 0 | 1 | 2;
+    alt?: number | null;
+    lat?: number;
+    lng?: number;
+  }> | null;
+
+  // эффективный индекс фокуса: hover > закреплённая > клик по карте
+  const focusIdx = liveFocusIdx ?? pinnedIdx ?? mapClickIdx ?? null;
+  const focusSample = focusIdx != null && profile && profile[focusIdx]?.lat != null ? profile[focusIdx] : null;
+  // маркер на карте: hover-точка (без пана) или закреплённая (с паном)
+  const focusPoint = focusSample ? { lat: focusSample.lat as number, lon: focusSample.lng as number } : null;
+  const panToFocus = pinnedIdx != null;
+
+  // v2.9.4: клик по карте → ближайший сэмпл профиля → кросхейр на графиках
+  const handleMapClick = React.useCallback(
+    (lat: number, lon: number) => {
+      if (!profile) return;
+      let idx = 0;
+      let best = Infinity;
+      for (let i = 0; i < profile.length; i++) {
+        const p = profile[i];
+        if (p.lat == null || p.lng == null) continue;
+        const d = (p.lat - lat) * (p.lat - lat) + (p.lng - lon) * (p.lng - lon);
+        if (d < best) {
+          best = d;
+          idx = i;
+        }
+      }
+      setMapClickIdx(idx);
+      setPinnedIdx(null); // карта перезаписывает закрепление с графика
+    },
+    [profile]
+  );
+
+  // v2.9.4: закрепление с графика → показать карту с маркером
+  const handlePin = React.useCallback(
+    (idx: number | null) => {
+      setPinnedIdx(idx);
+      if (idx != null) {
+        setMapClickIdx(null);
+        mapWrapRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    },
+    []
+  );
 
   if (!sessionId) {
     return (
@@ -130,14 +194,14 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
               open={exportOpen}
               onOpenChange={setExportOpen}
             >
-              <button className="inline-flex items-center gap-1 px-2.5 py-1 text-xs border rounded-md hover:bg-accent/30">
+              <button className="btn-soft">
                 <Download className="h-3.5 w-3.5" /> Экспорт
               </button>
             </ExportDialog>
             <ShareDialog sessionId={session.id} />
             <AlertDialog>
               <AlertDialogTrigger asChild>
-                <button className="inline-flex items-center gap-1 px-2.5 py-1 text-xs border rounded-md text-destructive hover:bg-destructive/10">
+                <button className="btn-soft text-destructive hover:border-destructive/40 hover:bg-destructive/10">
                   <Trash2 className="h-3.5 w-3.5" /> Удалить
                 </button>
               </AlertDialogTrigger>
@@ -175,9 +239,16 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
       </div>
 
       {/* Карта */}
-      <div className="p-4">
+      <div className="p-4" ref={mapWrapRef}>
         {points.length > 0 ? (
-          <MapTrack points={points} height="360px" fitToPoints />
+          <MapTrack
+            points={points}
+            height="360px"
+            fitToPoints
+            focusPoint={focusPoint}
+            panToFocus={panToFocus}
+            onMapClick={profile ? handleMapClick : undefined}
+          />
         ) : (
           <div className="h-[200px] rounded-lg bg-muted flex items-center justify-center text-sm text-muted-foreground">
             <MapPin className="h-5 w-5 mr-2" /> В поездке нет GPS-точек
@@ -189,16 +260,16 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
       {points.length > 1 && (
         <>
           <div className="px-4 pb-4 grid grid-cols-1 lg:grid-cols-2 gap-3">
-            <div className="rounded-lg border p-3">
+            <div className="rounded-lg border p-3 elev-1 bg-card">
               <SpeedChart points={points} height={120} />
             </div>
-            <div className="rounded-lg border p-3">
+            <div className="rounded-lg border p-3 elev-1 bg-card">
               <ElevationChart points={points} height={120} />
             </div>
           </div>
           {/* Speed histogram (horizontal bullet chart) */}
           <div className="px-4 pb-4">
-            <div className="rounded-lg border p-3">
+            <div className="rounded-lg border p-3 elev-1 bg-card">
               <SpeedHistogram points={points} height={100} />
             </div>
           </div>
@@ -211,7 +282,14 @@ export function SessionDetail({ sessionId, onClose }: SessionDetailProps) {
 
       {/* Детальная статистика */}
       <div className="px-4 pb-6">
-        <SessionStatsCard sessionId={session.id} />
+        <SessionStatsCard
+          sessionId={session.id}
+          focusIdx={focusIdx}
+          pinnedIdx={pinnedIdx}
+          mapClickIdx={mapClickIdx}
+          onHoverIdx={setLiveFocusIdx}
+          onPinIdx={handlePin}
+        />
       </div>
     </motion.div>
   );

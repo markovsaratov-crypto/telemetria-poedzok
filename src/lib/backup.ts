@@ -8,10 +8,12 @@ import path from "path";
 
 // P0-фикс v2.9.10 (Render build failure): Turbopack static analysis помечает
 // fs-операции с динамическим путём из env() как "dynamic filesystem access" →
-// трассировка всего проекта → build failed на Render. Используем СТАТИЧЕСКИЙ
-// путь (path.join из process.cwd() + литералов), который Turbopack может
-// проанализировать. Env-переопределение BACKUP_STORAGE_DIR намеренно не используется.
-const BACKUP_STORAGE_DIR = path.join(process.cwd(), "data", "backups");
+// трассировка всего проекта → build failed на Render. Решение: использовать
+// ЧИСТЫЙ СТРОКОВЫЙ ЛИТЕРАЛ "/tmp/backups" (то же значение что и env var
+// BACKUP_STORAGE_DIR в render.yaml). Turbopack видит константу — никакой
+// динамической трассировки. Env-переопределение BACKUP_STORAGE_DIR намеренно
+// не используется (поведение на проде идентично env var значению).
+const BACKUP_STORAGE_DIR = "/tmp/backups";
 
 export async function runBackup(actorId?: string): Promise<{ backupId: string; filePath: string; checksum: string; fileSize: number; tableCounts: Record<string, number> }> {
   // Создаём BackupJob

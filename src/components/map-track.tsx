@@ -63,7 +63,8 @@ export const SPEED_BUCKETS: SpeedBucket[] = [
   { maxKmh: Infinity, color: "#e11d48", label: "120+" }, // rose — быстро
 ];
 
-function speedBucketFor(kmh: number): number {
+// v2.9.9: экспортирован для спидограммы — единая шкала бакетов карты и графика
+export function speedBucketFor(kmh: number): number {
   for (let i = 0; i < SPEED_BUCKETS.length; i++) {
     if (kmh <= SPEED_BUCKETS[i].maxKmh) return i;
   }

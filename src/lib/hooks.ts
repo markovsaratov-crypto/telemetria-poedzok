@@ -22,6 +22,8 @@ import {
   type ExportPollResponse,
   type PlanResponse,
 } from "./api-client";
+// v2.9.9: офлайн-снимок статистики для PWA-заглушки (public/offline.html)
+import { saveOfflineSummary } from "./offline-summary";
 
 // ===== Auth =====
 export function useAuth() {
@@ -71,7 +73,16 @@ export interface StatsResponse {
 export function useStats() {
   return useQuery({
     queryKey: ["stats"],
-    queryFn: () => api.get<StatsResponse>("/api/stats"),
+    queryFn: async () => {
+      const data = await api.get<StatsResponse>("/api/stats");
+      // v2.9.9: офлайн-снимок — обновляем после каждого успешного запроса
+      saveOfflineSummary({
+        version: data.version,
+        totalSessions: data.totalSessions,
+        totalPoints: data.totalPoints,
+      });
+      return data;
+    },
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -124,11 +135,21 @@ export interface SessionsQuery {
 export function useSessions(params: SessionsQuery) {
   return useQuery({
     queryKey: ["sessions", params],
-    queryFn: () =>
-      api.get<{ sessions: SessionListItem[]; nextCursor: string | null }>(
+    queryFn: async () => {
+      const data = await api.get<{ sessions: SessionListItem[]; nextCursor: string | null }>(
         "/api/sessions",
         params as Record<string, string | number | undefined>
-      ),
+      );
+      // v2.9.9: офлайн-снимок — самая свежая поездка (список по умолчанию «сначала новые»)
+      const last = data.sessions?.[0];
+      if (last) {
+        saveOfflineSummary({
+          lastSessionAt: last.startTime,
+          lastDevice: last.deviceName || last.deviceId,
+        });
+      }
+      return data;
+    },
     staleTime: 15_000,
   });
 }
@@ -627,7 +648,16 @@ export interface AggregateStats {
 export function useAggregateStats() {
   return useQuery({
     queryKey: ["aggregate-stats"],
-    queryFn: () => api.get<AggregateStats>("/api/stats/aggregate"),
+    queryFn: async () => {
+      const data = await api.get<AggregateStats>("/api/stats/aggregate");
+      // v2.9.9: офлайн-снимок — суммарные дистанция/длительность/средняя скорость
+      saveOfflineSummary({
+        totalDistanceKm: data.totalDistanceKm,
+        totalDurationMin: data.totalDurationMin,
+        avgSpeedKmh: data.avgSpeedKmh,
+      });
+      return data;
+    },
     staleTime: 60_000,
   });
 }
@@ -653,7 +683,12 @@ export interface SpeedDistribution {
 export function useSpeedDistribution() {
   return useQuery({
     queryKey: ["speed-distribution"],
-    queryFn: () => api.get<SpeedDistribution>("/api/stats/speed-distribution"),
+    queryFn: async () => {
+      const data = await api.get<SpeedDistribution>("/api/stats/speed-distribution");
+      // v2.9.9: офлайн-снимок — максимальная скорость по всем поездкам
+      saveOfflineSummary({ maxSpeedKmh: data.maxSpeedKmh });
+      return data;
+    },
     staleTime: 60_000,
   });
 }

@@ -74,6 +74,16 @@ export function AnalyticsScreen({ onRouteTap }: { onRouteTap?: (id: string) => v
       <header className="sticky top-0 z-20 bg-card/95 backdrop-blur-md border-b safe-top">
         <div className="flex items-center justify-between h-14 px-4">
           <h1 className="text-[22px] font-bold">Аналитика</h1>
+          {/* v2.9.3: CSV-экспорт списка сессий */}
+          <a
+            href="/api/sessions/export?format=csv"
+            download
+            className="inline-flex items-center gap-1 rounded-md border bg-card px-2.5 py-1 text-[11px] active:bg-accent/40"
+            aria-label="Экспорт CSV"
+          >
+            <FileText className="h-3 w-3" />
+            CSV
+          </a>
         </div>
         {/* Segmented control: Аналитика / Поездка */}
         <div className="flex gap-1 px-4 pb-2">

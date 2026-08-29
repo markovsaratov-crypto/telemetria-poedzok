@@ -57,10 +57,10 @@ export function MetricTile({ label, value, unit, deviation, status = "neutral", 
       {/* Value */}
       <div className={cn("text-3xl font-bold tabular-nums leading-none", STATUS_TEXT[status])}>
         {value ?? "—"}
-        {unit && <span className="text-sm font-normal text-muted-foreground ml-0.5">{unit}</span>}
+        {unit && <span className="text-sm font-medium uppercase tracking-wide text-muted-foreground ml-1">{unit}</span>}
       </div>
-      {/* Label */}
-      <div className="text-[13px] text-muted-foreground mt-1.5 text-center leading-tight">
+      {/* Label — v2.9.3: uppercase-микротипографика для технического вида телеметрии */}
+      <div className="text-[11px] text-muted-foreground mt-1.5 text-center leading-tight uppercase tracking-wide">
         {label}
       </div>
       {/* Deviation */}

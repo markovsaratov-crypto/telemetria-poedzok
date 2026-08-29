@@ -274,11 +274,15 @@ export function AltitudeProfileChart({
           {/* Маркер вершины */}
           {(() => {
             const p = altPoints[geom.maxI];
+            // v2.9.6: защита от обрезания подписи у верхнего края — если пик
+            // прижат к верхней границе, подпись уходит ПОД маркер
+            const peakY = geom.y(p.alt as number);
+            const labelAbove = peakY - 5 >= PAD.top + 8;
             return (
               <g>
                 <circle
                   cx={geom.x(p.t)}
-                  cy={geom.y(p.alt as number)}
+                  cy={peakY}
                   r={compact ? 3 : 3.5}
                   fill="var(--chart-alt-line-from)"
                   stroke="oklch(0.99 0.005 350)"
@@ -287,7 +291,7 @@ export function AltitudeProfileChart({
                 {!compact && (
                   <text
                     x={Math.min(geom.x(p.t) + 6, W - PAD.right - 30)}
-                    y={geom.y(p.alt as number) - 5}
+                    y={labelAbove ? peakY - 5 : peakY + 13}
                     className="fill-amber-700 dark:fill-amber-400"
                     style={{ fontSize: 9.5, fontWeight: 600 }}
                   >

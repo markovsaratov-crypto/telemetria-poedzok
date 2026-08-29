@@ -26,6 +26,7 @@ import { LoginForm } from "@/components/login-form";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { HealthIndicator } from "@/components/health-indicator";
 import { DashboardOverview } from "@/components/dashboard-overview";
+import { HeavySegmentsCard } from "@/components/heavy-segments-card";
 import { SessionsList } from "@/components/sessions-list";
 import { SessionDetail } from "@/components/session-detail";
 import { SessionCompare } from "@/components/session-compare";
@@ -250,6 +251,10 @@ export default function Home() {
                   onOpenSession={openSession}
                   onGoToSessions={() => setTab("sessions")}
                 />
+                {/* v2.9.6: виджет «Тяжёлые участки» — худшие P75-хотспоты всех групп */}
+                <div className="mt-4">
+                  <HeavySegmentsCard onGoToRoutes={() => setTab("routes")} />
+                </div>
               </TabsContent>
 
               <TabsContent value="sessions" className="mt-0 space-y-4">

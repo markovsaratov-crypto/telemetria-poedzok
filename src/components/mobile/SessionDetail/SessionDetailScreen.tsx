@@ -467,7 +467,7 @@ function SegmentsTabContent({
 
       {/* Таймлайн-полоса (пропорционально времени) */}
       <div>
-        <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center justify-between mb-2.5">
           <h4 className="text-xs font-semibold">Таймлайн поездки</h4>
           <div className="flex gap-2.5 text-[10px] text-muted-foreground">
             {([1, 0, 2] as const).map(st => (
@@ -512,7 +512,7 @@ function SegmentsTabContent({
               <button
                 key={i}
                 onClick={() => onFocusStop(Math.round((r.idx0 + r.idx1) / 2))}
-                className="w-full flex items-center gap-3 rounded-lg border bg-card px-3 py-2.5 text-left active:bg-accent transition-colors"
+                className="w-full flex items-center gap-3 rounded-lg border bg-card px-3 py-3 text-left active:bg-accent transition-colors"
               >
                 <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/15 shrink-0">
                   <Clock className="h-4 w-4 text-amber-600 dark:text-amber-400" />

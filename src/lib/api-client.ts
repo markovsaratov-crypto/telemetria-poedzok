@@ -245,7 +245,7 @@ export interface HealthResponse {
   db: "ok" | "degraded";
   worker: "ok" | "degraded";
   circuits?: Record<string, { state: string; failures: number }>;
-  rateLimiter?: { buckets: number };
+  rateLimiter?: { buckets: number; backend?: string };
   version: string;
   uptime: number;
   targetLoadRpm?: number;

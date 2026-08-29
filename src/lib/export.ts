@@ -1,7 +1,29 @@
 // src/lib/export.ts — генерация GPX 1.1 / KML 2.2 / JSON (§4.11)
-import type { Session, GpsPoint } from "@prisma/client";
+// P2-фикс: @prisma/client генерируется только для типов; чтобы не зависеть от prisma generate,
+// описываем структурные типы вручную (совместимы со строками из db-обёртки)
+export interface GpsPoint {
+  id?: string;
+  sessionId?: string;
+  timestamp: number | bigint;
+  lat: number;
+  lon: number;
+  altitude?: number | null;
+  speed?: number | null;
+  bearing?: number | null;
+  accuracy?: number | null;
+}
 
-export interface SessionWithPoints extends Session {
+export interface SessionBase {
+  id: string;
+  deviceId: string;
+  clientId?: string | null;
+  startTime: number | string;
+  endTime?: number | string | null;
+  status?: string;
+  [key: string]: unknown;
+}
+
+export interface SessionWithPoints extends SessionBase {
   gpsPoints: GpsPoint[];
 }
 

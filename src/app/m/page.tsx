@@ -31,7 +31,7 @@ export default function MobilePage() {
         {tab === "map" && <MapScreenWrapper onSessionTap={(id) => setSelectedSession(id)} />}
         {tab === "analytics" && <AnalyticsScreen />}
         {tab === "routes" && <RoutesScreen />}
-        {tab === "admin" && <AdminScreen onLogout={() => auth.refetch()} />}
+        {tab === "admin" && <AdminScreen onBack={() => setTab("trips")} onLogout={() => auth.refetch()} />}
       </div>
     </div>
   );

@@ -13,15 +13,16 @@ interface DestinationLabelProps {
   lon: number | null;
   className?: string;
   maxLength?: number;
+  fallback?: string;
 }
 
-export function DestinationLabel({ lat, lon, className, maxLength = 60 }: DestinationLabelProps) {
+export function DestinationLabel({ lat, lon, className, maxLength = 60, fallback }: DestinationLabelProps) {
   const { data, isLoading, error } = useReverseGeocode(lat, lon);
 
   if (lat == null || lon == null) {
     return (
       <span className={cn("text-xs text-muted-foreground inline-flex items-center gap-1", className)}>
-        <MapPin className="h-3 w-3" /> —
+        <MapPin className="h-3 w-3" /> {fallback || "—"}
       </span>
     );
   }
@@ -37,7 +38,7 @@ export function DestinationLabel({ lat, lon, className, maxLength = 60 }: Destin
   if (error || !data) {
     return (
       <span className={cn("text-xs text-muted-foreground inline-flex items-center gap-1", className)}>
-        <MapPin className="h-3 w-3" /> {lat.toFixed(4)}, {lon.toFixed(4)}
+        <MapPin className="h-3 w-3" /> {fallback || `${lat.toFixed(4)}, ${lon.toFixed(4)}`}
       </span>
     );
   }

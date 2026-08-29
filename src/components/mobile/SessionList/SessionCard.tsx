@@ -100,7 +100,7 @@ export function SessionCard(props: SessionCardProps) {
           </span>
         </div>
 
-        {/* Row 3: distance · speed · deviation */}
+        {/* Row 3: distance · speed */}
         <div className="flex items-center gap-3 text-[11px] text-muted-foreground mt-0.5">
           {props.distance != null && props.distance > 0 && (
             <span className="flex items-center gap-1">
@@ -112,14 +112,6 @@ export function SessionCard(props: SessionCardProps) {
             <span className="flex items-center gap-1">
               <Gauge className="h-3 w-3" />
               {Math.round(props.avgSpeed * 3.6)} км/ч
-            </span>
-          )}
-          {props.deviation != null && (
-            <span className={cn(
-              "font-medium tabular-nums",
-              Math.abs(props.deviation) > 10 ? "text-[oklch(0.45_0.20_25)]" : "text-[oklch(0.45_0.15_145)]"
-            )}>
-              {props.deviation > 0 ? "+" : ""}{props.deviation.toFixed(0)}%
             </span>
           )}
         </div>

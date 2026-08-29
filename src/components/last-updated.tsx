@@ -24,7 +24,7 @@ export function LastUpdated({ queryKey, className }: LastUpdatedProps) {
     const unsubscribe = qc.getQueryCache().subscribe((event) => {
       if (
         event.query.queryKey[0] === queryKey &&
-        (event.type === "updated" || event.type === "fetched")
+        event.type === "updated"
       ) {
         setLastUpdate(Date.now());
       }

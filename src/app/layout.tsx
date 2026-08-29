@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Телеметрия поездок — v2.7",
+  title: "Телеметрия поездок — v2.9",
   description:
     "Платформа ingestion и анализа GPS-телеметрии поездок. Сессии, маршруты, пробки, экспорт GPX/KML/JSON.",
   keywords: ["телеметрия", "GPS", "поездки", "маршруты", "Telemetria"],

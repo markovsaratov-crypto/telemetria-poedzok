@@ -275,7 +275,7 @@ export function CommandPalette({
             </span>
           </div>
           <span className="flex items-center gap-1">
-            <Command className="h-2.5 w-2.5" /> Telemetria v2.7
+            <Command className="h-2.5 w-2.5" /> Telemetria v2.9
           </span>
         </div>
       </DialogContent>

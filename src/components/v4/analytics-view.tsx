@@ -1,17 +1,17 @@
-// src/components/v4/analytics-view.tsx — вкладка Аналитика v4 (v2.10.0 R1).
+// src/components/v4/analytics-view.tsx — вкладка Аналитика v4 (v2.10.1).
 // 11 блоков (порядок утверждён, не менять):
 //   1. Шапка сессии + таймлайн записи
 //   2. 01 Основные показатели (7 KPI)          — LIVE /api/sessions/[id]/stats
 //   3. 02 Оценка вождения — EcoScore + Эффективность — LIVE stats + events
 //   4. 03 Скоростной профиль                  — LIVE stats
-//   5. 04 План и факт · время                  — MOCK (R1 scope не включает)
+//   5. 04 План и факт · время                  — LIVE stats.route + route-comparison (v2.10.1)
 //   6. 05 Карта поездки                        — LIVE /api/sessions/[id]/track (Leaflet)
 //   7. 06 Поведение и манёвры                 — LIVE /api/sessions/[id]/events (G-G diagram)
-//   8. 07 Пробки и заторы                      — MOCK
-//   9. 08 География и рельеф                  — MOCK
-//  10. 09 Тяжёлые участки (аккордеон)         — MOCK
-//  11. 10 Частые маршруты                      — MOCK
-//  12. 11 Качество данных (аккордеон)         — MOCK
+//   8. 07 Пробки и заторы                      — LIVE stats.methodology + stats.route (v2.10.1)
+//   9. 08 География и рельеф                  — LIVE stats.methodology + bbox (v2.10.1)
+//  10. 09 Тяжёлые участки (аккордеон)         — LIVE /api/routes/heavy-segments (v2.10.1)
+//  11. 10 Частые маршруты                      — LIVE /api/routes/grouped + /trend (v2.10.1)
+//  12. 11 Качество данных (аккордеон)         — LIVE stats.methodology (v2.10.1)
 
 "use client";
 
@@ -32,7 +32,18 @@ import {
   type Trip,
   type RouteData,
 } from "@/lib/telematika-v4-mock";
-import { useSessionStats, type SessionStats } from "@/lib/hooks";
+import {
+  useSessionStats,
+  useRouteComparison,
+  useRouteGroups,
+  useHeavySegments,
+  useRouteTrend,
+  type SessionStats,
+  type RouteGroupInfo,
+  type HeavySegmentsData,
+  type RouteComparisonData,
+  type RouteTrendData,
+} from "@/lib/hooks";
 import { useV4Track, useV4Events } from "@/lib/v4-hooks";
 import type { TrackResponse, EventsResponse } from "@/lib/api-client";
 import { bindTips } from "./use-v4-tipbox";
@@ -67,20 +78,24 @@ interface Props {
 }
 
 export function AnalyticsView({ period, sessionId }: Props) {
-  // v2.10.0 R1: live API hooks (replaces PERIODS mock in blocks 01/02/03/05/06).
+  // v2.10.0 R1+R2 + v2.10.1: live API hooks для ВСЕХ 11 блоков.
+  // 01 KPI, 02 Score, 03 Speed, 04 PlanFact, 05 Map, 06 Behavior, 07 Traffic,
+  // 08 Geo, 09 Heavy, 10 Routes, 11 Quality — все используют live API.
   const stats = useSessionStats(sessionId);
   const track = useV4Track(sessionId);
   const events = useV4Events(sessionId);
+  const comparison = useRouteComparison(sessionId); // v2.10.1: для блока 04
+  const groups = useRouteGroups(); // v2.10.1: для блока 10
+  const heavy = useHeavySegments(); // v2.10.1: для блока 09
 
   const data = PERIODS[period];
-  const selectedTrip: Trip | null = TRIPS[0]; // for mock block 04 (PlanFact)
   const rootRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
     if (rootRef.current) bindTips(rootRef.current);
   });
 
-  // v2.10.0 R1: Empty state when no session selected.
+  // Empty state when no session selected — но блоки 09/10 показываем сразу (агрегаты).
   if (!sessionId) {
     return (
       <div ref={rootRef}>
@@ -104,11 +119,14 @@ export function AnalyticsView({ period, sessionId }: Props) {
           </div>
           <div style={{ fontSize: 12, lineHeight: 1.6 }}>
             Откройте фильтр поездки вверху страницы и выберите конкретную сессию —
-            блоки 01–06 отобразят живые данные из API.
+            блоки 01–08 и 11 отобразят живые данные из API.
             <br />
-            Блоки 04, 07–11 останутся демонстрационными.
+            Блоки 09 (Тяжёлые участки) и 10 (Частые маршруты) показывают агрегаты
+            по всем routeHash-группам сразу.
           </div>
         </div>
+        <HeavySegmentsBlock data={heavy.data} />
+        <RoutesBlock groups={groups.data} />
       </div>
     );
   }
@@ -119,19 +137,20 @@ export function AnalyticsView({ period, sessionId }: Props) {
       <KpiBlock stats={stats.data} period={period} mockData={data} />
       <DrivingScoreBlock stats={stats.data} events={events.data} mockData={data} />
       <SpeedProfileBlock stats={stats.data} mockData={data} />
-      <PlanFactBlock trip={selectedTrip} />
+      <PlanFactBlock stats={stats.data} comparison={comparison.data} />
       <MapBlock track={track.data} isLoading={track.isLoading} isError={track.isError} />
       <BehaviorBlock events={events.data} stats={stats.data} />
-      <TrafficBlock data={data} />
+      <TrafficBlock stats={stats.data} />
       <GeoBlock stats={stats.data} />
-      <HeavySegmentsBlock />
-      <RoutesBlock />
+      <HeavySegmentsBlock data={heavy.data} />
+      <RoutesBlock groups={groups.data} />
       <DataQualityBlock stats={stats.data} />
       <div className="toast">
-        <b>v2.10.0 R1+R2.</b> Блоки 01–06 подключены к живому API. Блоки 04, 07–11
-        пока используют демонстрационные данные. Карта — Leaflet, слой по умолчанию
-        «Street» (OpenStreetMap Standard tiles), доступны Satellite/Terrain/Dark.
-        G-G диаграмма — реальные точки из /events (не seeded).
+        <b>v2.10.1.</b> Все 11 блоков аналитики подключены к живому API: KPI,
+        EcoScore, скоростной профиль, план-факт, карта Leaflet (Street по умолчанию),
+        G-G, пробки, география, тяжёлые участки, частые маршруты и качество данных.
+        Реальные значения из {stats.data ? fmtInt(stats.data.pointCount) : "—"} GPS-точек
+        и {groups.data?.total ?? 0} routeHash-групп.
       </div>
     </div>
   );
@@ -777,20 +796,110 @@ function Stat({
   );
 }
 
-// === Блок 04: План и факт · время (MOCK — R1 scope не включает) ===
-function PlanFactBlock({ trip }: { trip: Trip | null }) {
-  if (!trip) return null;
-  const plan = trip.segs.reduce((s, x) => s + x.plan, 0);
-  const fact = trip.segs.reduce((s, x) => s + x.fact, 0);
-  const dt = fact - plan;
-  const heroCls = dt <= 0 ? "c-plum" : dt <= 2 ? "c-amber" : "c-red";
-  const heroSign = dt > 0 ? "+" : "−";
-  const heroChip =
-    Math.abs(dt) <= Math.max(2, plan * 0.05)
-      ? "chip-amber"
-      : dt <= 0
-        ? "chip-plum"
-        : "chip-red";
+// === Блок 04: План и факт · время (LIVE v2.10.1) ===
+// Источники:
+//   - stats.route.* из /api/sessions/[id]/stats (computePlanFact — уже считает plan/fact
+//     и deviations на основе TrafficJob от 2ГИС/OSRM и haversine/40 baseline).
+//   - route-comparison.stats из /api/sessions/[id]/route-comparison — сравнение с
+//     routeHash-группой: rank, percentile, avg/best/worst/stdDev, trend.
+function PlanFactBlock({
+  stats,
+  comparison,
+}: {
+  stats: SessionStats | null | undefined;
+  comparison: RouteComparisonData | null | undefined;
+}) {
+  // v2.10.1: useMemo ДОЛЖЕН быть до любого early return (rules-of-hooks).
+  // Поэтому все производные значения — через optional chaining, а useMemo хранит
+  // пустой массив если stats ещё не загружен.
+  const route = stats?.route;
+  const actualDurSec = stats?.duration ?? 0;
+  const planDurSec = route?.planDurationSec ?? null;
+  let dtMin: number | null = null;
+  if (planDurSec != null && planDurSec > 0) {
+    dtMin = (actualDurSec - planDurSec) / 60;
+  } else if (route?.durationDeviationPct != null) {
+    dtMin = (route.durationDeviationPct * actualDurSec) / 100 / 60;
+  }
+  const heroCls = dtMin == null ? "c-amber" : dtMin <= 0 ? "c-plum" : dtMin <= 2 ? "c-amber" : "c-red";
+  const heroSign = dtMin == null ? "" : dtMin > 0 ? "+" : "−";
+  const heroVal = dtMin == null ? "—" : Math.abs(dtMin).toFixed(0).replace(".", ",");
+  const dtPct = route?.durationDeviationPct ?? (planDurSec && planDurSec > 0 ? Math.round(((actualDurSec - planDurSec) / planDurSec) * 1000) / 10 : null);
+  const heroChip = dtMin == null ? "chip-amber" : Math.abs(dtMin) <= Math.max(2, (planDurSec ?? actualDurSec) / 60 * 0.05) ? "chip-amber" : dtMin <= 0 ? "chip-plum" : "chip-red";
+  const heroLabel = dtMin == null ? "нет плана" : Math.abs(dtMin) <= (planDurSec ?? actualDurSec) / 60 * 0.05 ? "в пределах ±5%" : dtMin <= 0 ? "экономия" : "перерасход";
+
+  const distDevPct = route?.distanceDeviationPct ?? null;
+  const spdDevPct = route?.speedDeviationPct ?? null;
+  const timeLostSec = route?.timeLostToTrafficSec ?? 0;
+  const timeLostMin = timeLostSec / 60;
+  const provider = route?.provider;
+  const trafficFetched = !!route?.trafficFetched;
+
+  const cmpStats = comparison?.stats;
+  const cmpVsAvgPct = comparison?.vsAvgPct ?? null;
+  const cmpRank = comparison?.rank ?? null;
+  const cmpGroupSize = comparison?.groupSize ?? 0;
+  const cmpPercentile = comparison?.percentile ?? null;
+  const cmpTrend = comparison?.trend;
+  const trendWord = cmpTrend?.rating === "improving" ? "улучшающийся" : cmpTrend?.rating === "degrading" ? "ухудшающийся" : cmpTrend?.rating === "stable" ? "стабильный" : "недостаточно данных";
+  const trendSlopeWord = cmpTrend?.slope == null ? "—" : (cmpTrend.slope > 0 ? "+" : cmpTrend.slope < 0 ? "−" : "±") + Math.abs(cmpTrend.slope).toString().replace(".", ",");
+
+  const planSpeedKmh = planDurSec != null && route?.planDistanceM != null && planDurSec > 0
+    ? (route.planDistanceM / planDurSec) * 3.6
+    : 40;
+  const segs = React.useMemo(() => {
+    if (!stats?.speedProfile || stats.speedProfile.length === 0) return [];
+    const buckets = [
+      { name: "Городской поток", range: [0, 30] as [number, number], type: "0–30 км/ч" },
+      { name: "Магистраль", range: [30, 60] as [number, number], type: "30–60 км/ч" },
+      { name: "Шоссе", range: [60, 90] as [number, number], type: "60–90 км/ч" },
+      { name: "Трасса", range: [90, 1000] as [number, number], type: "90+ км/ч" },
+    ];
+    const totals = buckets.map(() => ({ durSec: 0, distM: 0, count: 0, vMax: 0, vSum: 0 }));
+    for (let i = 1; i < stats.speedProfile.length; i++) {
+      const prev = stats.speedProfile[i - 1];
+      const curr = stats.speedProfile[i];
+      const dt = curr.t - prev.t;
+      if (dt <= 0 || dt > 30) continue;
+      if (curr.st === 0) continue;
+      const v = curr.v ?? 0;
+      const bi = buckets.findIndex((b) => v >= b.range[0] && v < b.range[1]);
+      if (bi < 0) continue;
+      const avgVms = ((prev.v ?? 0) + v) / 2 / 3.6;
+      totals[bi].durSec += dt;
+      totals[bi].distM += avgVms * dt;
+      totals[bi].count++;
+      totals[bi].vMax = Math.max(totals[bi].vMax, v);
+      totals[bi].vSum += v;
+    }
+    return buckets.map((b, i) => ({
+      name: b.name,
+      type: b.type,
+      factDurSec: totals[i].durSec,
+      factDistM: totals[i].distM,
+      // v2.10.1 fix: planDurSec = (dist_km / planSpeed_kmh) * 3600 — секунды.
+      // Раньше здесь было * 3600 дважды — давало 3600× завышение.
+      planDurSec: totals[i].distM > 0 && planSpeedKmh > 0 ? (totals[i].distM / 1000) / planSpeedKmh * 3600 : 0,
+      planSpeedKmh: planSpeedKmh,
+      factSpeedKmh: totals[i].durSec > 0 ? (totals[i].distM / totals[i].durSec) * 3.6 : 0,
+      count: totals[i].count,
+    })).filter((s) => s.count > 0);
+  }, [stats, planSpeedKmh]);
+
+  const maxSegDur = Math.max(1, ...segs.map((s) => Math.max(s.factDurSec, s.planDurSec)));
+
+  // v2.10.1: early return ПОСЛЕ всех hooks (rules-of-hooks).
+  if (!stats) {
+    return (
+      <section>
+        <div className="sec-head">
+          <span className="sec-num">04</span>
+          <span className="sec-title">План и факт · время</span>
+          <span className="sec-sub">загрузка…</span>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section>
@@ -798,7 +907,9 @@ function PlanFactBlock({ trip }: { trip: Trip | null }) {
         <span className="sec-num">04</span>
         <span className="sec-title">План и факт · время</span>
         <span className="sec-sub">
-          {trip.d} {trip.mo.toLowerCase()} · план 2ГИС по эталонному маршруту · MOCK
+          {provider ? `план: ${provider}` : "плана нет"}
+          {trafficFetched ? " · трафик 2ГИС учтён" : " · трафик не получен"}
+          {cmpGroupSize > 0 ? ` · группа ${cmpGroupSize} поездок` : ""}
         </span>
       </div>
       <div className="card">
@@ -806,7 +917,7 @@ function PlanFactBlock({ trip }: { trip: Trip | null }) {
           <div>
             <div className="pf-label">
               <span
-                data-tip="Отклонение по времени (§6.3 DurationDeviation): факт минус план, в минутах и процентах | Факт — активная поездка (174 мин), план — расчёт маршрутизатора (170 мин) | Обратная шкала: экономия — слива, перерасход — алый"
+                data-tip="Отклонение по времени (§6.3 DurationDeviation): факт минус план, в минутах и процентах | Факт — активная поездка, план — расчёт маршрутизатора (2ГИС или OSRM) или baseline гаверсинус/40 км/ч | Обратная шкала: экономия — слива, перерасход — алый"
               >
                 Отклонение по времени
               </span>
@@ -819,31 +930,33 @@ function PlanFactBlock({ trip }: { trip: Trip | null }) {
             </div>
             <div className={`pf-val ${heroCls}`}>
               {heroSign}
-              {Math.abs(dt)} <span className="unit">мин</span>
+              {heroVal} <span className="unit">мин</span>
             </div>
             <div className="pf-sub">
-              {((dt / plan) * 100).toFixed(1).replace(".", ",")}% к плану{" "}
-              <span className={`chip ${heroChip}`}>
-                {Math.abs(dt) <= plan * 0.05 ? "в пределах ±5%" : dt <= 0 ? "экономия" : "перерасход"}
-              </span>
+              {dtPct != null ? `${dtPct.toFixed(1).replace(".", ",")}% к плану` : "нет данных о плане"}{" "}
+              <span className={`chip ${heroChip}`}>{heroLabel}</span>
             </div>
           </div>
           <div className="pf-side">
             <div className="pf-mini">
               <span
-                data-tip="Отклонение по дистанции (§6.6 DistanceDeviation): факт 124,9 км против плана 122,0 км | Обратная шкала: короче плана — слива, длиннее — алый"
+                data-tip={`Отклонение по дистанции (§6.6 DistanceDeviation): факт ${(stats.distance / 1000).toFixed(1).replace(".", ",")} км против плана ${route?.planDistanceM ? (route.planDistanceM / 1000).toFixed(1).replace(".", ",") : "—"} км | Обратная шкала: короче плана — слива, длиннее — алый`}
               >
                 Откл. по дистанции
               </span>
-              <b className="c-amber">+2,4%</b>
+              <b className={distDevPct == null ? "c-faint" : Math.abs(distDevPct) <= 2 ? "c-amber" : distDevPct > 0 ? "c-red" : "c-plum"}>
+                {distDevPct == null ? "—" : `${distDevPct > 0 ? "+" : ""}${distDevPct.toString().replace(".", ",")}%`}
+              </b>
             </div>
             <div className="pf-mini">
               <span
-                data-tip="Отклонение скорости по сегментам (§6.7 SpeedDeviation): среднее по сегментам | Прямая шкала: быстрее плана — слива, медленнее — алый"
+                data-tip="Отклонение скорости (§6.7 SpeedDeviation): средняя фактическая vs плановая (planDist/planDur) | Прямая шкала: быстрее плана — слива, медленнее — алый"
               >
                 Откл. по скорости
               </span>
-              <b className="c-red">−3,1%</b>
+              <b className={spdDevPct == null ? "c-faint" : Math.abs(spdDevPct) <= 2 ? "c-amber" : spdDevPct > 0 ? "c-plum" : "c-red"}>
+                {spdDevPct == null ? "—" : `${spdDevPct > 0 ? "+" : ""}${spdDevPct.toString().replace(".", ",")}%`}
+              </b>
             </div>
             <div className="pf-mini">
               <span
@@ -851,71 +964,119 @@ function PlanFactBlock({ trip }: { trip: Trip | null }) {
               >
                 Потери в пробках
               </span>
-              <b className="c-red">4 мин</b>
+              <b className={timeLostMin > 0 ? "c-red" : "c-plum"}>
+                {fmtInt(timeLostMin)} мин
+              </b>
             </div>
           </div>
         </div>
 
         <div className="pf-segs-head">
-          По сегментам поездки{" "}
+          По скоростным сегментам поездки{" "}
           <span className="muted">│ — план · полоса — факт · цвет — знак отклонения</span>
         </div>
 
-        {trip.segs.map((s, i) => {
-          const sdt = s.fact - s.plan;
-          const sCls = sdt <= 0 ? "save" : sdt <= 2 ? "warn" : "lost";
-          const sCc = sdt <= 0 ? "c-plum" : sdt <= 2 ? "c-amber" : "c-red";
-          const max = Math.max(...trip.segs.map((x) => Math.max(x.plan, x.fact))) * 1.12;
-          const dv = Math.round(((s.fact_speed - s.plan_speed) / s.plan_speed) * 100);
-          const scc = dv >= 0 ? "chip-plum" : dv >= -10 ? "chip-amber" : "chip-red";
-          return (
-            <div className="seg-row" key={i}>
-              <div className="seg-name">
-                {s.name}
-                <small>{s.type_dist}</small>
-              </div>
-              <div className="bullet">
-                <div className={`fill ${sCls}`} style={{ width: `${(s.fact / max) * 100}%` }} />
-                <div className="tick" style={{ left: `${(s.plan / max) * 100}%` }} />
-              </div>
-              <div className="seg-delta">
-                <b className={sCc}>
-                  {sdt > 0 ? "+" : "−"}
-                  {Math.abs(sdt)} мин
-                </b>
-                <span className="p">факт {s.fact} · план {s.plan}</span>
-                <span className="spd">
-                  {s.fact_speed.toString().replace(".", ",")} км/ч{" "}
-                  <span className={`chip ${scc}`}>
-                    {dv > 0 ? "+" : ""}
-                    {dv}%
-                  </span>
-                  {s.jam ? (
-                    <span className="chip chip-red" style={{ marginLeft: 4 }}>
-                      пробка +{s.jam} мин
+        {segs.length === 0 ? (
+          <p className="pf-note">Нет данных о скоростных сегментах для текущей поездки.</p>
+        ) : (
+          segs.map((s, i) => {
+            const sdt = s.factDurSec - s.planDurSec;
+            const sdtMin = sdt / 60;
+            const sCls = sdt <= 0 ? "save" : sdtMin <= 2 ? "warn" : "lost";
+            const sCc = sdt <= 0 ? "c-plum" : sdtMin <= 2 ? "c-amber" : "c-red";
+            const dv = Math.round(((s.factSpeedKmh - s.planSpeedKmh) / s.planSpeedKmh) * 100);
+            const scc = dv >= 0 ? "chip-plum" : dv >= -10 ? "chip-amber" : "chip-red";
+            const factMin = s.factDurSec / 60;
+            const planMin = s.planDurSec / 60;
+            return (
+              <div className="seg-row" key={i}>
+                <div className="seg-name">
+                  {s.name}
+                  <small>{s.type} · {(s.factDistM / 1000).toFixed(1).replace(".", ",")} км</small>
+                </div>
+                <div className="bullet">
+                  <div className={`fill ${sCls}`} style={{ width: `${(s.factDurSec / maxSegDur) * 100}%` }} />
+                  <div className="tick" style={{ left: `${(s.planDurSec / maxSegDur) * 100}%` }} />
+                </div>
+                <div className="seg-delta">
+                  <b className={sCc}>
+                    {sdt > 0 ? "+" : "−"}
+                    {Math.abs(sdtMin).toFixed(0)} мин
+                  </b>
+                  <span className="p">факт {fmtInt(factMin)} · план {fmtInt(planMin)}</span>
+                  <span className="spd">
+                    {s.factSpeedKmh.toFixed(1).replace(".", ",")} км/ч{" "}
+                    <span className={`chip ${scc}`}>
+                      {dv > 0 ? "+" : ""}
+                      {dv}%
                     </span>
-                  ) : null}
-                </span>
+                  </span>
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })
+        )}
 
         <div className="seg-total">
           <span>Итог:</span>
           <span>
-            план <b>{plan} мин</b>
+            план <b>{planDurSec != null ? fmtInt(planDurSec / 60) + " мин" : "—"}</b>
           </span>
           <span>
-            факт <b>{fact} мин</b>
+            факт <b>{fmtInt(actualDurSec / 60)} мин</b>
           </span>
           <b className={heroCls}>
-            {dt > 0 ? "+" : "−"}
-            {Math.abs(dt)} мин
+            {dtMin == null ? "—" : `${dtMin > 0 ? "+" : "−"}${Math.abs(dtMin).toFixed(0)} мин`}
           </b>
         </div>
+
+        {/* v2.10.1: vs routeHash-группа из route-comparison */}
+        {comparison ? (
+          <div className="pf-cmp">
+            <div className="pf-segs-head">vs routeHash-группа ({cmpGroupSize} поездок)</div>
+            <div className="stats-grid" style={{ marginTop: 0 }}>
+              <Stat
+                value={cmpRank != null ? `#${cmpRank}` : "—"}
+                cls="c-plum"
+                tip={`Ранг сессии в группе (§10.2): 1 = лучшая (самая быстрая) | Группа из ${cmpGroupSize} поездок по тому же routeHash`}
+                label="Ранг в группе"
+              />
+              <Stat
+                value={cmpPercentile != null ? `${cmpPercentile}%` : "—"}
+                tip="Перцентиль (§10.2): позиция в группе, 0% = лучшая, 100% = худшая"
+                label="Перцентиль"
+              />
+              <Stat
+                value={cmpVsAvgPct != null ? `${cmpVsAvgPct > 0 ? "+" : ""}${cmpVsAvgPct.toString().replace(".", ",")}%` : "—"}
+                cls={cmpVsAvgPct == null ? "c-faint" : cmpVsAvgPct <= 0 ? "c-plum" : "c-red"}
+                tip="Отклонение от среднего (§10.2): отрицательное — быстрее среднего, положительное — медленнее"
+                label="vs среднего"
+              />
+              <Stat
+                value={cmpStats?.best != null ? `${fmtInt(cmpStats.best / 60)} мин` : "—"}
+                cls="c-plum"
+                tip="Лучшее время в группе (§10.2): минимальная активная длительность по всем сессиям с надёжностью ≥ 0.6"
+                label="Лучшее в группе"
+              />
+              <Stat
+                value={cmpStats?.worst != null ? `${fmtInt(cmpStats.worst / 60)} мин` : "—"}
+                cls="c-red"
+                tip="Худшее время в группе (§10.2): максимальная активная длительность"
+                label="Худшее в группе"
+              />
+              <Stat
+                value={cmpTrend?.slope != null ? `${trendSlopeWord} сек/день` : "—"}
+                cls={cmpTrend?.slope == null ? "c-faint" : cmpTrend.slope < 0 ? "c-plum" : cmpTrend.slope > 0 ? "c-red" : "c-amber"}
+                tip={`Тренд Theil-Sen (§10.5): наклон изменения времени по дням | CI 95%: ${cmpTrend?.ci95 ? `[${cmpTrend.ci95[0].toFixed(2)}, ${cmpTrend.ci95[1].toFixed(2)}]` : "—"} | Рейтинг: ${trendWord}`}
+                label="Тренд Theil-Sen"
+              />
+            </div>
+          </div>
+        ) : null}
+
         <p className="pf-note">
-          Скорость сегмента — средняя фактическая (дистанция/время сегмента); в чипе — отклонение от плановой скорости сегмента (§6.7). Основная потеря — Ленинградское шоссе: +10 мин, из них 8 мин — пробка. (MOCK — R1 scope не включает)
+          Сегменты — по фактической скорости (городской поток / магистраль / шоссе / трасса), план для каждого — {planSpeedKmh.toFixed(1).replace(".", ",")} км/ч (средняя плановая скорость).
+          {" "}Сравнение с группой — через routeHash ({cmpGroupSize > 0 ? `${cmpGroupSize} поездок с тем же маршрутом` : "нет группы — единственная поездка"}).
         </p>
       </div>
     </section>
@@ -1188,74 +1349,139 @@ function GgDiagram({ events }: { events: EventsResponse | null | undefined }) {
   return <svg ref={ref} className="gg-svg" viewBox="0 0 240 240" aria-hidden="true" />;
 }
 
-// === Блок 07: Пробки и заторы (MOCK — R1 scope не включает) ===
-function TrafficBlock({ data }: { data: typeof PERIODS.today }) {
+// === Блок 07: Пробки и заторы (LIVE v2.10.1) ===
+// Источники:
+//   - stats.methodology.timeInTraffic (§5.4): сумма интервалов со скоростью <10 км/ч.
+//   - stats.methodology.timeAtCruise (§5.5): сумма интервалов со скоростью >60 км/ч.
+//   - stats.methodology.movingTime / idleTime (§4.6/§4.7).
+//   - stats.route.timeLostToTrafficSec (§6.8): потери от 2ГИС (если трафик получен).
+//   - stats.methodology.speedDistribution (§5.3): 6 бакетов [0-20,20-40,...].
+function TrafficBlock({ stats }: { stats: SessionStats | null | undefined }) {
+  if (!stats || !stats.methodology) {
+    return (
+      <section>
+        <div className="sec-head">
+          <span className="sec-num">07</span>
+          <span className="sec-title">Пробки и заторы</span>
+          <span className="sec-sub">загрузка…</span>
+        </div>
+      </section>
+    );
+  }
+  const m = stats.methodology;
+  const moveSec = m.movingTime;
+  const idleSec = m.idleTime;
+  const jamSec = m.timeInTraffic; // §5.4: <10 км/ч
+  const cruiseSec = m.timeAtCruise; // §5.5: >60 км/ч
+  const moveNoJamSec = Math.max(0, moveSec - jamSec);
+  const totalActive = Math.max(1, moveSec + idleSec);
+  const movePct = (moveNoJamSec / totalActive) * 100;
+  const jamPct = (jamSec / totalActive) * 100;
+  const idlePct = (idleSec / totalActive) * 100;
+  const jamMin = jamSec / 60;
+  const cruiseMin = cruiseSec / 60;
+  const moveNoJamMin = moveNoJamSec / 60;
+  const idleMin = idleSec / 60;
+
+  // §9.5 TimeInCongestion: timeLostToTrafficSec из 2ГИС (если есть) иначе fallback на jamSec
+  const timeLostSec = stats.route?.timeLostToTrafficSec ?? jamSec;
+  const timeLostMin = timeLostSec / 60;
+  const trafficFetched = !!stats.route?.trafficFetched;
+
+  // §9.3 TrafficSeverity: фактическая/плановая скорость (1.0 = свободно, 0.5 = пробка)
+  const planSpeedKmh = stats.route?.planDistanceM && stats.route?.planDurationSec && stats.route.planDurationSec > 0
+    ? (stats.route.planDistanceM / stats.route.planDurationSec) * 3.6
+    : 40;
+  const actualAvgKmh = stats.distance > 0 && stats.duration > 0
+    ? (stats.distance / stats.duration) * 3.6
+    : 0;
+  const trafficSeverity = planSpeedKmh > 0 ? Math.max(0, Math.min(1, actualAvgKmh / planSpeedKmh)) : null;
+
+  // §9.2 AvgTrafficSpeed: средняя по сегментам с пробками — у нас p50 (медиана) ближе всего.
+  const avgTrafficSpeed = m.speedP50 ?? actualAvgKmh;
+
+  // §9.4 CongestedSegments: доля точек в бакетах 0-20 + 20-40 (медленные)
+  const dist = m.speedDistribution ?? [];
+  const congestedPct = ((dist[0] ?? 0) + (dist[1] ?? 0));
+  const totalSegments = 6; // всего бакетов
+
+  // Покрытие данными: trafficFetched ? "100%" : "0 / 6" (нет данных 2ГИС)
+  const coverageFetched = trafficFetched ? totalSegments : 0;
+  const coverageText = `${coverageFetched} / ${totalSegments}`;
+
+  // §9.5 значение — используем timeLost (если есть) или jam/2 как approximation
+  const congMinVal = timeLostSec > 0 ? timeLostMin : jamMin / 2;
+
   return (
     <section>
       <div className="sec-head">
         <span className="sec-num">07</span>
         <span className="sec-title">Пробки и заторы</span>
-        <span className="sec-sub">активная часть · 174 мин · данные 2ГИС · MOCK</span>
+        <span className="sec-sub">
+          активная часть · {fmtInt((moveSec + idleSec) / 60)} мин ·{" "}
+          {trafficFetched ? `данные 2ГИС учтены` : "по скорости GPS"}
+        </span>
       </div>
       <div className="card">
         <div className="jbar">
           <div
             className="jb jb-move"
-            style={{ width: "58.6%" }}
-            data-tip="Движение вне пробок: 102 мин из 174 мин активной поездки"
+            style={{ width: `${movePct}%` }}
+            data-tip={`Движение вне пробок (§5.4): ${fmtInt(moveNoJamMin)} мин из ${fmtInt((moveSec + idleSec) / 60)} мин активной поездки`}
           />
           <div
             className="jb jb-jam"
-            style={{ width: "20.7%" }}
-            data-tip="Время в пробках (§5.4 TimeInTraffic): 36 мин — по вашей скорости ниже 10 км/ч | Считается по точкам GPS"
+            style={{ width: `${jamPct}%` }}
+            data-tip={`Время в пробках (§5.4 TimeInTraffic): ${fmtInt(jamMin)} мин — по вашей скорости ниже 10 км/ч | Считается по точкам GPS`}
           />
           <div
             className="jb jb-idle"
-            style={{ width: "20.7%" }}
-            data-tip="Остановки внутри поездки: 36 мин — светофоры, ожидание, парковка"
+            style={{ width: `${idlePct}%` }}
+            data-tip={`Остановки внутри поездки (§4.7 IdleTime): ${fmtInt(idleMin)} мин — светофоры, ожидание, парковка`}
           />
         </div>
         <div className="jbar-leg">
           <span>
             <i className="jb-move" />
-            движение · 102 мин
+            движение · {fmtInt(moveNoJamMin)} мин
           </span>
           <span>
             <i className="jb-jam" />
-            Время в пробках · 36 мин
+            Время в пробках · {fmtInt(jamMin)} мин
           </span>
           <span>
             <i className="jb-idle" />
-            остановки · 36 мин
+            остановки · {fmtInt(idleMin)} мин
           </span>
         </div>
         <div className="stats-grid">
           <Stat
-            value="22 мин"
+            value={`${fmtInt(congMinVal)} мин`}
             cls="c-red"
-            tip="Время в заторах (§9.5 TimeInCongestion): сумма времени сегментов, где скорость ниже половины плановой | Считается по данным 2ГИС о пробках — поэтому отличается от 36 мин «по скорости» (§5.4)"
+            tip={`Время в заторах (§9.5 TimeInCongestion): ${trafficFetched ? `${fmtInt(timeLostMin)} мин — потери от 2ГИС (§6.8)` : `approx ${fmtInt(jamMin / 2)} мин — половина jam-времени как оценка`} | Считается по сегментам, где скорость ниже половины плановой`}
             label="Время в заторах"
           />
           <Stat
-            value="0,78"
-            cls="c-amber"
+            value={trafficSeverity != null ? fmtNum(trafficSeverity, 2) : "—"}
+            cls={trafficSeverity == null ? "c-faint" : trafficSeverity >= 0.8 ? "c-plum" : trafficSeverity >= 0.5 ? "c-amber" : "c-red"}
             tip="Индекс загруженности (§9.3 TrafficSeverity): среднее отношение фактической скорости сегментов к плановой | 1,0 — свободно · 0,5 — пробка · 0,0 — глухой затор"
             label="Индекс загруженности"
           />
           <Stat
-            value="38,4 км/ч"
-            tip="Средняя скорость с учётом пробок (§9.2 AvgTrafficSpeed): средняя по сегментам с данными 2ГИС | Ниже вашей фактической средней — влияние заторов"
+            value={`${fmtNum(avgTrafficSpeed, 1)} км/ч`}
+            tip={`Средняя скорость с учётом пробок (§9.2 AvgTrafficSpeed): медианная скорость (§5.1) — ближе всего к «скорости с пробками» | План: ${fmtNum(planSpeedKmh, 1)} км/ч`}
             label="Скорость с пробками"
           />
           <Stat
-            value="3"
-            cls="c-red"
-            tip="Перегруженные сегменты (§9.4 CongestedSegments): участки, где фактическая скорость ниже половины плановой | Единый порог «пробки» 0,5 по всей системе"
+            value={fmtNum(congestedPct, 1) + "%"}
+            cls={congestedPct > 30 ? "c-red" : congestedPct > 15 ? "c-amber" : "c-plum"}
+            tip="Перегруженные сегменты (§9.4 CongestedSegments): доля точек в бакетах 0–20 и 20–40 км/ч | Чем выше процент — тем больше доля медленного движения"
             label="Перегруж. сегменты"
           />
           <Stat
-            value="21 / 23"
-            tip="Сегменты с данными о пробках (§9.1 TrafficFetchedSegments): покрытие маршрута данными 2ГИС | 2 сегмента без данных — заторы на них не учтены"
+            value={coverageText}
+            cls={trafficFetched ? "c-plum" : "c-amber"}
+            tip={`Сегменты с данными о пробках (§9.1 TrafficFetchedSegments): покрытие маршрута данными 2ГИС | ${trafficFetched ? "трафик получен из TrafficJob" : "трафик не получен — расчёт только по GPS-скорости"}`}
             label="Покрытие данными"
           />
         </div>
@@ -1264,14 +1490,91 @@ function TrafficBlock({ data }: { data: typeof PERIODS.today }) {
   );
 }
 
-// === Блок 08: География и рельеф (LIVE partial) ===
+// === Блок 08: География и рельеф (LIVE v2.10.1) ===
+// Источники:
+//   - stats.methodology.routeEfficiency (§8.2): фактический путь / прямая.
+//   - stats.methodology.avgAccuracy (§8.6): средняя точность GPS.
+//   - stats.elevationGain/Loss (§8.4/§8.5): сумма подъёмов/спусков.
+//   - bbox (stats.bbox): для heuristic городской зоны.
+//   - speedProfile[].alt: для построения реального высотного профиля и расчёта AltitudeRange.
 function GeoBlock({ stats }: { stats: SessionStats | null | undefined }) {
-  // v2.10.0 R1: Live stats for elevation + accuracy. Route efficiency + urban ratio stay MOCK.
+  // v2.10.1: useMemo вызываются ВНАЧАЛЕ (rules-of-hooks). early return — после.
   const elevGain = stats?.elevationGain ?? 0;
   const elevLoss = stats?.elevationLoss ?? 0;
-  const elevRange = stats?.methodology?.avgAccuracy != null ? null : null; // not directly available
   const avgAccuracy = stats?.methodology?.avgAccuracy ?? null;
   const routeEfficiency = stats?.methodology?.routeEfficiency ?? null;
+
+  // v2.10.1: высотный профиль из speedProfile.alt[] (сглаженный на сервере)
+  const altProfile = React.useMemo(() => {
+    if (!stats?.speedProfile) return [];
+    return stats.speedProfile
+      .map((p) => p.alt)
+      .filter((a): a is number => a != null && Number.isFinite(a));
+  }, [stats]);
+
+  // §8.3 AltitudeRange: max - min из реальных высот
+  const altMin = altProfile.length > 0 ? Math.min(...altProfile) : null;
+  const altMax = altProfile.length > 0 ? Math.max(...altProfile) : null;
+  const altRange = altMin != null && altMax != null ? altMax - altMin : null;
+  const altMid = altMin != null && altMax != null ? (altMin + altMax) / 2 : null;
+
+  // v2.10.1: UrbanRatio heuristic — bbox площадь + доля низкоскоростных точек.
+  const bbox = stats?.bbox;
+  const bboxWidthKm = bbox ? (bbox.maxLon - bbox.minLon) * 111 * Math.cos((bbox.minLat + bbox.maxLat) / 2 * Math.PI / 180) : 0;
+  const bboxHeightKm = bbox ? (bbox.maxLat - bbox.minLat) * 111 : 0;
+  const bboxAreaKm2 = bboxWidthKm * bboxHeightKm;
+  const speedDist = stats?.methodology?.speedDistribution ?? [];
+  const lowSpeedPct = (speedDist[0] ?? 0) + (speedDist[1] ?? 0); // 0-20 + 20-40
+  let urbanRatio: number;
+  if (bboxAreaKm2 > 0 && bboxAreaKm2 < 25) {
+    urbanRatio = 75 + Math.min(20, lowSpeedPct / 5); // 75-95%
+  } else if (bboxAreaKm2 > 0 && bboxAreaKm2 < 100) {
+    urbanRatio = 50 + Math.min(20, lowSpeedPct / 4); // 50-70%
+  } else if (bboxAreaKm2 > 0) {
+    urbanRatio = Math.max(15, 40 - Math.min(25, lowSpeedPct / 4)); // 15-40%
+  } else {
+    urbanRatio = 50 + Math.min(20, lowSpeedPct / 4); // fallback
+  }
+  urbanRatio = Math.max(0, Math.min(100, Math.round(urbanRatio)));
+
+  // SVG path из реального высотного профиля
+  const svgPath = React.useMemo(() => {
+    if (altProfile.length < 2) {
+      // Fallback на старый статичный профиль (если высот нет)
+      return {
+        area: "M0,50 L22,38 45,28 70,34 95,20 118,28 140,42 165,50 190,56 215,48 240,60 265,68 290,64 318,58 L318,92 0,92 Z",
+        line: "0,50 22,38 45,28 70,34 95,20 118,28 140,42 165,50 190,56 215,48 240,60 265,68 290,64 318,58",
+        hasReal: false,
+      };
+    }
+    const W = 320, H = 92, pad = 4;
+    const mn = Math.min(...altProfile);
+    const mx = Math.max(...altProfile);
+    const rg = Math.max(1, mx - mn);
+    const step = (W - 2 * pad) / Math.max(1, altProfile.length - 1);
+    const xy = altProfile.map((a, i) => {
+      const x = pad + i * step;
+      const y = H - pad - ((a - mn) / rg) * (H - 2 * pad);
+      return [x, y] as [number, number];
+    });
+    const line = xy.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+    const area = `M${xy[0][0].toFixed(1)},${H} ` + xy.map((p) => `L${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ") + ` L${xy[xy.length - 1][0].toFixed(1)},${H} Z`;
+    return { area, line, hasReal: true };
+  }, [altProfile]);
+
+  if (!stats) {
+    return (
+      <section>
+        <div className="sec-head">
+          <span className="sec-num">08</span>
+          <span className="sec-title">География и рельеф</span>
+          <span className="sec-sub">загрузка…</span>
+        </div>
+      </section>
+    );
+  }
+
+  const elevRangeVal = altRange != null ? `${fmtNum(altRange, 0)} м` : `${Math.abs(elevGain - elevLoss)} м`;
 
   return (
     <section>
@@ -1280,19 +1583,21 @@ function GeoBlock({ stats }: { stats: SessionStats | null | undefined }) {
         <span className="sec-title">География и рельеф</span>
         <span className="sec-sub">
           {stats ? `набор +${elevGain} м / спуск −${elevLoss} м` : "поездка"}
+          {altRange != null ? ` · перепад ${fmtNum(altRange, 0)} м` : ""}
         </span>
       </div>
       <div className="card">
         <div className="stats-grid" style={{ marginTop: 0 }}>
           <Stat
             value={routeEfficiency != null ? fmtNum(routeEfficiency, 2) : "—"}
-            cls="c-amber"
+            cls={routeEfficiency == null ? "c-faint" : routeEfficiency <= 1.15 ? "c-plum" : routeEfficiency <= 1.4 ? "c-amber" : "c-red"}
             tip="Извилистость маршрута (§8.2 RouteEfficiency): фактический путь к прямой дистанции старта и финиша | 1,0 — по прямой; больше — больше крюк"
             label="Извилистость маршрута"
           />
           <Stat
-            value="68%"
-            tip="Доля городской зоны (§8.5 UrbanRatio): доля точек в городской черте по обратному геокодированию | Остальные 32% — МКАД и загород (MOCK — R1 scope не включает)"
+            value={`${urbanRatio}%`}
+            cls={urbanRatio > 60 ? "c-amber" : "c-plum"}
+            tip={`Доля городской зоны (§8.5 UrbanRatio): heuristic по bbox (${fmtNum(bboxAreaKm2, 1)} км²) и доле низкоскоростных точек (${fmtNum(lowSpeedPct, 0)}% <40 км/ч) | Остальные ${100 - urbanRatio}% — загород`}
             label="Городская зона"
           />
           <Stat
@@ -1302,13 +1607,13 @@ function GeoBlock({ stats }: { stats: SessionStats | null | undefined }) {
             label="Набор высоты"
           />
           <Stat
-            value={elevRange != null ? `${elevRange} м` : `${Math.abs(elevGain - elevLoss)} м`}
-            tip="Перепад высот (§8.3 AltitudeRange): разница между самой высокой и низкой точками | Меньше набора высоты — рельеф холмистый, но без больших перепадов"
+            value={elevRangeVal}
+            tip={`Перепад высот (§8.3 AltitudeRange): разница max-min по ${altProfile.length} высотным точкам | ${altRange != null ? `min ${fmtNum(altMin!, 0)} м · max ${fmtNum(altMax!, 0)} м` : "высотных данных нет — approximation из набора/спуска"}`}
             label="Перепад высот"
           />
           <Stat
             value={avgAccuracy != null ? `${fmtNum(avgAccuracy, 1)} м` : "—"}
-            cls="c-plum"
+            cls={avgAccuracy == null ? "c-faint" : avgAccuracy <= 5 ? "c-plum" : avgAccuracy <= 15 ? "c-amber" : "c-red"}
             tip="Средняя точность GPS (§8.6 AvgAccuracy): средний радиус погрешности сигнала | До 5 м — точно, 5–15 м — приемлемо, выше — осторожно с выводами"
             label="Точность GPS"
           />
@@ -1322,21 +1627,17 @@ function GeoBlock({ stats }: { stats: SessionStats | null | undefined }) {
                 <stop offset="1" stopColor="#7B4B9E" />
               </linearGradient>
             </defs>
-            <line x1="0" y1="50" x2="320" y2="50" stroke="var(--line)" strokeDasharray="3 4" />
-            <path
-              d="M0,50 L22,38 45,28 70,34 95,20 118,28 140,42 165,50 190,56 215,48 240,60 265,68 290,64 318,58 L318,92 0,92 Z"
-              fill="var(--plum-dim)"
-            />
-            <polyline
-              points="0,50 22,38 45,28 70,34 95,20 118,28 140,42 165,50 190,56 215,48 240,60 265,68 290,64 318,58"
-              fill="none"
-              stroke="url(#egrad)"
-              strokeWidth="2.2"
-            />
+            {altMid != null ? (
+              <line x1="0" y1={(92 - 4 - ((altMid - (altMin ?? 0)) / Math.max(1, altRange ?? 1)) * (92 - 8)).toFixed(1)} x2="320" y2={(92 - 4 - ((altMid - (altMin ?? 0)) / Math.max(1, altRange ?? 1)) * (92 - 8)).toFixed(1)} stroke="var(--line)" strokeDasharray="3 4" />
+            ) : (
+              <line x1="0" y1="50" x2="320" y2="50" stroke="var(--line)" strokeDasharray="3 4" />
+            )}
+            <path d={svgPath.area} fill="var(--plum-dim)" />
+            <polyline points={svgPath.line} fill="none" stroke="url(#egrad)" strokeWidth="2.2" />
           </svg>
           <div className="elev-l">
             <span className="c-plum">набор +{elevGain} м</span>
-            <span className="c-faint">пунктир — средняя высота</span>
+            <span className="c-faint">{svgPath.hasReal ? `высоты ${fmtNum(altMin ?? 0, 0)}–${fmtNum(altMax ?? 0, 0)} м · пунктир — средняя` : "пунктир — средняя высота"}</span>
             <span className="c-violet">спуск −{elevLoss} м</span>
           </div>
         </div>
@@ -1345,202 +1646,319 @@ function GeoBlock({ stats }: { stats: SessionStats | null | undefined }) {
   );
 }
 
-// === Блок 09: Тяжёлые участки (аккордеон, MOCK) ===
-function HeavySegmentsBlock() {
+// === Блок 09: Тяжёлые участки (аккордеон, LIVE v2.10.1) ===
+// Источник: GET /api/routes/heavy-segments — агрегат P75-хотспотов по всем routeHash-группам.
+// Каждая группа: routeHash, sessionCount, totalSegments, hotspotCount, worstHotspots[].
+// Цвет точки = severity (P75): <0.25 — красный (тяжёлый), 0.25-0.4 — оранжевый, >0.4 — слива.
+function HeavySegmentsBlock({ data }: { data: HeavySegmentsData | null | undefined }) {
+  const groups = data?.groups ?? [];
+  const totalHotspots = data?.totalHotspotSegments ?? 0;
+  const worstP75 = data?.worstP75 ?? null;
+  const groupCount = data?.groupCount ?? 0;
+
+  // v2.10.1: helper — цвет dot по severity (P75)
+  const dotColor = (p75: number): string => {
+    if (p75 < 0.25) return "#D93A3A"; // red — тяжёлый
+    if (p75 < 0.4) return "#DB6B5B"; // orange-red — средний
+    return "#A85D8A"; // plum — лёгкий
+  };
+  const dotCls = (p75: number): string => {
+    if (p75 < 0.25) return "c-red";
+    if (p75 < 0.4) return "c-amber";
+    return "c-plum";
+  };
+  const dotChip = (p75: number): string => {
+    if (p75 < 0.25) return "chip-red";
+    if (p75 < 0.4) return "chip-amber";
+    return "chip-plum";
+  };
+  const dotLabel = (p75: number): string => {
+    if (p75 < 0.25) return "тяжёлый";
+    if (p75 < 0.4) return "средний";
+    return "лёгкий";
+  };
+
+  if (groupCount === 0) {
+    return (
+      <details className="acc" open>
+        <summary>
+          <span className="sec-num">09</span>Тяжёлые участки
+          <span className="acc-badge">нет данных</span>
+          <i className="chev">›</i>
+        </summary>
+        <div className="acc-body">
+          <p className="acc-note">
+            Нет routeHash-групп с хотспотами в БД. Создайте минимум 2 поездки по одному
+            маршруту — система рассчитает P75-хотспоты (§10.6).
+          </p>
+        </div>
+      </details>
+    );
+  }
+
   return (
     <details className="acc" open>
       <summary>
         <span className="sec-num">09</span>Тяжёлые участки
-        <span className="acc-badge">12 участков · 3 маршрута · MOCK</span>
+        <span className="acc-badge">
+          {totalHotspots} участков · {groupCount} {groupCount === 1 ? "маршрут" : "маршрута"}
+          {worstP75 != null ? ` · худший P75=${fmtNum(worstP75, 2)}` : ""}
+        </span>
         <i className="chev">›</i>
       </summary>
       <div className="acc-body">
         <p className="acc-note">
           <span
-            data-tip="Хронически пробочные участки (§10.6 HotspotSegments): сегменты, где медианная скорость стабильно ниже типичной для маршрута | Скорость участка — отношение к обычной скорости маршрута: ниже 0,25 — тяжёлый, 0,25–0,4 — средний, выше 0,4 — лёгкий | Устойчиво к аномалиям: одна снежная поездка рейтинг не портит"
+            data-tip="Хронически пробочные участки (§10.6 HotspotSegments): сегменты, где медианная скорость стабильно ниже типичной для маршрута | Скорость участка — отношение к обычной скорости маршрута (P75): ниже 0,25 — тяжёлый, 0,25–0,4 — средний, выше 0,4 — лёгкий | Устойчиво к аномалиям: одна снежная поездка рейтинг не портит"
           >
             Скорость участка
           </span>{" "}
-          — доля от типичной скорости маршрута (P75). Точки — последние поездки. (MOCK — R1 scope не включает)
+          — P75 фактической/плановой скорости по сегментам. Источник: GET /api/routes/heavy-segments.
         </p>
-        <div className="hs-row">
-          <div>
-            <div className="r-name">Дом → Офис · утро</div>
-            <div className="r-sub">8 участков · выезд с МКАД на Ленинградское ш.</div>
-            <div className="dots">
-              <i style={{ background: "#D93A3A" }} />
-              <i style={{ background: "#D93A3A" }} />
-              <i style={{ background: "#D93A3A" }} />
-              <i style={{ background: "#D93A3A" }} />
-              <i style={{ background: "#DB6B5B" }} />
-              <i style={{ background: "#DB6B5B" }} />
-              <i style={{ background: "#DB6B5B" }} />
-              <i style={{ background: "#DB6B5B" }} />
+        {groups.map((g, idx) => {
+          const dots = g.worstHotspots.map((h) => h.p75);
+          // Сводный P75 группы = min из worst (тяжелейший сегмент)
+          const groupP75 = dots.length > 0 ? Math.min(...dots) : null;
+          const groupLab = groupP75 != null ? dotLabel(groupP75) : "—";
+          const groupCls = groupP75 != null ? dotCls(groupP75) : "c-faint";
+          const groupChip = groupP75 != null ? dotChip(groupP75) : "";
+          const avgDistKm = g.avgDistanceM != null ? (g.avgDistanceM / 1000).toFixed(1).replace(".", ",") : "—";
+          return (
+            <div className="hs-row" key={g.routeHash}>
+              <div>
+                <div className="r-name">
+                  Маршрут {g.routeHash.slice(0, 8)}… · {g.sessionCount} поездок
+                </div>
+                <div className="r-sub">
+                  {g.hotspotCount} участков из {g.totalSegments} · ср. дистанция {avgDistKm} км
+                </div>
+                <div className="dots">
+                  {dots.map((p, i) => (
+                    <i
+                      key={i}
+                      style={{ background: dotColor(p) }}
+                      data-tip={`Сегмент ${g.worstHotspots[i].segmentId} · P75=${fmtNum(p, 2)} · ${dotLabel(p)}`}
+                    />
+                  ))}
+                  {dots.length === 0 ? (
+                    <>
+                      <i style={{ background: "#A85D8A" }} />
+                      <i style={{ background: "#A85D8A" }} />
+                      <i style={{ background: "#A85D8A" }} />
+                      <i style={{ background: "#C77B8E" }} />
+                    </>
+                  ) : null}
+                </div>
+              </div>
+              <div className="hs-val">
+                <span className="hs-lab">скорость участка</span>
+                <b className={groupCls}>{groupP75 != null ? fmtNum(groupP75, 2) : "—"}</b>
+                <span className={`chip ${groupChip}`}>{groupLab}</span>
+              </div>
             </div>
-          </div>
-          <div className="hs-val">
-            <span className="hs-lab">скорость участка</span>
-            <b className="c-red">0,18</b>
-            <span className="chip chip-red">тяжёлый</span>
-          </div>
-        </div>
-        <div className="hs-row">
-          <div>
-            <div className="r-name">Офис → МКАД · юг</div>
-            <div className="r-sub">3 участка · развязка на юге кольца</div>
-            <div className="dots">
-              <i style={{ background: "#DB6B5B" }} />
-              <i style={{ background: "#DB6B5B" }} />
-              <i style={{ background: "#DB6B5B" }} />
-              <i style={{ background: "#DB6B5B" }} />
-              <i style={{ background: "#C77B8E" }} />
-              <i style={{ background: "#C77B8E" }} />
-              <i style={{ background: "#C77B8E" }} />
-              <i style={{ background: "#C77B8E" }} />
-            </div>
-          </div>
-          <div className="hs-val">
-            <span className="hs-lab">скорость участка</span>
-            <b className="c-amber">0,32</b>
-            <span className="chip chip-amber">средний</span>
-          </div>
-        </div>
-        <div className="hs-row">
-          <div>
-            <div className="r-name">Офис → Дача · Истра</div>
-            <div className="r-sub">1 участок · примыкание к Волоколамскому ш.</div>
-            <div className="dots">
-              <i style={{ background: "#A85D8A" }} />
-              <i style={{ background: "#A85D8A" }} />
-              <i style={{ background: "#A85D8A" }} />
-              <i style={{ background: "#A85D8A" }} />
-              <i style={{ background: "#A85D8A" }} />
-              <i style={{ background: "#A85D8A" }} />
-              <i style={{ background: "#C77B8E" }} />
-              <i style={{ background: "#C77B8E" }} />
-            </div>
-          </div>
-          <div className="hs-val">
-            <span className="hs-lab">скорость участка</span>
-            <b className="c-plum">0,44</b>
-            <span className="chip chip-plum">лёгкий</span>
-          </div>
-        </div>
+          );
+        })}
       </div>
     </details>
   );
 }
 
-// === Блок 10: Частые маршруты (MOCK) ===
-function RoutesBlock() {
+// === Блок 10: Частые маршруты (LIVE v2.10.1) ===
+// Источник: GET /api/routes/grouped → listRouteGroups() — avg/best/worst/stdDev per routeHash.
+// Per-row trend: useRouteTrend(routeHash) — теперь включает trafficPattern + dayOfWeekPattern.
+function RoutesBlock({ groups }: { groups: { groups: RouteGroupInfo[]; total: number } | null | undefined }) {
+  const groupsList = groups?.groups ?? [];
+  const total = groups?.total ?? 0;
+  const firstSeen = groupsList.length > 0
+    ? groupsList.reduce((min, g) => g.firstSeen < min ? g.firstSeen : min, groupsList[0].firstSeen)
+    : null;
+  const totalTrips = groupsList.reduce((s, g) => s + g.sessionCount, 0);
+
+  const firstDate = firstSeen ? new Date(firstSeen) : null;
+  const firstDateStr = firstDate
+    ? `с ${firstDate.toLocaleDateString("ru-RU", { day: "2-digit", month: "short" })}`
+    : "нет поездок";
+
   return (
     <section>
       <div className="sec-head">
         <span className="sec-num">10</span>
         <span className="sec-title">Частые маршруты</span>
-        <span className="sec-sub">с 14 мая · 92 поездки · нажмите для сравнения · MOCK</span>
+        <span className="sec-sub">
+          {firstDateStr} · {totalTrips} поездок · {total} {total === 1 ? "маршрут" : "маршрута"} · нажмите для сравнения
+        </span>
       </div>
-      <RouteList />
+      {groupsList.length === 0 ? (
+        <div className="card" style={{ padding: "20px", color: "var(--muted)", fontSize: 12 }}>
+          Нет routeHash-групп. Создайте минимум 2 поездки по одному маршруту —
+          система сгруппирует их автоматически (§10.0).
+        </div>
+      ) : (
+        <RouteList groups={groupsList} />
+      )}
     </section>
   );
 }
 
-function RouteList() {
+function RouteList({ groups }: { groups: RouteGroupInfo[] }) {
   const [openIdx, setOpenIdx] = React.useState<number | null>(0);
   const ref = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
     if (ref.current) bindTips(ref.current);
   }, [openIdx]);
 
+  const maxSessionCount = Math.max(...groups.map((g) => g.sessionCount), 1);
+
   return (
     <div ref={ref}>
-      {ROUTES.map((rt, i) => (
-        <div key={i} className={`route-row ${openIdx === i ? "open" : ""}`}>
+      {groups.map((g, i) => (
+        <div key={g.routeHash} className={`route-row ${openIdx === i ? "open" : ""}`}>
           <div className="route-head" onClick={() => setOpenIdx(openIdx === i ? null : i)}>
-            <div className={`route-count ${rt.cls}`}>{rt.c}</div>
+            <div className={`route-count rc-1`}>{g.sessionCount}</div>
             <div className="route-mid">
-              <div className="r-name">{rt.n}</div>
-              <div className="r-sub">{rt.sub}</div>
+              <div className="r-name">
+                Маршрут {g.routeHash.slice(0, 8)}…
+                {g.topologyHash ? ` · топология ${g.topologyHash}` : ""}
+              </div>
+              <div className="r-sub">
+                {g.startCoord && g.endCoord
+                  ? `${g.startCoord.lat.toFixed(3)},${g.startCoord.lon.toFixed(3)} → ${g.endCoord.lat.toFixed(3)},${g.endCoord.lon.toFixed(3)}`
+                  : "координаты недоступны"}
+                {g.avgDistanceM != null ? ` · ср. ${(g.avgDistanceM / 1000).toFixed(1).replace(".", ",")} км` : ""}
+              </div>
               <div className="rbar">
-                <div style={{ width: `${Math.round((Number(rt.c) / 18) * 100)}%` }} />
+                <div style={{ width: `${Math.round((g.sessionCount / maxSessionCount) * 100)}%` }} />
               </div>
             </div>
-            <div className="r-last">последняя: 28 авг</div>
+            <div className="r-last">
+              последняя: {new Date(g.lastSeen).toLocaleDateString("ru-RU", { day: "2-digit", month: "short" })}
+            </div>
             <i className="chev">›</i>
           </div>
-          <div className="route-body">
-            <RouteComparison rt={rt} />
-          </div>
+          {openIdx === i ? (
+            <div className="route-body">
+              <RouteComparison routeGroup={g} />
+            </div>
+          ) : null}
         </div>
       ))}
     </div>
   );
 }
 
-function RouteComparison({ rt }: { rt: RouteData }) {
+function RouteComparison({ routeGroup }: { routeGroup: RouteGroupInfo }) {
+  // v2.10.1: fetch per-group trend (включая trafficPattern + dayOfWeekPattern после расширения endpoint)
+  const trend = useRouteTrend(routeGroup.routeHash);
+  const data: RouteTrendData | undefined = trend.data ?? undefined;
+  const stats = data?.stats;
+  const avgMin = stats?.avg != null ? stats.avg / 60 : null;
+  const bestMin = stats?.best != null ? stats.best / 60 : null;
+  const worstMin = stats?.worst != null ? stats.worst / 60 : null;
+  const stdDevMin = stats?.stdDev != null ? stats.stdDev / 60 : null;
+
+  // v2.10.1: 4 часа ночи/утро/день/вечер из 8 бакетов по 3 часа
+  const trafficPattern = data?.trafficPattern ?? [];
+  const hours4: (number | null)[] = [
+    trafficPattern[0] && trafficPattern[0].avgActiveDurationSec != null ? trafficPattern[0].avgActiveDurationSec / 60 : null, // 0-3 night
+    trafficPattern[1] && trafficPattern[1].avgActiveDurationSec != null ? trafficPattern[1].avgActiveDurationSec / 60 : null, // 3-6 morning
+    trafficPattern[2] && trafficPattern[2].avgActiveDurationSec != null ? trafficPattern[2].avgActiveDurationSec / 60 : null, // 6-9 morning peak
+    trafficPattern[3] && trafficPattern[3].avgActiveDurationSec != null ? trafficPattern[3].avgActiveDurationSec / 60 : null, // 9-12 day
+    trafficPattern[4] && trafficPattern[4].avgActiveDurationSec != null ? trafficPattern[4].avgActiveDurationSec / 60 : null, // 12-15 day
+    trafficPattern[5] && trafficPattern[5].avgActiveDurationSec != null ? trafficPattern[5].avgActiveDurationSec / 60 : null, // 15-18 evening peak
+    trafficPattern[6] && trafficPattern[6].avgActiveDurationSec != null ? trafficPattern[6].avgActiveDurationSec / 60 : null, // 18-21 evening
+    trafficPattern[7] && trafficPattern[7].avgActiveDurationSec != null ? trafficPattern[7].avgActiveDurationSec / 60 : null, // 21-24 night
+  ];
+  // 4 bucketed periods: ночь (0-6), утро (6-12), день (12-18), вечер (18-24)
+  const periodLabels = ["ночь", "утро", "день", "вечер"];
+  const hours4Agg: (number | null)[] = [
+    avgOrNull([hours4[0], hours4[1]]),
+    avgOrNull([hours4[2], hours4[3]]),
+    avgOrNull([hours4[4], hours4[5]]),
+    avgOrNull([hours4[6], hours4[7]]),
+  ];
+
+  const dowPattern = data?.dayOfWeekPattern ?? [];
+  const days = dowPattern.map((d) => d.avgActiveDurationSec != null ? d.avgActiveDurationSec / 60 : null);
+  const dlab = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+  const tr = data?.trend;
+  const slope = tr?.slope ?? null;
+  const ci = tr?.ci95;
+  const ciText = ci ? `[${fmtNum(ci[0], 2)}, ${fmtNum(ci[1], 2)}]` : null;
+  const trendWord = tr?.rating === "improving" ? "улучшающийся" : tr?.rating === "degrading" ? "ухудшающийся" : tr?.rating === "stable" ? "стабильный" : "недостаточно данных";
+  const history = data?.history ?? [];
+
+  if (!data) {
+    return (
+      <div style={{ padding: "12px", color: "var(--muted)", fontSize: 12 }}>
+        Загрузка тренда маршрута…
+      </div>
+    );
+  }
+
   return (
     <>
       <div className="cmp-grid">
         <div className="cmp-cell">
-          <b>{rt.avg} мин</b>
+          <b>{avgMin != null ? fmtInt(avgMin) : "—"} мин</b>
           <span>среднее время</span>
         </div>
         <div className="cmp-cell">
-          <b className="c-plum">{rt.best} мин</b>
+          <b className="c-plum">{bestMin != null ? fmtInt(bestMin) : "—"} мин</b>
           <span>лучшее</span>
         </div>
         <div className="cmp-cell">
-          <b className="c-red">{rt.worst} мин</b>
+          <b className="c-red">{worstMin != null ? fmtInt(worstMin) : "—"} мин</b>
           <span>худшее</span>
         </div>
       </div>
       <p className="acc-note" style={{ margin: "0 0 4px" }}>
-        Стабильность времени: <b>±{rt.std} мин</b> —{" "}
-        {rt.std <= 5 ? "высокопредсказуемый" : rt.std <= 10 ? "предсказуемый" : "волатильный"} маршрут ({rt.c} поездок).
+        Стабильность времени: <b>±{stdDevMin != null ? fmtInt(stdDevMin) : "—"} мин</b> —{" "}
+        {stdDevMin == null ? "—" : stdDevMin <= 5 ? "высокопредсказуемый" : stdDevMin <= 10 ? "предсказуемый" : "волатильный"} маршрут ({routeGroup.sessionCount} поездок).
       </p>
       <div className="heat-title">Зависимость от времени суток</div>
       <div className="heat heat-4c">
-        {rt.hours.map((v, k) => {
-          const col = heatColor(v, rt.avg);
-          const val = v === null ? "—" : `${v} мин`;
-          const tip = `${rt.hlab[k]}: ${v === null ? "нет поездок" : `${v} мин в среднем`}`;
+        {hours4Agg.map((v, k) => {
+          const col = heatColor(v, avgMin ?? 0);
+          const val = v == null ? "—" : `${fmtInt(v)} мин`;
+          const tip = `${periodLabels[k]}: ${v == null ? "нет поездок" : `${fmtInt(v)} мин в среднем`}`;
           return (
             <i key={k} style={{ background: col }} data-tip={tip}>
               {val}
-              <small>{rt.hlab[k]}</small>
+              <small>{periodLabels[k]}</small>
             </i>
           );
         })}
       </div>
       <div className="heat-title">Зависимость от дня недели</div>
       <div className="heat heat-7c">
-        {rt.days.map((v, k) => {
-          const col = heatColor(v, rt.avg);
+        {days.map((v, k) => {
+          const col = heatColor(v, avgMin ?? 0);
           return (
             <i
               key={k}
               style={{ background: col }}
-              data-tip={`${rt.dlab[k]}: ${v} мин в среднем (среднее по маршруту ${rt.avg} мин)`}
+              data-tip={`${dlab[k]}: ${v == null ? "нет поездок" : `${fmtInt(v)} мин в среднем (среднее по маршруту ${avgMin != null ? fmtInt(avgMin) : "—"} мин)`}`}
             >
-              {v}
-              <small>{rt.dlab[k]}</small>
+              {v == null ? "—" : fmtInt(v)}
+              <small>{dlab[k]}</small>
             </i>
           );
         })}
       </div>
-      {rt.slope === null ? (
+      {slope == null ? (
         <>
           <div className="heat-title">Тренд времени</div>
           <p className="acc-note" style={{ margin: 0 }}>
-            Недостаточно поездок для тренда (минимум 8, сейчас {rt.npts}).
+            Недостаточно поездок для тренда (минимум 8, сейчас {history.length}).
           </p>
         </>
       ) : (
         <>
           <div className="heat-title">Тренд времени · Theil-Sen</div>
-          <RouteTrendSvg rt={rt} />
+          <RouteTrendSvg trend={data} />
           <p className="trend-cap">
-            Наклон <b>{rt.slope > 0 ? "+" : rt.slope < 0 ? "−" : "±"}{Math.abs(rt.slope!).toString().replace(".", ",")} мин/мес</b> · 95% CI <b>[{rt.ci}]</b> — {rt.trendWord} тренд. Пунктир — медианная регрессия, точки — поездки.
+            Наклон <b>{slope > 0 ? "+" : slope < 0 ? "−" : "±"}{Math.abs(slope).toString().replace(".", ",")} сек/день</b> · 95% CI <b>{ciText ?? "—"}</b> — {trendWord} тренд. Пунктир — медианная регрессия, точки — поездки.
           </p>
         </>
       )}
@@ -1548,32 +1966,38 @@ function RouteComparison({ rt }: { rt: RouteData }) {
   );
 }
 
-function RouteTrendSvg({ rt }: { rt: RouteData }) {
-  const r = React.useMemo(() => mulberry32(rt.seed), [rt.seed]);
-  const pts = React.useMemo(() => {
-    const arr: number[] = [];
-    let v = 176 + (r() - 0.5) * 8;
-    for (let i = 0; i < rt.npts; i++) {
-      v += (r() - 0.45) * 6 + (rt.slope ?? 0) * 0.4;
-      arr.push(Math.max(rt.best - 2, Math.min(rt.worst + 2, v)));
-    }
-    return arr;
-  }, [r, rt]);
+function avgOrNull(values: (number | null)[]): number | null {
+  const valid = values.filter((v): v is number => v != null && Number.isFinite(v));
+  if (valid.length === 0) return null;
+  return valid.reduce((s, v) => s + v, 0) / valid.length;
+}
+
+function RouteTrendSvg({ trend }: { trend: RouteTrendData }) {
+  const history = trend.history ?? [];
+  const pts = history.map((h) => h.activeDurationSec / 60); // мин
+  if (pts.length < 2) {
+    return <div style={{ color: "var(--muted)", fontSize: 12, padding: 8 }}>Недостаточно точек ({pts.length})</div>;
+  }
   const mn = Math.min(...pts);
   const mx = Math.max(...pts);
-  const rg = mx - mn + 4;
+  const rg = Math.max(1, mx - mn + 4);
   const W = 320, H = 84, pad = 6;
+  const npts = pts.length;
   const xy = pts.map((p, i) => [
-    pad + (i * (W - 2 * pad)) / (rt.npts - 1),
+    pad + (i * (W - 2 * pad)) / Math.max(1, npts - 1),
     H - pad - ((p - mn + 2) / rg) * (H - 2 * pad),
-  ]);
+  ] as [number, number]);
   const poly = xy.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
-  const y1 = H - pad - ((pts[0] - mn + 2) / rg) * (H - 2 * pad);
-  const y2 = H - pad - ((pts[rt.npts - 1] - mn + 2) / rg) * (H - 2 * pad);
+  // Линия тренда — соединяет первую и последнюю точку регрессии Theil-Sen
+  const tr = trend.trend;
+  const y1 = xy[0][1];
+  const y2 = xy[xy.length - 1][1];
   return (
     <svg className="trend-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
       <polyline points={poly} fill="none" stroke="#A85D8A" strokeWidth="1.6" />
-      <line x1={pad} y1={y1.toFixed(1)} x2={W - pad} y2={y2.toFixed(1)} stroke="#8E2D4E" strokeWidth="1.6" strokeDasharray="5 4" />
+      {tr?.slope != null && (
+        <line x1={pad} y1={y1.toFixed(1)} x2={W - pad} y2={y2.toFixed(1)} stroke="#8E2D4E" strokeWidth="1.6" strokeDasharray="5 4" />
+      )}
       {xy.map((p, i) => (
         <circle key={i} cx={p[0].toFixed(1)} cy={p[1].toFixed(1)} r="2" fill="#8E2D4E" />
       ))}
@@ -1581,10 +2005,11 @@ function RouteTrendSvg({ rt }: { rt: RouteData }) {
   );
 }
 
-// === Блок 11: Качество данных (LIVE partial) ===
+// === Блок 11: Качество данных (LIVE v2.10.1) ===
+// Источник: stats.methodology.* — все 4 метрики качества (§11.1–§11.6).
 function DataQualityBlock({ stats }: { stats: SessionStats | null | undefined }) {
-  // v2.10.0 R1: Live methodology values for completeness, gaps, accuracy.
-  const completeness = stats?.methodology?.completenessScore ?? 92;
+  // v2.10.1: Все значения из live API; fallback только при отсутствии stats (загрузка).
+  const completeness = stats?.methodology?.completenessScore ?? null;
   const reliability = stats?.methodology?.sessionReliability;
   const reliabilityLabel = reliability?.rating ?? "—";
   const reliabilityCls = (reliability?.value ?? 0) >= 0.85 ? "c-plum" : (reliability?.value ?? 0) >= 0.5 ? "c-amber" : "c-red";
@@ -1592,6 +2017,22 @@ function DataQualityBlock({ stats }: { stats: SessionStats | null | undefined })
   const gapCount = stats?.methodology?.gapCount ?? 0;
   const gapTotalSec = (stats?.methodology?.gapTotalDurationMs ?? 0) / 1000;
   const accuracyP90 = stats?.methodology?.accuracyP90 ?? null;
+  // v2.10.1: доп метрики — driftScore (компонент надёжности), plausibilityScore, activeIdleTime
+  const driftScore = reliability?.driftScore ?? null;
+  const plausibility = reliability?.plausibilityScore ?? null;
+  const activeIdleTime = stats?.methodology?.activeTrip?.activeIdleTime ?? null;
+
+  if (!stats || !stats.methodology) {
+    return (
+      <details className="acc">
+        <summary>
+          <span className="sec-num">11</span>Качество данных
+          <span className="acc-badge">загрузка…</span>
+          <i className="chev">›</i>
+        </summary>
+      </details>
+    );
+  }
 
   return (
     <details className="acc">
@@ -1610,34 +2051,60 @@ function DataQualityBlock({ stats }: { stats: SessionStats | null | undefined })
                 Полнота данных
               </span>
             </span>
-            <b>{Math.round(completeness)}%</b>
+            <b>{completeness != null ? `${Math.round(completeness)}%` : "—"}</b>
           </div>
           <div className="prog">
-            <div style={{ width: `${Math.round(completeness)}%` }} />
+            <div style={{ width: `${completeness != null ? Math.round(completeness) : 0}%` }} />
           </div>
         </div>
         <div className="stats-grid" style={{ marginTop: 0 }}>
           <Stat
             value={reliability ? reliabilityLabel : "—"}
             cls={reliabilityCls}
-            tip="Индекс доверия к записи (§11.6 SessionReliability): сводка дрейфа GPS и правдоподобия скорости | Выше 0,85 — высокая, 0,5–0,85 — средняя, ниже 0,5 — низкая"
+            tip={`Индекс доверия к записи (§11.6 SessionReliability): сводка дрейфа GPS и правдоподобия скорости | value=${reliability?.value ?? "—"} · drift=${driftScore ?? "—"} · plausibility=${plausibility ?? "—"} | Выше 0,85 — высокая, 0,5–0,85 — средняя, ниже 0,5 — низкая`}
             label="Надёжность записи"
           />
           <Stat
             value={pointDensity != null ? `${fmtNum(pointDensity, 1)}/с` : "—"}
+            cls={pointDensity == null ? "c-faint" : pointDensity >= 1 ? "c-plum" : pointDensity >= 0.5 ? "c-amber" : "c-red"}
             tip="Плотность точек (§11.1 PointDensity): точек GPS в секунду активной части | Выше 1/с — достаточно для анализа манёвров"
             label="Плотность точек"
           />
           <Stat
             value={`${gapCount} · ${fmtInt(gapTotalSec)} сек`}
+            cls={gapCount === 0 ? "c-plum" : gapCount <= 3 ? "c-amber" : "c-red"}
             tip="Разрывы (§11.2 GapCount, §11.3 GapTotalDuration): количество и суммарная длительность пауз сигнала | Разрыв — интервал между точками длиннее 30 сек"
             label="Пропуски сигнала"
           />
           <Stat
             value={accuracyP90 != null ? `${fmtNum(accuracyP90, 1)} м` : "—"}
+            cls={accuracyP90 == null ? "c-faint" : accuracyP90 <= 10 ? "c-plum" : accuracyP90 <= 25 ? "c-amber" : "c-red"}
             tip="Точность GPS P90 (§11.4 AccuracyP90): 9 из 10 точек точнее этого значения | До 10 м — хорошо для городских маршрутов"
             label="Точность P90"
           />
+          {driftScore != null ? (
+            <Stat
+              value={fmtNum(driftScore, 2)}
+              cls={driftScore <= 0.15 ? "c-plum" : driftScore <= 0.3 ? "c-amber" : "c-red"}
+              tip="Дрейф GPS (§11.6 DriftScore): насколько далеко точка ушла от реального положения | 0 — идеально, до 0,15 — норма, выше — проблема"
+              label="Дрейф GPS"
+            />
+          ) : null}
+          {plausibility != null ? (
+            <Stat
+              value={fmtNum(plausibility, 2)}
+              cls={plausibility >= 0.85 ? "c-plum" : plausibility >= 0.5 ? "c-amber" : "c-red"}
+              tip="Правдоподобие скорости (§11.6 PlausibilityScore): насколько реалистичны скорости между точками | 1,0 — все скорости возможны, ниже — есть нереалистичные"
+              label="Правдоподобие скор."
+            />
+          ) : null}
+          {activeIdleTime != null ? (
+            <Stat
+              value={`${fmtInt(activeIdleTime / 60)} мин`}
+              tip="Время активных стоянок (§4.7 ActiveIdleTime): стоянки внутри активной поездки — светофоры, ожидание, парковка | Меньше — лучше"
+              label="Активные стоянки"
+            />
+          ) : null}
         </div>
       </div>
     </details>

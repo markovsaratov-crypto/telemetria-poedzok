@@ -2,12 +2,20 @@
 // [id] = routeHash (16-hex) либо UUID админского маршрута (тогда группа = сессии по FK routeId).
 // Возвращает: slope (сек/день), intercept, CI 95% (bootstrap при n > ROUTE_TREND_BOOTSTRAP_THRESHOLD),
 // rating (improving/stable/degrading/insufficient_data), историю activeDuration по датам.
+// v2.10.1: добавлены trafficPattern (8x3ч, §10.3) + dayOfWeekPattern (7д, §10.4) — для блока 10
+// аналитики (Частые маршруты), чтобы один запрос давал все агрегаты группы.
 import { NextRequest } from "next/server";
 import { libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { loadGroupSessions, routeTrend, routeDurationStats } from "@/lib/route-comparison";
+import {
+  loadGroupSessions,
+  routeTrend,
+  routeDurationStats,
+  routeTrafficPattern,
+  routeDayOfWeekPattern,
+} from "@/lib/route-comparison";
 
 export async function GET(
   request: NextRequest,
@@ -41,6 +49,10 @@ export async function GET(
 
     const trend = routeTrend(sessions);
     const stats = routeDurationStats(sessions);
+    // v2.10.1: paterns нужны блоку 10 (Частые маршруты) — без них пришлось бы дёргать
+    // /api/sessions/[id]/route-comparison для каждой группы. Один запрос эффективнее.
+    const trafficPattern = routeTrafficPattern(sessions);
+    const dayOfWeekPattern = routeDayOfWeekPattern(sessions);
     const history = [...sessions]
       .sort((a, b) => a.activeStartTime - b.activeStartTime)
       .map((s) => ({
@@ -57,6 +69,8 @@ export async function GET(
         trend,
         stats,
         history,
+        trafficPattern, // §10.3 — 8 бакетов по 3 часа
+        dayOfWeekPattern, // §10.4 — Пн..Вс
       },
       200,
       { "X-Request-Id": requestId }

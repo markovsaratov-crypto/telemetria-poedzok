@@ -414,15 +414,15 @@ function PlanFactBehaviorBlock({
             <div key={i} className={cn(
               "p-3 rounded-xl border",
               item.type === "deviation" && item.value != null
-                ? Math.abs(item.value) > 15 ? "bg-[oklch(0.95_0.05_25)] dark:bg-[oklch(0.25_0.05_25)]"
-                : Math.abs(item.value) > 5 ? "bg-[oklch(0.95_0.05_85)] dark:bg-[oklch(0.25_0.05_85)]"
+                ? Math.abs(Number(item.value)) > 15 ? "bg-[oklch(0.95_0.05_25)] dark:bg-[oklch(0.25_0.05_25)]"
+                : Math.abs(Number(item.value)) > 5 ? "bg-[oklch(0.95_0.05_85)] dark:bg-[oklch(0.25_0.05_85)]"
                 : "bg-[oklch(0.95_0.05_145)] dark:bg-[oklch(0.25_0.05_145)]"
                 : "bg-card"
             )}>
               <div className="text-[11px] text-muted-foreground">{item.label}</div>
               <div className="text-lg font-bold tabular-nums">
                 {item.value != null
-                  ? `${item.value > 0 && item.type === "deviation" ? "+" : ""}${typeof item.value === "number" ? item.value.toFixed(item.type === "deviation" ? 0 : 2) : item.value}${item.unit}`
+                  ? `${Number(item.value) > 0 && item.type === "deviation" ? "+" : ""}${typeof item.value === "number" ? item.value.toFixed(item.type === "deviation" ? 0 : 2) : item.value}${item.unit}`
                   : "—"}
               </div>
             </div>
@@ -434,15 +434,15 @@ function PlanFactBehaviorBlock({
             <div key={i} className={cn(
               "p-3 rounded-xl border",
               item.type === "deviation" && item.value != null
-                ? Math.abs(item.value) > 15 ? "bg-[oklch(0.95_0.05_25)] dark:bg-[oklch(0.25_0.05_25)]"
-                : Math.abs(item.value) > 5 ? "bg-[oklch(0.95_0.05_85)] dark:bg-[oklch(0.25_0.05_85)]"
+                ? Math.abs(Number(item.value)) > 15 ? "bg-[oklch(0.95_0.05_25)] dark:bg-[oklch(0.25_0.05_25)]"
+                : Math.abs(Number(item.value)) > 5 ? "bg-[oklch(0.95_0.05_85)] dark:bg-[oklch(0.25_0.05_85)]"
                 : "bg-[oklch(0.95_0.05_145)] dark:bg-[oklch(0.25_0.05_145)]"
                 : "bg-card"
             )}>
               <div className="text-[11px] text-muted-foreground">{item.label}</div>
               <div className="text-lg font-bold tabular-nums truncate">
                 {item.value != null
-                  ? `${item.value > 0 && item.type === "deviation" ? "+" : ""}${typeof item.value === "number" ? item.value.toFixed(item.type === "deviation" ? 0 : 2) : item.value}${item.unit}`
+                  ? `${Number(item.value) > 0 && item.type === "deviation" ? "+" : ""}${typeof item.value === "number" ? item.value.toFixed(item.type === "deviation" ? 0 : 2) : item.value}${item.unit}`
                   : "—"}
               </div>
             </div>

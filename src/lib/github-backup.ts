@@ -34,7 +34,7 @@ export async function backupToGitHub(actorId?: string) {
   const release = await releaseRes.json() as any;
   
   const uploadUrl = release.upload_url.replace(/\{.*\}/, "");
-  const fileName = local.filePath.split("/").pop();
+  const fileName = local.filePath.split("/").pop() || "backup.json";
   const uploadRes = await fetch(`${uploadUrl}?name=${encodeURIComponent(fileName)}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${cfg.token}`, Accept: "application/vnd.github+json", "Content-Type": "application/json", "Content-Length": String(content.length) },

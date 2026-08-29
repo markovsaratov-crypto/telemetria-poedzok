@@ -13,7 +13,7 @@ export async function POST(request: NextRequest) {
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
     const result = await runBackup(auth.via === "cookie" ? "owner" : "admin-token");
-    return json({ backupId: result.backupId, status: "completed", checksum: result.checksum, fileSize: result.fileSize }, 201, { "X-Request-Id": requestId });
+    return json({ backupId: result.backupId, status: "completed", checksum: result.checksum, fileSize: result.fileSize, tableCounts: result.tableCounts }, 201, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Backup error", { requestId, error: err instanceof Error ? err.message : String(err) });
     return json({ error: "Backup failed", message: err instanceof Error ? err.message : String(err) }, 500, { "X-Request-Id": requestId });

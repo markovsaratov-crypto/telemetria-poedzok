@@ -469,6 +469,25 @@
 .dark .leaflet-control-attribution a { color: oklch(0.65 0.18 350) !important; }
 .dark .leaflet-control-zoom a { background: oklch(0.18 0.015 350) !important; color: oklch(0.97 0.005 350) !important; border-color: oklch(1 0 0 / 0.1) !important; }
 .dark .leaflet-control-zoom a:hover { background: oklch(0.24 0.02 350) !important; }
+/* стайлинг-раунд 9: зум-кнопки в свете — та же плашка, что у прочих оверлеев карты */
+.leaflet-control-zoom {
+  border: 1px solid oklch(0.9 0.01 350) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+  box-shadow: 0 1px 3px oklch(0 0 0 / 0.08) !important;
+}
+.leaflet-control-zoom a {
+  background: oklch(1 0 0 / 0.95) !important;
+  color: oklch(0.45 0.02 350) !important;
+  border-bottom: 1px solid oklch(0.92 0.01 350) !important;
+  width: 30px !important;
+  height: 30px !important;
+  line-height: 30px !important;
+  font-weight: 600;
+}
+.leaflet-control-zoom a:hover { background: oklch(0.97 0.01 350) !important; color: oklch(0.25 0.02 350) !important; }
+.dark .leaflet-control-zoom { border-color: oklch(1 0 0 / 0.1) !important; box-shadow: 0 1px 3px oklch(0 0 0 / 0.3) !important; }
+.dark .leaflet-control-zoom a { border-bottom-color: oklch(1 0 0 / 0.08) !important; }
 
 /* KBD */
 kbd {

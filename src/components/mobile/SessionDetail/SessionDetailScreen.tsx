@@ -12,7 +12,7 @@
 import * as React from "react";
 import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
-import { ArrowLeft, MoreVertical, Maximize2, X, Clock, MapPin, AlertTriangle, Gauge } from "lucide-react";
+import { ArrowLeft, MoreVertical, Maximize2, X, Clock, MapPin, AlertTriangle, Gauge, Route } from "lucide-react";
 import { useSession, useSessionStats } from "@/lib/hooks";
 import { MetricTile } from "../shared/MetricTile";
 import { SpeedProfileChart, type SpeedProfilePointView } from "@/components/speed-profile-chart";
@@ -68,6 +68,10 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
   const [mapClickIdx, setMapClickIdx] = React.useState<number | null>(null);
   const [mapFullscreen, setMapFullscreen] = React.useState(false);
   const mapWrapRef = React.useRef<HTMLDivElement>(null);
+  // v2.9.8: режим трека — обычный / тепловая карта скорости
+  const [trackMode, setTrackMode] = React.useState<"plain" | "speed">("plain");
+  const hasSpeedData = points.some((p: any) => p.speed != null && p.speed >= 0);
+  const speedTrack = trackMode === "speed" && hasSpeedData ? points : null;
 
   // точка фокуса на карте — закреплённая точка графика (или тап по карте)
   const focusSample = pinnedIdx != null && profile ? profile[pinnedIdx] : null;
@@ -138,10 +142,46 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
               focusPoint={focusPoint}
               panToFocus={pinnedIdx != null}
               onMapClick={profile && profile.length > 0 ? handleMapClick : undefined}
+              speedTrack={speedTrack}
             />
           ) : (
             <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
               Нет GPS данных
+            </div>
+          )}
+          {/* v2.9.8: компактный переключатель режима трека (иконки) */}
+          {points.length > 0 && hasSpeedData && (
+            <div
+              className="absolute top-2 left-1/2 -translate-x-1/2 z-[1001] flex rounded-lg bg-background/95 backdrop-blur-sm border shadow-sm p-0.5"
+              role="group"
+              aria-label="Режим трека"
+            >
+              <button
+                onClick={() => setTrackMode("plain")}
+                className={cn(
+                  "flex items-center justify-center w-9 h-9 rounded-md transition-colors min-w-[36px]",
+                  trackMode === "plain"
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground active:bg-accent"
+                )}
+                aria-label="Обычный трек"
+                title="Обычный трек"
+              >
+                <Route className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => setTrackMode("speed")}
+                className={cn(
+                  "flex items-center justify-center w-9 h-9 rounded-md transition-colors min-w-[36px]",
+                  trackMode === "speed"
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground active:bg-accent"
+                )}
+                aria-label="Тепловая карта скорости"
+                title="Тепловая карта скорости"
+              >
+                <Gauge className="h-4 w-4" />
+              </button>
             </div>
           )}
           {/* v2.9.5: полноэкранный режим карты */}
@@ -243,6 +283,10 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
           mapClickIdx={mapClickIdx}
           onPin={handlePin}
           onMapClick={handleMapClick}
+          speedTrack={speedTrack}
+          trackMode={trackMode}
+          onTrackModeChange={setTrackMode}
+          hasSpeedData={hasSpeedData}
         />
       )}
     </div>
@@ -258,6 +302,10 @@ function FullscreenMapScreen({
   mapClickIdx,
   onPin,
   onMapClick,
+  speedTrack,
+  trackMode,
+  onTrackModeChange,
+  hasSpeedData,
 }: {
   points: any[];
   stats: any;
@@ -266,6 +314,11 @@ function FullscreenMapScreen({
   mapClickIdx: number | null;
   onPin: (idx: number | null) => void;
   onMapClick: (lat: number, lon: number) => void;
+  // v2.9.8: тепловая карта скорости — общая с основным экраном
+  speedTrack: any[] | null;
+  trackMode: "plain" | "speed";
+  onTrackModeChange: (m: "plain" | "speed") => void;
+  hasSpeedData: boolean;
 }) {
   const profile = (stats?.speedProfile as SpeedProfilePointView[] | undefined) ?? undefined;
   const focusSample = pinnedIdx != null && profile ? profile[pinnedIdx] : null;
@@ -302,7 +355,43 @@ function FullscreenMapScreen({
           focusPoint={focusPoint}
           panToFocus={pinnedIdx != null}
           onMapClick={profile && profile.length > 0 ? onMapClick : undefined}
+          speedTrack={speedTrack}
         />
+        {/* v2.9.8: переключатель режима трека в полноэкранной карте */}
+        {hasSpeedData && (
+          <div
+            className="absolute top-2 left-1/2 -translate-x-1/2 z-[1001] flex rounded-lg bg-background/95 backdrop-blur-sm border shadow-sm p-0.5"
+            role="group"
+            aria-label="Режим трека"
+          >
+            <button
+              onClick={() => onTrackModeChange("plain")}
+              className={cn(
+                "flex items-center justify-center w-9 h-9 rounded-md transition-colors min-w-[36px]",
+                trackMode === "plain"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground active:bg-accent"
+              )}
+              aria-label="Обычный трек"
+              title="Обычный трек"
+            >
+              <Route className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => onTrackModeChange("speed")}
+              className={cn(
+                "flex items-center justify-center w-9 h-9 rounded-md transition-colors min-w-[36px]",
+                trackMode === "speed"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground active:bg-accent"
+              )}
+              aria-label="Тепловая карта скорости"
+              title="Тепловая карта скорости"
+            >
+              <Gauge className="h-4 w-4" />
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Профили снизу — связаны с картой */}

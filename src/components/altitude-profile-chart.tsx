@@ -79,7 +79,7 @@ export function AltitudeProfileChart({
     if (altPoints.length < 2) return null;
     const W = viewW;
     const H = height;
-    const PAD = { top: 16, right: 12, bottom: compact ? 18 : 22, left: compact ? 10 : 40 };
+    const PAD = { top: 16, right: 12, bottom: compact ? 18 : 22, left: compact ? 26 : 40 };
     const plotW = W - PAD.left - PAD.right;
     const plotH = H - PAD.top - PAD.bottom;
 
@@ -222,19 +222,20 @@ export function AltitudeProfileChart({
           aria-label="Высотный профиль поездки"
         >
           <defs>
-            {/* «горный» градиент: тёплые тона вверх от базовой линии */}
+            {/* «горный» градиент: тёплые тона вверх от базовой линии
+                v2.9.5: цвета через CSS-переменные — контраст в тёмной теме */}
             <linearGradient id="apcFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="oklch(0.70 0.15 50)" stopOpacity="0.38" />
-              <stop offset="55%" stopColor="oklch(0.78 0.13 70)" stopOpacity="0.16" />
-              <stop offset="100%" stopColor="oklch(0.85 0.10 85)" stopOpacity="0.03" />
+              <stop offset="0%" stopColor="var(--chart-alt-line-from)" stopOpacity="0.38" />
+              <stop offset="55%" stopColor="var(--chart-alt-line-to)" stopOpacity="0.16" />
+              <stop offset="100%" stopColor="var(--chart-alt-line-to)" stopOpacity="0.03" />
             </linearGradient>
             <linearGradient id="apcLine" x1="0" y1="0" x2="1" y2="0">
-              <stop offset="0%" stopColor="oklch(0.62 0.16 50)" />
-              <stop offset="100%" stopColor="oklch(0.72 0.14 70)" />
+              <stop offset="0%" stopColor="var(--chart-alt-line-from)" />
+              <stop offset="100%" stopColor="var(--chart-alt-line-to)" />
             </linearGradient>
           </defs>
 
-          {/* Горизонтальная сетка + Y-подписи (значения высот) */}
+          {/* Горизонтальная сетка + Y-подписи (v2.9.5: подписи и в compact; сетка через --chart-grid) */}
           {geom.yTicks.map((a, i) => (
             <g key={i}>
               <line
@@ -242,21 +243,19 @@ export function AltitudeProfileChart({
                 x2={W - PAD.right}
                 y1={geom.y(a)}
                 y2={geom.y(a)}
-                stroke="oklch(0.5 0.02 350 / 0.10)"
+                stroke={i === 0 ? "var(--chart-grid-strong)" : "var(--chart-grid)"}
                 strokeWidth="1"
                 strokeDasharray={i === 0 ? "" : "3 4"}
               />
-              {!compact && (
-                <text
-                  x={PAD.left - 5}
-                  y={geom.y(a) + 3}
-                  textAnchor="end"
-                  className="fill-muted-foreground"
-                  style={{ fontSize: 9 }}
-                >
-                  {a}
-                </text>
-              )}
+              <text
+                x={PAD.left - 5}
+                y={geom.y(a) + 3}
+                textAnchor="end"
+                className="chart-axis-label"
+                style={{ fontSize: compact ? 8.5 : 9 }}
+              >
+                {a}
+              </text>
             </g>
           ))}
 
@@ -281,7 +280,7 @@ export function AltitudeProfileChart({
                   cx={geom.x(p.t)}
                   cy={geom.y(p.alt as number)}
                   r={compact ? 3 : 3.5}
-                  fill="oklch(0.62 0.16 50)"
+                  fill="var(--chart-alt-line-from)"
                   stroke="oklch(0.99 0.005 350)"
                   strokeWidth="1.5"
                 />
@@ -309,7 +308,7 @@ export function AltitudeProfileChart({
                 x={geom.x(t)}
                 y={H - 4}
                 textAnchor={i === 0 ? "start" : i === 2 ? "end" : "middle"}
-                className="fill-muted-foreground"
+                className="chart-axis-label"
                 style={{ fontSize: 9 }}
               >
                 {label}
@@ -317,7 +316,7 @@ export function AltitudeProfileChart({
             );
           })}
 
-          {/* Кросхейр */}
+          {/* Кросхейр (v2.9.5: цвета через переменные темы) */}
           {tipX != null && tipP && tipP.alt != null && (
             <g>
               <line
@@ -325,7 +324,7 @@ export function AltitudeProfileChart({
                 x2={tipX}
                 y1={PAD.top}
                 y2={H - PAD.bottom}
-                stroke={isPinned ? "oklch(0.62 0.16 50)" : "oklch(0.55 0.18 350 / 0.55)"}
+                stroke={isPinned ? "var(--chart-alt-line-from)" : "var(--chart-crosshair)"}
                 strokeWidth={isPinned ? 1.5 : 1}
                 strokeDasharray={isPinned ? "" : "3 3"}
               />
@@ -333,11 +332,11 @@ export function AltitudeProfileChart({
                 cx={tipX}
                 cy={geom.y(tipP.alt)}
                 r={isPinned ? 4.5 : 3.5}
-                fill="oklch(0.62 0.16 50)"
+                fill="var(--chart-alt-line-from)"
                 stroke="oklch(0.99 0.005 350)"
                 strokeWidth="1.5"
               />
-              {isPinned && <circle cx={tipX} cy={PAD.top - 5} r={2.5} fill="oklch(0.62 0.16 50)" />}
+              {isPinned && <circle cx={tipX} cy={PAD.top - 5} r={2.5} fill="var(--chart-alt-line-from)" />}
             </g>
           )}
         </svg>

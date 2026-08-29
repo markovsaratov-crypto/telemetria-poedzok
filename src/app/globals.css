@@ -251,6 +251,41 @@
   box-shadow: 0 1px 3px oklch(0 0 0 / 0.35);
 }
 
+/* === v2.9.5: стайлинг-раунд 6 — контраст графиков (VLM-аудит тёмной темы) === */
+/* Переменные цветов SVG-графиков: адаптируются к теме через var() в stroke/stop-color.
+   Было: захардкоженные oklch в атрибутах — в тёмной теме сетка/подписи почти невидимы. */
+:root {
+  --chart-grid: oklch(0.5 0.02 350 / 0.16);       /* линии сетки (светлая) */
+  --chart-grid-strong: oklch(0.5 0.02 350 / 0.32); /* осевая линия */
+  --chart-speed-line: oklch(0.52 0.19 350);        /* линия скорости — глубже для контраста на светлом */
+  --chart-speed-fill: oklch(0.52 0.19 350);
+  --chart-alt-line-from: oklch(0.58 0.16 50);      /* градиент линии рельефа */
+  --chart-alt-line-to: oklch(0.68 0.14 70);
+  --chart-crosshair: oklch(0.55 0.18 350 / 0.55);
+  --chart-ref-line: oklch(0.45 0.02 350 / 0.55);   /* референс ср. скорости */
+}
+.dark {
+  --chart-grid: oklch(0.8 0.02 350 / 0.13);
+  --chart-grid-strong: oklch(0.8 0.02 350 / 0.3);
+  --chart-speed-line: oklch(0.7 0.19 350);
+  --chart-speed-fill: oklch(0.7 0.19 350);
+  --chart-alt-line-from: oklch(0.75 0.15 50);
+  --chart-alt-line-to: oklch(0.82 0.13 70);
+  --chart-crosshair: oklch(0.7 0.18 350 / 0.6);
+  --chart-ref-line: oklch(0.85 0.02 350 / 0.5);
+}
+
+/* v2.9.5: повышенный контраст мелких подписей осей в тёмной теме
+   (VLM: «axis labels too dim, failing WCAG AA for small text») */
+.chart-axis-label {
+  fill: var(--muted-foreground);
+  opacity: 0.9;
+}
+.dark .chart-axis-label {
+  opacity: 1;
+  fill: oklch(0.72 0.02 350);
+}
+
 :root {
   --radius: 0.75rem;
   /* === ТЗ §2.9: Цветовая палитра (oklch, светлая тема) === */
@@ -309,7 +344,7 @@
   --secondary: oklch(0.24 0.02 350);
   --secondary-foreground: oklch(0.97 0.005 350);
   --muted: oklch(0.24 0.02 350);
-  --muted-foreground: oklch(0.65 0.02 350);
+  --muted-foreground: oklch(0.68 0.02 350);
   --accent: oklch(0.28 0.03 350);
   --accent-foreground: oklch(0.95 0.02 350);
   --success: oklch(0.65 0.15 145);

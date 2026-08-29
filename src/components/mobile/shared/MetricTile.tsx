@@ -21,25 +21,27 @@ interface MetricTileProps {
   spark?: number[]; // v2.9.4: ряд за 7 дней — спарклайн с последней точкой
 }
 
+// v2.9.5: усиленные семантические фоны (VLM: «light red backgrounds too subtle,
+// don't provide enough visual weight») + текст с dark-вариантами
 const STATUS_BG: Record<string, string> = {
   neutral: "bg-card",
-  success: "bg-[oklch(0.95_0.05_145)] dark:bg-[oklch(0.25_0.05_145)]",
-  warning: "bg-[oklch(0.95_0.05_85)] dark:bg-[oklch(0.25_0.05_85)]",
-  error: "bg-[oklch(0.95_0.05_25)] dark:bg-[oklch(0.25_0.05_25)]",
+  success: "bg-[oklch(0.93_0.07_145)] dark:bg-[oklch(0.27_0.06_145)]",
+  warning: "bg-[oklch(0.94_0.08_85)] dark:bg-[oklch(0.28_0.06_85)]",
+  error: "bg-[oklch(0.93_0.07_25)] dark:bg-[oklch(0.28_0.06_25)]",
 };
 
 const STATUS_TEXT: Record<string, string> = {
   neutral: "",
-  success: "text-[oklch(0.45_0.15_145)]",
-  warning: "text-[oklch(0.55_0.15_85)]",
-  error: "text-[oklch(0.45_0.20_25)]",
+  success: "text-[oklch(0.45_0.15_145)] dark:text-[oklch(0.78_0.14_145)]",
+  warning: "text-[oklch(0.55_0.15_85)] dark:text-[oklch(0.85_0.13_85)]",
+  error: "text-[oklch(0.45_0.20_25)] dark:text-[oklch(0.78_0.15_25)]",
 };
 
 export function MetricTile({ label, value, unit, deviation, status = "neutral", onTap, spark }: MetricTileProps) {
   const devColor = deviation != null
-    ? Math.abs(deviation) <= 5 ? "text-[oklch(0.45_0.15_145)]"
-    : Math.abs(deviation) <= 15 ? "text-[oklch(0.55_0.15_85)]"
-    : "text-[oklch(0.45_0.20_25)]"
+    ? Math.abs(deviation) <= 5 ? "text-[oklch(0.45_0.15_145)] dark:text-[oklch(0.78_0.14_145)]"
+    : Math.abs(deviation) <= 15 ? "text-[oklch(0.55_0.15_85)] dark:text-[oklch(0.85_0.13_85)]"
+    : "text-[oklch(0.45_0.20_25)] dark:text-[oklch(0.78_0.15_25)]"
     : "";
 
   return (

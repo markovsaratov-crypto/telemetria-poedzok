@@ -16,12 +16,14 @@ import {
   HardDrive,
   Hash,
   Zap,
+  Download,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useHealth, useStats, useSettings, useUpdateSetting, useGitHubBackups, useCreateGitHubBackup } from "@/lib/hooks";
 import { api } from "@/lib/api-client";
 import { SettingsCard } from "@/components/settings-card";
 import { GitHubBackupCard } from "@/components/github-backup-card";
+import { useInstallPrompt } from "@/components/pwa-register";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -35,6 +37,22 @@ interface AdminScreenProps {
 export function AdminScreen({ onBack, onLogout }: AdminScreenProps) {
   const { data: health } = useHealth();
   const { data: stats } = useStats();
+  // v2.9.8: установка PWA (Android/Chrome — beforeinstallprompt; iOS — подсказка)
+  const { canInstall, install } = useInstallPrompt();
+  const [isIOS, setIsIOS] = React.useState(false);
+  const [installed, setInstalled] = React.useState(false);
+  React.useEffect(() => {
+    const ua = navigator.userAgent;
+    setIsIOS(/iPad|iPhone|iPod/.test(ua) && !/CriOS|FxiOS|EdgiOS/.test(ua));
+    setInstalled(window.matchMedia("(display-mode: standalone)").matches);
+  }, []);
+  const handleInstall = React.useCallback(async () => {
+    const ok = await install();
+    if (ok) {
+      toast.success("Приложение установлено");
+      setInstalled(true);
+    }
+  }, [install]);
 
   const items = [
     {
@@ -139,6 +157,30 @@ export function AdminScreen({ onBack, onLogout }: AdminScreenProps) {
 
         {/* GitHub backup */}
         <GitHubBackupCard />
+
+        {/* v2.9.8: установка PWA */}
+        {!installed && (canInstall || isIOS) && (
+          <div className="rounded-lg border bg-card p-3.5 space-y-2.5">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Download className="h-4 w-4 text-primary" />
+              Установить приложение
+            </div>
+            {canInstall ? (
+              <>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Телеметрия поездок на домашнем экране — работает в полный экран, без адресной строки.
+                </p>
+                <Button size="sm" className="w-full gap-2" onClick={handleInstall}>
+                  <Download className="h-3.5 w-3.5" /> Установить
+                </Button>
+              </>
+            ) : (
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Safari: кнопка «Поделиться» → «На экран “Домой”». Chrome: меню ⋮ → «Установить приложение».
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Logout */}
         <Button

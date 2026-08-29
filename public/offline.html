@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#17151a" />
+<title>Офлайн — Телеметрия поездок</title>
+<style>
+  :root {
+    --bg: #f4f3f4; --card: #ffffff; --text: #1b1a20; --muted: #6f6d78;
+    --border: #e3e1e6; --accent: #c73a63; --chip: #f6f5f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17151a; --card: #1e1c23; --text: #f0eef3; --muted: #a09ea9;
+      --border: #2c2a33; --accent: #e0577f; --chip: #26242d;
+    }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { width: 100%; max-width: 420px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--chip); border: 1px solid var(--border);
+    color: var(--muted); font-size: 12px; font-weight: 600;
+    padding: 5px 12px; border-radius: 999px; margin-bottom: 16px;
+    letter-spacing: 0.04em;
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #b8b6bf; box-shadow: 0 0 0 3px rgba(120,118,128,0.15);
+  }
+  h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 14px; line-height: 1.5; margin-top: 6px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 18px; margin-top: 20px;
+    box-shadow: 0 1px 2px rgba(20,18,25,0.04), 0 8px 24px rgba(20,18,25,0.05);
+  }
+  .card-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; font-weight: 700; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 14px;
+  }
+  .card-title svg { flex: none; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stat {
+    background: var(--chip); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 14px;
+  }
+  .stat .v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .v small { font-size: 12px; font-weight: 600; color: var(--muted); margin-left: 2px; }
+  .stat .k { font-size: 11px; color: var(--muted); margin-top: 3px; letter-spacing: 0.02em; }
+  .last {
+    margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border);
+    font-size: 12.5px; color: var(--muted); line-height: 1.55;
+  }
+  .last b { color: var(--text); font-weight: 600; }
+  .empty { color: var(--muted); font-size: 13px; line-height: 1.55; }
+  button {
+    margin-top: 20px; width: 100%;
+    background: var(--accent); color: #fff; border: 0;
+    font-size: 15px; font-weight: 600; font-family: inherit;
+    padding: 13px 20px; border-radius: 12px; cursor: pointer;
+    transition: transform 0.12s ease, filter 0.12s ease;
+  }
+  button:hover { filter: brightness(1.06); }
+  button:active { transform: scale(0.985); }
+  .foot {
+    margin-top: 18px; text-align: center; color: var(--muted);
+    font-size: 11.5px; letter-spacing: 0.03em;
+  }
+</style>
+</head>
+<body>
+  <main class="wrap">
+    <span class="badge"><span class="dot"></span>ТЕЛЕМЕТРИЯ ПОЕЗДОК · ОФЛАЙН</span>
+    <h1>Нет подключения</h1>
+    <p class="sub">Приложение недоступно без сети. Ниже — статистика из последнего онлайн-сеанса, она сохранена на устройстве.</p>
+
+    <section class="card" id="stats" aria-label="Статистика последнего сеанса">
+      <div class="card-title">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
+        Последний сеанс
+      </div>
+      <div id="content" class="empty">Статистика ещё не сохранена — запустите приложение онлайн хотя бы раз.</div>
+    </section>
+
+    <button onclick="location.reload()">Повторить подключение</button>
+    <p class="foot">v2.9 · данные кэшированы локально · <span id="saved"></span></p>
+  </main>
+
+<script>
+(function () {
+  try {
+    var raw = localStorage.getItem("telem:offline-summary");
+    if (!raw) return;
+    var s = JSON.parse(raw);
+    var el = document.getElementById("content");
+
+    // value + label пары для сетки 2×N
+    var cells = [];
+    if (s.totalDistanceKm != null)
+      cells.push([s.totalDistanceKm.toFixed(1), "км", "ДИСТАНЦИЯ"]);
+    if (s.totalDurationMin != null) {
+      var h = Math.floor(s.totalDurationMin / 60), m = Math.round(s.totalDurationMin % 60);
+      cells.push([h > 0 ? h + " ч " + m : "" + m, "мин", "В ДВИЖЕНИИ"]);
+    }
+    if (s.avgSpeedKmh != null)
+      cells.push([s.avgSpeedKmh.toFixed(1), "км/ч", "СР. СКОРОСТЬ"]);
+    if (s.maxSpeedKmh != null)
+      cells.push(["" + Math.round(s.maxSpeedKmh), "км/ч", "МАКС. СКОРОСТЬ"]);
+    if (s.totalSessions != null)
+      cells.push(["" + s.totalSessions, "", "ПОЕЗДОК"]);
+    if (s.totalPoints != null)
+      cells.push([s.totalPoints.toLocaleString("ru-RU"), "", "GPS-ТОЧЕК"]);
+
+    var html = '<div class="grid">';
+    for (var i = 0; i < Math.min(cells.length, 4); i++) {
+      var c = cells[i];
+      html += '<div class="stat"><div class="v">' + c[0] + (c[1] ? "<small>" + c[1] + "</small>" : "") + '</div><div class="k">' + c[2] + "</div></div>";
+    }
+    html += "</div>";
+
+    var extra = [];
+    for (var j = 4; j < cells.length; j++)
+      extra.push(cells[j][2].toLowerCase() + " <b>" + cells[j][0] + (cells[j][1] ? " " + cells[j][1] : "") + "</b>");
+    if (extra.length)
+      html += '<div class="last">' + extra.join(" · ") + "</div>";
+
+    if (s.lastSessionAt) {
+      var d = new Date(s.lastSessionAt);
+      html += '<div class="last">Последняя поездка: <b>' +
+        d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) +
+        ", " + d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) + "</b>" +
+        (s.lastDevice ? " · " + s.lastDevice : "") + "</div>";
+    }
+    el.className = "";
+    el.innerHTML = html;
+
+    if (s.savedAt) {
+      document.getElementById("saved").textContent =
+        "обновлено " + new Date(s.savedAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+    }
+  } catch (e) { /* повреждённый localStorage — показываем заглушку */ }
+})();
+</script>
+</body>
+</html>

@@ -1,5 +1,5 @@
 // src/lib/backup.ts — логический дамп БД (BackupJob), верификация checksum (§9.8)
-import { db } from "./db";
+import { db, libsql } from "./db";
 import { env } from "./env";
 import { writeAudit } from "./audit";
 import { promises as fs } from "fs";

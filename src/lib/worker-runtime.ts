@@ -1,21 +1,25 @@
 // src/lib/worker-runtime.ts — In-process Worker (runs inside Next.js via instrumentation.ts).
 import pLimit from "p-limit";
-import fs from "fs";
-import path from "path";
 import { libsql } from "./db";
 import { env } from "./env";
 import { logger } from "./logger";
 import { inc, set } from "./metrics";
 import { routeRequest } from "./routing/chain";
 
-// P0-фикс v2.9.10 (Render build failure):
-// Turbopack/webpack static analysis помечает fs-операции с путями, вычисленными
-// из env() во время выполнения, как "dynamic filesystem access" и трассирует
-// ВЕСЬ проект (включая public/), что ломает сборку на Render.
-// Решение: использовать СТАТИЧЕСКИЙ путь, конструируемый из process.cwd()
-// (Turbopack знает это возвращаемое значение) + литеральных подстрок.
+// P0-фикс v2.9.10 (Render build failure, корректная версия без костылей):
+// Турбопак помечает fs-операции с путём, вычисленным из env()-переменной во
+// время выполнения, как "dynamic filesystem access" и трассирует ВЕСЬ проект
+// (включая public/) → build failed. Решение: использовать СТРОКОВЫЙ ЛИТЕРАЛ
+// "/tmp/exports" (то же значение что и env var EXPORT_STORAGE_DIR в render.yaml).
+// Turbopack видит константу — никакой динамической трассировки.
+//
+// ВАЖНО для Edge-совместимости: НЕ добавлять top-level import fs/path —
+// worker-runtime.ts загружается через instrumentation.ts, который Турбопак
+// собирает и для Edge Runtime (где fs/path недоступны). fs и path импортируем
+// ДИНАМИЧЕСКИ внутри pollExportJobs (await import) — оригинальный паттерн,
+// edge-совместимый: код fs-операций выполняется только в Node.js runtime.
 // Env-переопределение EXPORT_STORAGE_DIR намеренно НЕ применяется в fs-вызовах.
-const EXPORT_STORAGE_DIR = path.join(process.cwd(), "data", "exports");
+const EXPORT_STORAGE_DIR = "/tmp/exports";
 
 const GLOBAL_KEY = "__telemetriaWorkerRuntime";
 const g = globalThis as unknown as { [GLOBAL_KEY]?: WorkerRuntime };
@@ -239,7 +243,11 @@ async function pollExportJobs(): Promise<void> {
 
       const { generateExport } = await import("./export");
       const { content, ext } = generateExport(session as never, format);
-      // Статический путь (см. коммент в начале файла) — Turbopack-friendly.
+      // Динамические импорты fs/path ВНУТРИ функции — Edge-совместимый паттерн
+      // (top-level импорты ломают Edge Runtime bundle, см. коммент в начале файла).
+      // Статический строковый литерал EXPORT_STORAGE_DIR — Turbopack-friendly.
+      const fs = await import("fs");
+      const path = await import("path");
       fs.mkdirSync(EXPORT_STORAGE_DIR, { recursive: true });
       const filePath = path.join(EXPORT_STORAGE_DIR, `${jobId}.${ext}`);
       fs.writeFileSync(filePath, content, "utf8");

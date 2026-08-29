@@ -358,10 +358,14 @@ function StatCard({
       animate={{ opacity: 1, y: 0 }}
       whileHover={{ y: -2 }}
       transition={{ type: "spring", stiffness: 300, damping: 20 }}
-      className="rounded-xl border bg-card p-4 space-y-2 relative overflow-hidden group"
+      className="rounded-xl border bg-card p-4 space-y-2 relative overflow-hidden group elev-1 transition-shadow hover:elev-2"
     >
+      {/* v2.9.1: мягкий градиентный влив в правом верхнем углу */}
+      <div className="pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full bg-primary/[0.05] blur-xl transition-opacity opacity-60 group-hover:opacity-100" />
+      {/* v2.9.1: акцентная линия сверху */}
+      <div className="absolute inset-x-0 top-0 h-0.5 bg-gradient-to-r from-primary/40 to-transparent" />
       <div className="flex items-start justify-between">
-        <div className={`inline-flex p-1.5 rounded-lg ${c.bg}`}>{icon}</div>
+        <div className={`inline-flex p-1.5 rounded-lg ${c.bg} transition-transform group-hover:scale-105`}>{icon}</div>
         {spark && (
           <svg viewBox="0 0 100 28" className="w-16 h-7" preserveAspectRatio="none">
             <path d={`${spark} L 100 28 L 0 28 Z`} className={c.fill} />

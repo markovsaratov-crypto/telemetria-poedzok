@@ -734,6 +734,7 @@ export interface RouteGroupInfo {
   endCoord: { lat: number; lon: number } | null;
   deviceIds: string[];
   sessionIds: string[];
+  polylineSample: { lat: number; lon: number }[] | null;
 }
 
 export function useRouteGroups() {
@@ -813,6 +814,8 @@ export interface RouteHotspotsData {
     worstSeverity: number;
     congestedSessionCount: number;
     totalSessionCount: number;
+    a?: { lat: number; lon: number } | null;
+    b?: { lat: number; lon: number } | null;
   }[];
   polylineSample: { lat: number; lon: number }[];
 }

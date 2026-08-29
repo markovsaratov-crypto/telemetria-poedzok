@@ -1317,6 +1317,7 @@ libsql dump.sql -u libsql://... -t token
 | /api/routes/grouped                       | GET              | Cookie/API_KEY      | routeHash-группы концептуально одинаковых поездок (§10.0) с агрегатами |
 | /api/routes/[id]/trend                    | GET              | Cookie/API_KEY      | Theil-Sen-тренд activeDuration по сессиям routeId + CI 95% |
 | /api/routes/[id]/hotspots                 | GET              | Cookie/API_KEY      | HotspotSegments (P75 < 0.5) по сессиям routeId          |
+| /api/routes/[id]/gpx                      | GET              | Cookie/API_KEY      | GPX 1.1-трек канонического маршрута группы routeHash (v2.9.1) |
 | /api/exports/[jobId]                      | GET              | Cookie/API_KEY      | Статус экспорта                                         |
 | /api/exports/[jobId]/download             | GET              | token               | Скачивание файла                                        |
 | /api/admin/backup                         | POST             | Bearer ADMIN_TOKEN  | Резервная копия                                         |
@@ -1343,6 +1344,8 @@ libsql dump.sql -u libsql://... -t token
 | /api/cron/finalize-sessions               | POST             | Bearer CRON_SECRET  | Финализация сессий                                      |
 
 > Endpoints `/api/sessions/[id]/route-comparison`, `/api/routes/[id]/trend`, `/api/routes/[id]/hotspots`, `/api/routes/grouped` — реализованы в v2.9 (см. `src/lib/route-comparison.ts`): группировка по `Session.routeHash` (§10.0), агрегаты по `activeDuration` с фильтром `SessionReliability ≥ 0.6` (§10.1), Theil-Sen + bootstrap (§10.5), P75-хотспоты (§10.6). Для `[id]` trend/hotspots принимают routeHash (16-hex) либо UUID админского Route (fallback по FK).
+>
+> v2.9.1: `GET /api/routes/[id]/gpx` ([id] = routeHash) — GPX 1.1-экспорт канонического полилийна группы: сегменты последнего completed TrafficJob, fallback — активная часть первой сессии (прорежено до ~40 точек). Ответ: `application/gpx+xml`, `Content-Disposition: attachment; filename="route-<routeHash>.gpx"`; 404 при отсутствии группы или полилийна. Тот же канонический полилийн используется UI для мини-карты группы; хотспоты-эндпоинт дополнительно возвращает геометрию сегментов (`a`/`b`) для severity-подсветки (§10.6).
 
 ## Приложение Б. Глоссарий
 

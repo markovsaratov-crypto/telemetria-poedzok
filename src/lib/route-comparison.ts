@@ -42,6 +42,8 @@ export interface RouteGroupInfo {
   endCoord: { lat: number; lon: number } | null;
   deviceIds: string[];
   sessionIds: string[];
+  // v2.9.1: прореженный полилайн активной части первой сессии группы (~24 точки) — для мини-карты в UI
+  polylineSample: { lat: number; lon: number }[] | null;
 }
 
 const RELIABILITY_FLOOR = 0.6; // §10.1: в агрегат входят только сессии с SessionReliability ≥ 0.6
@@ -213,12 +215,11 @@ export function routeTrend(sessions: GroupSession[]): RouteTrendResult {
 const SNAP_RADIUS_M = 55; // snap-to-grid ~55 м (совпадает с кэшем маршрутизации)
 const PLAN_BASELINE_KMH = 40; // §3.2: базовая линия гаверсинус/40 км/ч
 
-export async function computeGroupHotspots(routeHash: string, sessions: GroupSession[]): Promise<{
-  hotspots: HotspotSegment[];
-  totalSegments: number;
-  polyline: { lat: number; lon: number }[];
-}> {
-  // 1. Канонический полилайн — из последнего completed TrafficJob сессий группы
+// Канонический полилайн группы: из последнего completed TrafficJob (сегменты маршрута),
+// fallback — активная часть первой сессии (прорежено до ~40 точек).
+export async function canonicalGroupPolyline(
+  sessions: GroupSession[]
+): Promise<{ polyline: { lat: number; lon: number }[]; planDurationSec: number | null }> {
   let polyline: { lat: number; lon: number }[] = [];
   let planDurationSec: number | null = null;
   if (sessions.length > 0) {
@@ -255,6 +256,45 @@ export async function computeGroupHotspots(routeHash: string, sessions: GroupSes
       polyline = polyline.filter((_, i) => i % step === 0 || i === polyline.length - 1);
     }
   }
+  return { polyline, planDurationSec };
+}
+
+// Полилайн активной части сессии, прореженный до maxPoints (для мини-карты в списке групп).
+export async function sessionPolylineSample(
+  sessionId: string,
+  activeStartMs: number,
+  activeEndMs: number,
+  maxPoints = 24
+): Promise<{ lat: number; lon: number }[] | null> {
+  const ptsRes = await libsql.execute({
+    sql: "SELECT lat, lon, timestamp FROM GpsPoint WHERE sessionId = ? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC",
+    args: [sessionId, Math.round(activeStartMs), Math.round(activeEndMs)],
+  });
+  const pts = ptsRes.rows.map((r) => {
+    const p = r as unknown as Record<string, unknown>;
+    return { lat: Number(p.lat), lon: Number(p.lon) };
+  });
+  if (pts.length < 2) return null;
+  if (pts.length <= maxPoints) return pts;
+  const step = Math.ceil(pts.length / maxPoints);
+  const thinned = pts.filter((_, i) => i % step === 0);
+  if (thinned[thinned.length - 1] !== pts[pts.length - 1]) thinned.push(pts[pts.length - 1]);
+  return thinned;
+}
+
+export interface HotspotWithGeometry extends HotspotSegment {
+  // v2.9.1: геометрия сегмента для мини-карты с severity-подсветкой (§10.6)
+  a: { lat: number; lon: number } | null;
+  b: { lat: number; lon: number } | null;
+}
+
+export async function computeGroupHotspots(routeHash: string, sessions: GroupSession[]): Promise<{
+  hotspots: HotspotWithGeometry[];
+  totalSegments: number;
+  polyline: { lat: number; lon: number }[];
+}> {
+  // 1. Канонический полилайн — из последнего completed TrafficJob сессий группы
+  const { polyline, planDurationSec } = await canonicalGroupPolyline(sessions);
   if (polyline.length < 2) return { hotspots: [], totalSegments: 0, polyline: [] };
 
   // 2. Сегменты канонического полилайна: дистанция + плановая скорость
@@ -328,7 +368,13 @@ export async function computeGroupHotspots(routeHash: string, sessions: GroupSes
   }
 
   const history = Array.from(severityHist.entries()).map(([segmentId, severities]) => ({ segmentId, severities }));
-  const hotspots = computeHotspotSegments(history).sort((a, b) => a.p75 - b.p75); // по «тяжести» §10.6
+  const raw = computeHotspotSegments(history).sort((a, b) => a.p75 - b.p75); // по «тяжести» §10.6
+  // v2.9.1: обогащаем хотспоты геометрией сегмента (для severity-подсветки на мини-карте)
+  const segById = new Map(segs.map((sg) => [sg.id, sg]));
+  const hotspots: HotspotWithGeometry[] = raw.map((h) => {
+    const sg = segById.get(h.segmentId);
+    return { ...h, a: sg ? sg.a : null, b: sg ? sg.b : null };
+  });
   return { hotspots, totalSegments: segs.length, polyline };
 }
 
@@ -366,6 +412,7 @@ export async function listRouteGroups(): Promise<RouteGroupInfo[]> {
       endCoord: null,
       deviceIds: String(r.devices || "").split(",").filter(Boolean),
       sessionIds: ids,
+      polylineSample: null,
     };
     // Детали (ActiveTrip-агрегаты) — только для групп ≤ 12 сессий, чтобы endpoint оставался лёгким
     if (ids.length > 0 && ids.length <= 12) {
@@ -394,11 +441,50 @@ export async function listRouteGroups(): Promise<RouteGroupInfo[]> {
           const p = ptsRes2.rows[0] as unknown as Record<string, unknown>;
           info.endCoord = { lat: Number(p.lat), lon: Number(p.lon) };
         }
+        // v2.9.1: полилайн активной части первой сессии (для мини-карты в карточке группы)
+        const first = sessions[0];
+        info.polylineSample = await sessionPolylineSample(
+          first.sessionId,
+          first.activeStartTime,
+          first.activeStartTime + first.activeDuration * 1000
+        );
       }
     }
     groups.push(info);
   }
   return groups;
+}
+
+// === v2.9.1: GPX-экспорт канонического маршрута группы ===
+// Возвращает GPX 1.1-трек канонического полилайна группы (TrafficJob-сегменты либо активная
+// часть первой сессии). Имя трека — routeHash, в desc — агрегаты группы.
+export async function groupRouteGpx(routeHash: string): Promise<string | null> {
+  const sessions = await loadGroupSessions(routeHash);
+  if (sessions.length === 0) return null;
+  const { polyline } = await canonicalGroupPolyline(sessions);
+  if (polyline.length < 2) return null;
+
+  const stats = routeDurationStats(sessions);
+  const avgKm = sessions.reduce((a, s) => a + s.distanceM, 0) / sessions.length / 1000;
+  const name = `route ${routeHash}`;
+  const desc = `Канонический маршрут группы routeHash ${routeHash}: ${sessions.length} поездк(и/а), ` +
+    `ср. ActiveDuration ${stats.avg ?? "—"}с, ср. дистанция ${avgKm.toFixed(1)} км (методология v2.9 §10.0)`;
+  const trkpts = polyline
+    .map((p) => `      <trkpt lat="${p.lat.toFixed(6)}" lon="${p.lon.toFixed(6)}"></trkpt>`)
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="Telemetria v2.9" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <name>${name}</name>
+    <desc>${desc}</desc>
+  </metadata>
+  <trk>
+    <name>${name}</name>
+    <trkseg>
+${trkpts}
+    </trkseg>
+  </trk>
+</gpx>`;
 }
 
 // === Сравнение конкретной сессии с её группой (route-comparison endpoint) ===

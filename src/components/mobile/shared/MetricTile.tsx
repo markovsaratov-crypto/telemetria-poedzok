@@ -5,6 +5,7 @@
 // Значение (24pt bold) + label (11pt muted)
 // Для метрик с плановым значением — отклонение от плана в % (10pt)
 // Цвет фона по статусу (зелёный/жёлтый/красный для EcoScore, отклонений)
+// v2.9.4: spark — мини-спарклайн за 7 дней внизу тайла (тренд KPI)
 
 import * as React from "react";
 import { motion } from "framer-motion";
@@ -17,6 +18,7 @@ interface MetricTileProps {
   deviation?: number | null; // % отклонения от плана
   status?: "neutral" | "success" | "warning" | "error";
   onTap?: () => void;
+  spark?: number[]; // v2.9.4: ряд за 7 дней — спарклайн с последней точкой
 }
 
 const STATUS_BG: Record<string, string> = {
@@ -33,7 +35,7 @@ const STATUS_TEXT: Record<string, string> = {
   error: "text-[oklch(0.45_0.20_25)]",
 };
 
-export function MetricTile({ label, value, unit, deviation, status = "neutral", onTap }: MetricTileProps) {
+export function MetricTile({ label, value, unit, deviation, status = "neutral", onTap, spark }: MetricTileProps) {
   const devColor = deviation != null
     ? Math.abs(deviation) <= 5 ? "text-[oklch(0.45_0.15_145)]"
     : Math.abs(deviation) <= 15 ? "text-[oklch(0.55_0.15_85)]"
@@ -69,6 +71,35 @@ export function MetricTile({ label, value, unit, deviation, status = "neutral", 
           {deviation > 0 ? "+" : ""}{deviation.toFixed(0)}%
         </div>
       )}
+      {/* v2.9.4: спарклайн за 7 дней (подпись «7 дней» на последней активной точке) */}
+      {spark && spark.length >= 2 && <TileSpark data={spark} />}
     </motion.button>
+  );
+}
+
+// ——— v2.9.4: мини-спарклайн 7 дней (48×16, градиентная заливка + точка «сегодня») ———
+function TileSpark({ data }: { data: number[] }) {
+  const W = 52;
+  const H = 16;
+  const max = Math.max(...data, 1);
+  const x = (i: number) => (i / (data.length - 1)) * (W - 2) + 1;
+  const y = (v: number) => H - 2 - (v / max) * (H - 4);
+  const line = data.map((v, i) => `${i === 0 ? "M" : "L"} ${x(i).toFixed(1)} ${y(v).toFixed(1)}`).join(" ");
+  const area = `${line} L ${x(data.length - 1).toFixed(1)} ${H} L ${x(0).toFixed(1)} ${H} Z`;
+  const lastX = x(data.length - 1);
+  const lastY = y(data[data.length - 1]);
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      width={W}
+      height={H}
+      className="mt-1.5"
+      role="img"
+      aria-label="Динамика за 7 дней"
+    >
+      <path d={area} fill="oklch(0.55 0.18 350 / 0.12)" />
+      <path d={line} fill="none" stroke="oklch(0.55 0.18 350 / 0.8)" strokeWidth="1.2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+      <circle cx={lastX} cy={lastY} r="1.8" fill="oklch(0.55 0.18 350)" />
+    </svg>
   );
 }

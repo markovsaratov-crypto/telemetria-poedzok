@@ -49,7 +49,9 @@ export async function cacheGet(hash: string): Promise<string | null> {
   const row = await db.routeCache.findUnique({
     where: { hash },
   });
-  if (row && row.expiresAt > new Date()) {
+  // v2.9.4 fix: expiresAt — ISO-строка (libsql сериализует Date в ISO);
+  // прямое сравнение строки с Date давало NaN → персистентный кэш никогда не срабатывал
+  if (row && new Date(row.expiresAt) > new Date()) {
     // backfill LRU
     lru.set(hash, { result: row.result, ts: Date.now() });
     if (lru.size > LRU_MAX) {

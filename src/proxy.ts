@@ -1,4 +1,22 @@
-// src/middleware.ts — сквозная обработка: payload guard, CORS, rate-limit, auth, security headers, requestId (§2.4)
+// src/proxy.ts — сквозная обработка: payload guard, CORS, rate-limit, auth, security headers, requestId (§2.4)
+//
+// v2.9.10 (P0-фикс Render build failure — финальная версия без костылей):
+// Next.js 16 переименовал `middleware.ts` → `proxy.ts`. Proxy-файл работает в
+// NODE.JS RUNTIME (Edge runtime НЕ поддерживается для proxy), тогда как
+// устаревший middleware.ts работал в Edge Runtime. Это устраняет ЕДИНСТВЕННУЮ
+// Edge-точку в проекте → Next.js-оптимизация (entries.js) автоматически
+// удаляет Edge Instrumentation bundling → instrumentation.ts и его
+// динамический import worker-runtime.ts больше НЕ бандлятся для Edge →
+// исчезают ВСЕ ошибки "Node.js module is loaded which is not supported in
+// the Edge Runtime" (fs, path, crypto, process.on, process.versions).
+//
+// Импортируемые модули (rate-limit, env, http-utils, logger, metrics,
+// token-check, cookie-name) остаются edge-safe по факту (используют только
+// Web APIs), но Edge-bundle теперь вообще не собирается — проверять не нужно.
+//
+// Названная export-функция тоже переименована: `middleware` → `proxy`
+// (Next.js 16 deprecates the `middleware` named export).
+// `config.matcher` остаётся в силе (только имя функции изменилось).
 import { NextRequest, NextResponse } from "next/server";
 import { createRateLimiter, rlKey } from "@/lib/rate-limit";
 import { env } from "@/lib/env";
@@ -53,7 +71,7 @@ function bearerToken(auth: string): string | null {
   return m ? m[1].trim() : null;
 }
 
-export async function middleware(request: NextRequest): Promise<NextResponse> {
+export async function proxy(request: NextRequest): Promise<NextResponse> {
   const requestId = crypto.randomUUID();
   const start = Date.now();
   const pathname = request.nextUrl.pathname;

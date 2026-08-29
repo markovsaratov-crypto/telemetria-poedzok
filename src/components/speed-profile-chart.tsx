@@ -12,7 +12,9 @@
 
 import * as React from "react";
 import { cn } from "@/lib/utils";
-import { SPEED_BUCKETS, speedBucketFor } from "./map-track";
+// v2.9.10: импорт из lib/speed-buckets вместо ./map-track — избежать
+// транзитивного импорта leaflet при статической генерации (prerender).
+import { SPEED_BUCKETS, speedBucketFor } from "@/lib/speed-buckets";
 
 export interface SpeedProfilePointView {
   t: number; // сек от начала

@@ -1,8 +1,14 @@
 // src/lib/db.ts — Direct libsql client (production-grade, no Prisma engine)
 // Uses @libsql/client directly for all database operations.
 // Prisma is used only for type generation (schema.prisma).
+//
+// v2.9.10 (P0-фикс Render build failure): убран `import { randomUUID } from "crypto"`.
+// Turbopack хардкодит Edge-вариант instrumentation.ts → worker-runtime.ts →
+// settings.ts → db.ts, и любой Node.js crypto-импорт в db.ts ломает Edge-bundle
+// ("Node.js module is loaded which is not supported in the Edge Runtime").
+// Замена: глобальный Web Crypto API `crypto.randomUUID()` — стандартный Web API,
+// доступен и в Node.js (>=14.18) и в Edge Runtime. Семантика идентична.
 import { createClient, type Client, type InValue } from "@libsql/client";
-import { randomUUID } from "crypto";
 
 const globalForDb = globalThis as unknown as {
   libsqlClient: Client | undefined;
@@ -223,7 +229,7 @@ export const db = {
     },
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
+      const data = { id: crypto.randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -301,7 +307,7 @@ export const db = {
     async createMany(args: { data: Array<Record<string, unknown>> }) {
       for (const item of args.data) {
         // GpsPoint.id — NOT NULL (cuid в Prisma): генерируем, если не передан (P0-2)
-        const data = { id: randomUUID(), ...pruneUndefined(item) };
+        const data = { id: crypto.randomUUID(), ...pruneUndefined(item) };
         const keys = Object.keys(data);
         const values = Object.values(data).map((v) => (v === undefined ? null : v));
         const placeholders = keys.map(() => "?").join(", ");
@@ -317,7 +323,7 @@ export const db = {
   trafficJob: {
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
+      const data = { id: crypto.randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -366,7 +372,7 @@ export const db = {
   auditLog: {
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
+      const data = { id: crypto.randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -409,7 +415,7 @@ export const db = {
     },
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
+      const data = { id: crypto.randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -438,7 +444,7 @@ export const db = {
     async upsert(args: { where: { hash: string }; create: Record<string, unknown>; update: Record<string, unknown> }) {
       // RouteCache: id/createdAt NOT NULL — substitute defaults if the caller didn't pass them (P0-2);
       // drop undefined values (libsql rejects undefined — Prisma semantics "don't set")
-      const createData = { id: randomUUID(), createdAt: new Date().toISOString(), ...args.create };
+      const createData = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...args.create };
       for (const k of Object.keys(createData)) if (createData[k] === undefined) delete createData[k];
       const updateData = { ...args.update };
       for (const k of Object.keys(updateData)) if (updateData[k] === undefined) delete updateData[k];
@@ -467,7 +473,7 @@ export const db = {
     },
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
+      const data = { id: crypto.randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -478,7 +484,7 @@ export const db = {
   backupJob: {
     async create(args: { data: Record<string, unknown> }) {
       const now = new Date().toISOString();
-      const data = { id: randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
+      const data = { id: crypto.randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = Object.values(data);
       const placeholders = keys.map(() => "?").join(", ");
@@ -550,7 +556,7 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
           if (!meta) throw new Error(`tx.${model}.create: таблица ${table} не поддерживается в транзакции`);
           const now = new Date().toISOString();
           const data = {
-            id: randomUUID(),
+            id: crypto.randomUUID(),
             createdAt: now,
             ...(meta.updatedAt ? { updatedAt: now } : {}),
             ...pruneUndefined(args.data),
@@ -565,7 +571,7 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
           if (!meta) throw new Error(`tx.${model}.createMany: таблица ${table} не поддерживается в транзакции`);
           let count = 0;
           for (const item of args.data) {
-            const data = { id: randomUUID(), ...pruneUndefined(item) };
+            const data = { id: crypto.randomUUID(), ...pruneUndefined(item) };
             const keys = Object.keys(data);
             const values = Object.values(data).map((v) => (v === undefined ? null : v));
             const placeholders = keys.map(() => "?").join(", ");

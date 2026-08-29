@@ -11,6 +11,7 @@ import { ArrowLeft, MoreVertical, Download, Trash2 } from "lucide-react";
 import { useSession, useSessionStats } from "@/lib/hooks";
 import { MetricTile } from "../shared/MetricTile";
 import { SpeedProfileChart } from "@/components/speed-profile-chart";
+import { AltitudeProfileChart } from "@/components/altitude-profile-chart";
 const MapTrack = dynamic(() => import("@/components/map-track"), { ssr: false, loading: () => <div className="h-full flex items-center justify-center text-xs text-muted-foreground">Загрузка карты…</div> });
 import { Skeleton } from "@/components/ui/skeleton";
 
@@ -142,7 +143,7 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
 function SpeedTabContent({ points, stats }: { points: any[]; stats: any }) {
   const maxSpeed = stats?.maxSpeed ? Math.round(stats.maxSpeed * 3.6) : 0;
   const avgSpeed = stats?.avgSpeed ? Math.round(stats.avgSpeed * 3.6) : 0;
-  const profile = stats?.speedProfile as Array<{ t: number; v: number | null; st: 0 | 1 | 2 }> | undefined;
+  const profile = stats?.speedProfile as Array<{ t: number; v: number | null; st: 0 | 1 | 2; alt?: number | null; lat?: number; lng?: number }> | undefined;
 
   return (
     <div className="space-y-3">
@@ -168,6 +169,15 @@ function SpeedTabContent({ points, stats }: { points: any[]; stats: any }) {
         <div className="text-xs text-muted-foreground py-8 text-center">
           Недостаточно данных о скорости
         </div>
+      )}
+      {/* v2.9.4: высотный профиль (сглаженный, общий компонент) под спидограммой */}
+      {stats?.hasAltitude && profile && profile.length >= 2 && (
+        <AltitudeProfileChart
+          profile={profile}
+          startIso={stats?.startTime}
+          height={120}
+          compact
+        />
       )}
     </div>
   );
@@ -208,47 +218,27 @@ function DeviationsTabContent({ stats }: { stats: any }) {
 }
 
 function AltitudeTabContent({ points, stats }: { points: any[]; stats: any }) {
-  const altPoints = points.filter(p => p.altitude != null);
-  if (altPoints.length < 2) {
+  const profile = stats?.speedProfile as Array<{ t: number; v: number | null; st: 0 | 1 | 2; alt?: number | null }> | undefined;
+  const altPoints = points.filter((p: any) => p.altitude != null);
+  if (altPoints.length < 2 || !profile) {
     return <div className="text-xs text-muted-foreground py-8 text-center">Нет данных о высоте</div>;
   }
-  const sampled = altPoints.length > 500 ? altPoints.filter((_, i) => i % Math.ceil(altPoints.length / 500) === 0) : altPoints;
-  const alts = sampled.map(p => p.altitude);
-  const minAlt = Math.min(...alts);
-  const maxAlt = Math.max(...alts);
-  const range = maxAlt - minAlt || 1;
+  const range = (stats?.elevationGain ?? 0) + (stats?.elevationLoss ?? 0);
 
   return (
     <div className="space-y-3">
       <div className="flex gap-4 text-xs">
         <div><span className="text-muted-foreground">Перепад: </span><span className="font-bold tabular-nums">{Math.round(range)} м</span></div>
         <div><span className="text-muted-foreground">Набор: </span><span className="font-bold tabular-nums">{stats?.elevationGain ? Math.round(stats.elevationGain) : "—"} м</span></div>
+        <div><span className="text-muted-foreground">Снижение: </span><span className="font-bold tabular-nums">{stats?.elevationLoss ? Math.round(stats.elevationLoss) : "—"} м</span></div>
       </div>
-      <svg viewBox="0 0 100 30" className="w-full h-[120px]" preserveAspectRatio="none">
-        <motion.path
-          d={sampled.map((p, i) => {
-            const x = (i / (sampled.length - 1)) * 100;
-            const y = 30 - ((p.altitude - minAlt) / range) * 25;
-            return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
-          }).join(" ") + ` L 100 30 L 0 30 Z`}
-          fill="oklch(0.70 0.15 85 / 0.2)"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-        />
-        <motion.path
-          d={sampled.map((p, i) => {
-            const x = (i / (sampled.length - 1)) * 100;
-            const y = 30 - ((p.altitude - minAlt) / range) * 25;
-            return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
-          }).join(" ")}
-          fill="none"
-          stroke="oklch(0.70 0.15 85)"
-          strokeWidth="0.8"
-          initial={{ pathLength: 0 }}
-          animate={{ pathLength: 1 }}
-          transition={{ duration: 0.5 }}
-        />
-      </svg>
+      {/* v2.9.4: общий высотный профиль с кросхейром/тултипом вместо базового SVG */}
+      <AltitudeProfileChart
+        profile={profile}
+        startIso={stats?.startTime}
+        height={160}
+        compact
+      />
     </div>
   );
 }

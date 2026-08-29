@@ -81,3 +81,34 @@ f1dfa88ab9d78a5cfc256582de3b6ae4031ff84fba7e5fdb5ef47b3a54892e33  /home/z/my-pro
 #   ADMIN_SPEC.md (v2.9.3): cd2cbcca4bc5c4cf9720236adeacdef9b24479d89e8962e0e5caf3892a7bd7ae
 #   METHODOLOGY.md — без изменений: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
 #   OPERATIONS.md — без изменений: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a
+
+# ── v2.9.4 addendum (2026-08-29, round 6) ──────────────────────────────────
+# Релиз v2.9.4 (feature round 6 — высотный профиль + связка карта↔график +
+# спарклайны KPI + стайлинг-раунд 5):
+#   1. Высотный профиль: сэмплы speedProfile дополнены alt (м, сглаживание
+#      окном ±2 исходных точки) и lat/lng (5 знаков); флаг hasAltitude.
+#      Общий компонент src/components/altitude-profile-chart.tsx (SVG
+#      «горного» стиля: градиент рельефа, маркер вершины, min/max сетка,
+#      hover-кросхейр с тултипом высота+скорость). Интеграции: десктоп
+#      session-stats-card (секция под спидограммой) + мобильные Speed/Altitude
+#      табы (AltitudeTab переведён с базового SVG на общий компонент).
+#   2. Связка карта↔профили (desktop session detail): hover по графику —
+#      пульсирующий акцентный маркер на карте; клик по графику — закрепление
+#      точки + панорамирование карты + scrollIntoView; клик по треку на карте —
+#      кросхейр на спидограмме/высотном профиле (ближайший сэмпл по lat/lng).
+#      MapTrack: props focusPoint/panToFocus; SpeedProfileChart/Altitude-
+#      ProfileChart: onHoverIdx/onPinIdx/externalIdx/pinnedIdx.
+#   3. Спарклайны 7 дней в мобильных KPI-тайлах: /api/stats → perDay
+#      +durationSec (сумма endTime−startTime сессий дня); MetricTile prop
+#      spark (мини-SVG 52×16 с градиентной заливкой и точкой «сегодня»);
+#      тайлы Длительность/Поездок/GPS точек в aggregate-режиме аналитики.
+#   4. Стайлинг-раунд 5 (VLM-аудит 7/10): .btn-soft — вторичные кнопки с
+#      заливкой и hover-подъёмом (CSV/Обновить/Экспорт/Удалить), активный таб —
+#      тонированный фон, Leaflet scale-control — мягкая плашка со скруглением,
+#      elev-1 на карточках графиков session detail, telemFocusPulse-анимация
+#      акцентного маркера.
+#
+# Документы в репо (текущие, v2.9.4):
+#   ADMIN_SPEC.md (v2.9.4): 5d91947367e3d70a49e771e8b473952cf57c3430b0dd159459bb913cde45f237
+#   METHODOLOGY.md — без изменений: 7990e0f1e40e532487aa5e6a573b4a9dacbeae224798e46c007a30207329143b
+#   OPERATIONS.md — без изменений: 8e1f0f0396055f7b7a31b20beb2e32e1a5ca7755a69fe5cd0abe06d372113b3a

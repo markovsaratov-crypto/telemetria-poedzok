@@ -78,7 +78,7 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
           )}
         </div>
 
-        {/* Metric tiles (6, 3 in row) */}
+        {/* Metric tiles (6, 3 in row) — v2.9: поля из methodology/route (были top-level в v2.7) */}
         {stats && (
           <div className="grid grid-cols-3 gap-2 p-4">
             <MetricTile label="Длительность" value={Math.round(stats.duration / 60)} unit="мин" />
@@ -86,15 +86,24 @@ export function SessionDetailScreen({ sessionId, onBack }: SessionDetailScreenPr
             <MetricTile label="Ср. скорость" value={stats.avgSpeed ? Math.round(stats.avgSpeed * 3.6) : "—"} unit="км/ч" />
             <MetricTile
               label="EcoScore"
-              value={stats.ecoScore ?? "—"}
-              status={stats.ecoScore >= 80 ? "success" : stats.ecoScore >= 60 ? "warning" : "error"}
+              value={stats.methodology?.ecoScore?.value ?? "—"}
+              status={
+                stats.methodology?.ecoScore?.value == null ? "neutral"
+                : stats.methodology.ecoScore.value! >= 80 ? "success"
+                : stats.methodology.ecoScore.value! >= 60 ? "warning"
+                : "error"
+              }
             />
             <MetricTile
               label="Отклонение"
-              value={stats.deviation ? `${stats.deviation > 0 ? "+" : ""}${stats.deviation.toFixed(0)}%` : "—"}
-              status={Math.abs(stats.deviation || 0) > 10 ? "error" : "neutral"}
+              value={
+                stats.route?.durationDeviationPct != null
+                  ? `${stats.route.durationDeviationPct > 0 ? "+" : ""}${stats.route.durationDeviationPct.toFixed(0)}%`
+                  : "—"
+              }
+              status={Math.abs(stats.route?.durationDeviationPct ?? 0) > 10 ? "error" : "neutral"}
             />
-            <MetricTile label="В пробках" value={stats.timeInTraffic ? Math.round(stats.timeInTraffic / 60) : "—"} unit="мин" />
+            <MetricTile label="В пробках" value={stats.methodology?.timeInTraffic ? Math.round(stats.methodology.timeInTraffic / 60) : "—"} unit="мин" />
           </div>
         )}
 
@@ -195,17 +204,22 @@ function SegmentsTabContent() {
 }
 
 function DeviationsTabContent({ stats }: { stats: any }) {
+  const timeLost = stats?.route?.timeLostToTrafficSec ?? 0;
   return (
     <div className="space-y-3">
       {stats ? (
         <>
           <div className="flex justify-between text-xs">
             <span className="text-muted-foreground">Потери из-за пробок:</span>
-            <span className="font-bold tabular-nums">{stats.timeInTraffic ? Math.round(stats.timeInTraffic / 60) : 0} мин</span>
+            <span className="font-bold tabular-nums">{timeLost ? Math.round(timeLost / 60) : 0} мин</span>
           </div>
           <div className="flex justify-between text-xs">
             <span className="text-muted-foreground">Точность прогноза:</span>
-            <span className="font-bold tabular-nums">{stats.deviation ? `${stats.deviation.toFixed(0)}%` : "—"}</span>
+            <span className="font-bold tabular-nums">{stats.route?.durationDeviationPct != null ? `${stats.route.durationDeviationPct.toFixed(0)}%` : "—"}</span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-muted-foreground">Время в пробках (&lt;10 км/ч):</span>
+            <span className="font-bold tabular-nums">{stats.methodology?.timeInTraffic ? Math.round(stats.methodology.timeInTraffic / 60) : 0} мин</span>
           </div>
         </>
       ) : (
@@ -263,17 +277,41 @@ function AltitudeTabContent({ points, stats }: { points: any[]; stats: any }) {
 
 function SummaryTabContent({ stats }: { stats: any }) {
   if (!stats) return <Skeleton className="h-40 w-full shimmer" />;
+  const m = stats.methodology;
+  const fmtMin = (s?: number | null) => (s != null && s > 0 ? `${Math.round(s / 60)} мин` : "—");
+  const eco = m?.ecoScore?.value;
+  const rel = m?.sessionReliability?.value;
   const groups = [
     { title: "Базовые", items: [
       { label: "Длительность", value: `${Math.round(stats.duration / 60)} мин` },
       { label: "Дистанция", value: `${(stats.distance / 1000).toFixed(2)} км` },
       { label: "Точек", value: stats.pointCount },
-      { label: "В движении", value: stats.movingTime ? `${Math.round(stats.movingTime / 60)} мин` : "—" },
-      { label: "Стоянки", value: stats.idleTime ? `${Math.round(stats.idleTime / 60)} мин` : "—" },
+      { label: "В движении", value: fmtMin(stats.movingTime) },
+      { label: "Стоянки", value: fmtMin(stats.idleTime) },
+      { label: "Разрывы трека", value: m?.gapCount ? `${m.gapCount} (${fmtMin(m.gapTime)})` : "0" },
+    ]},
+    { title: "Активная поездка (v2.9)", items: [
+      { label: "ActiveDuration", value: fmtMin(m?.activeTrip?.activeDuration) },
+      { label: "До старта", value: fmtMin(m?.activeTrip?.preTripIdle) },
+      { label: "После финиша", value: fmtMin(m?.activeTrip?.postTripIdle) },
     ]},
     { title: "Скорость", items: [
       { label: "Средняя", value: stats.avgSpeed ? `${Math.round(stats.avgSpeed * 3.6)} км/ч` : "—" },
       { label: "Максимальная", value: stats.maxSpeed ? `${Math.round(stats.maxSpeed * 3.6)} км/ч` : "—" },
+      { label: "Медиана P50", value: m?.speedP50 != null ? `${Math.round(m.speedP50 * 3.6)} км/ч` : "—" },
+    ]},
+    { title: "Поведение (v2.9)", items: [
+      { label: "EcoScore (CAP)", value: eco != null ? `${eco}/100` : "—" },
+      { label: "AccelerationRMS", value: m?.accelerationRms != null ? `${m.accelerationRms.toFixed(2)} м/с²` : "—" },
+      { label: "JerkRMS", value: m?.jerkRms != null ? `${m.jerkRms.toFixed(2)} м/с³` : "—" },
+      { label: "Резкие торможения", value: m?.harshBrakingCount ?? 0 },
+      { label: "Резкие разгоны", value: m?.harshAccelCount ?? 0 },
+      { label: "Развороты / повороты", value: `${m?.uTurnCount ?? 0} / ${m?.turnCount ?? 0}` },
+    ]},
+    { title: "Качество (v2.9)", items: [
+      { label: "SessionReliability", value: rel != null ? `${Math.round(rel * 100)}%` : "—" },
+      { label: "Точность P90", value: m?.accuracyP90 != null ? `${Math.round(m.accuracyP90)} м` : "—" },
+      { label: "Полнота записи", value: m?.completenessScore != null ? `${Math.round(m.completenessScore * 100)}%` : "—" },
     ]},
     { title: "География", items: [
       { label: "Набор высоты", value: stats.elevationGain ? `${Math.round(stats.elevationGain)} м` : "—" },

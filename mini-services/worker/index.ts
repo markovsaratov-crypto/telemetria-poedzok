@@ -1,4 +1,7 @@
 // index.ts — Worker mini-service entry point (§9.6, §9.7).
+
+// Bun runtime global (worker runs under bun --hot; @types/bun не в зависимостях)
+declare const Bun: { serve(cfg: Record<string, unknown>): { port: number; fetch: unknown; stop(force?: boolean): void }; env: Record<string, string | undefined>; };
 //
 // ИЗОЛЯЦИЯ ПРОЦЕССА (§9.6 anti-pattern: shared event loop):
 // Worker — это полностью отдельный процесс (Bun), не разделяет event loop

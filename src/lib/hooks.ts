@@ -867,6 +867,10 @@ export interface RouteTrendData {
   trend: RouteComparisonData["trend"];
   stats: RouteComparisonData["stats"];
   history: RouteComparisonData["history"];
+  // v2.10.1: paterns для блока 10 аналитики (Частые маршруты) — без них UI пришлось бы
+  // тянуть /api/sessions/[id]/route-comparison для каждой группы отдельно.
+  trafficPattern?: RouteComparisonData["trafficPattern"];
+  dayOfWeekPattern?: RouteComparisonData["dayOfWeekPattern"];
 }
 
 export function useRouteTrend(routeHash: string | null) {

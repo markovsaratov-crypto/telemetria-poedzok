@@ -12,6 +12,7 @@ import { motion, useMotionValue, useTransform, PanInfo } from "framer-motion";
 import { MapPin, Clock, Gauge, Trash2, Download, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { DestinationLabel } from "./DestinationLabel";
+import { MiniMap } from "@/components/mini-map";
 
 interface SessionCardProps {
   destLat: number | null;
@@ -23,6 +24,7 @@ interface SessionCardProps {
   distance?: number;
   avgSpeed?: number | null;
   durationMin?: number;
+  track?: { lat: number; lon: number }[] | null; // v2.9.6: мини-карта маршрута
   onTap: () => void;
   onExport?: () => void;
   onDelete?: () => void;
@@ -81,38 +83,55 @@ export function SessionCard(props: SessionCardProps) {
         className="relative bg-card border rounded-xl p-4 cursor-pointer active:bg-accent/30 transition-colors"
         whileTap={{ scale: 0.98 }}
       >
-        {/* Row 1: Destination address (reverse geocoded) */}
-        <div className="flex items-center gap-2 mb-1.5">
-          <MapPin className="h-4 w-4 text-primary shrink-0" />
-          <DestinationLabel lat={props.destLat} lon={props.destLon} fallback={props.fallbackName} className="text-sm font-medium" />
-          <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
-        </div>
+        <div className="flex items-stretch gap-3">
+          {/* Левая колонка: адрес + время + метрики */}
+          <div className="flex-1 min-w-0">
+            {/* Row 1: Destination address (reverse geocoded) */}
+            <div className="flex items-center gap-2 mb-1.5">
+              <MapPin className="h-4 w-4 text-primary shrink-0" />
+              <DestinationLabel lat={props.destLat} lon={props.destLon} fallback={props.fallbackName} className="text-sm font-medium line-clamp-2" />
+              <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+            </div>
 
-        {/* Row 2: date, time, duration */}
-        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          <Clock className="h-3 w-3" />
-          <span>
-            {start.toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
-            {" · "}
-            {start.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
-            {end && ` → ${end.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}`}
-            {durationMin > 0 && ` · ${durationMin}м`}
-          </span>
-        </div>
+            {/* Row 2: date, time, duration */}
+            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <Clock className="h-3 w-3 shrink-0" />
+              <span>
+                {start.toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
+                {" · "}
+                {start.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}
+                {end && ` → ${end.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}`}
+                {durationMin > 0 && ` · ${durationMin}м`}
+              </span>
+            </div>
 
-        {/* Row 3: distance · speed */}
-        <div className="flex items-center gap-3 text-[11px] text-muted-foreground mt-0.5">
-          {props.distance != null && props.distance > 0 && (
-            <span className="flex items-center gap-1">
-              <MapPin className="h-3 w-3" />
-              {(props.distance / 1000).toFixed(1)} км
-            </span>
-          )}
-          {props.avgSpeed != null && (
-            <span className="flex items-center gap-1">
-              <Gauge className="h-3 w-3" />
-              {Math.round(props.avgSpeed * 3.6)} км/ч
-            </span>
+            {/* Row 3: distance · speed */}
+            <div className="flex items-center gap-3 text-[11px] text-muted-foreground mt-0.5">
+              {props.distance != null && props.distance > 0 && (
+                <span className="flex items-center gap-1">
+                  <MapPin className="h-3 w-3" />
+                  {(props.distance / 1000).toFixed(1)} км
+                </span>
+              )}
+              {props.avgSpeed != null && (
+                <span className="flex items-center gap-1">
+                  <Gauge className="h-3 w-3" />
+                  {Math.round(props.avgSpeed * 3.6)} км/ч
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* v2.9.6: мини-карта маршрута (справа) */}
+          {props.track && props.track.length >= 2 && (
+            <div className="w-[96px] shrink-0 self-center">
+              <MiniMap
+                points={props.track}
+                height={72}
+                className="!rounded-lg"
+                ariaLabel="Мини-карта поездки"
+              />
+            </div>
           )}
         </div>
       </motion.div>

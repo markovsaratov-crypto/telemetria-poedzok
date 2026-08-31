@@ -39,12 +39,31 @@ export async function POST(request: NextRequest) {
     }
 
     const fileBuffer = Buffer.from(await file.arrayBuffer());
+    // AUDIT B-20: защита от zip-bomb/DoS — лимиты на размер архива, число записей
+    // и суммарный распакованный объём (раньше AdmZip распаковывал всё в память).
+    const MAX_ZIP_BYTES = 100 * 1024 * 1024; // 100 МБ — как раньше
+    const MAX_ZIP_ENTRIES = 500;
+    const MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024; // 512 МБ суммарно
+    if (fileBuffer.length > MAX_ZIP_BYTES) {
+      return json({ error: "ZIP file too large" }, 413, { "X-Request-Id": requestId });
+    }
     const zip = new AdmZip(fileBuffer);
-    
+    const entries = zip.getEntries();
+    if (entries.length > MAX_ZIP_ENTRIES) {
+      return json({ error: `Too many entries in ZIP (${entries.length} > ${MAX_ZIP_ENTRIES})` }, 400, { "X-Request-Id": requestId });
+    }
+    let totalUncompressed = 0;
+    for (const entry of entries) {
+      totalUncompressed += entry.header.size;
+      if (totalUncompressed > MAX_UNCOMPRESSED_BYTES) {
+        return json({ error: "ZIP uncompressed content too large (zip-bomb protection)" }, 400, { "X-Request-Id": requestId });
+      }
+    }
+
     // Find Location.csv and Metadata.csv
     let locationCsv = "";
     let metadataCsv = "";
-    for (const entry of zip.getEntries()) {
+    for (const entry of entries) {
       const lower = entry.entryName.toLowerCase();
       if (lower === "location.csv" || (lower.startsWith("location") && lower.endsWith(".csv"))) {
         locationCsv = entry.getData().toString("utf8");

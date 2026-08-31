@@ -4,6 +4,7 @@
 import { NextRequest } from "next/server";
 import { libsql } from "@/lib/db";
 import { extractBearer } from "@/lib/auth";
+import { tokenMatches } from "@/lib/token-check"; // AUDIT B-16: timing-safe сравнение
 import { env } from "@/lib/env";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
@@ -37,11 +38,12 @@ export async function POST(request: NextRequest) {
     const queryToken = url.searchParams.get("token");
     const bearer = extractBearer(request);
     const e = env();
+    // AUDIT B-16: timing-safe сравнение (раньше ===)
     const tokenOk =
-      (bearer && bearer === e.CRON_SECRET) ||
-      (queryToken && queryToken === e.CRON_SECRET) ||
-      (bearer && bearer === e.ADMIN_TOKEN) ||
-      (queryToken && queryToken === e.ADMIN_TOKEN);
+      (await tokenMatches(bearer, e.CRON_SECRET)) ||
+      (await tokenMatches(queryToken, e.CRON_SECRET)) ||
+      (await tokenMatches(bearer, e.ADMIN_TOKEN)) ||
+      (await tokenMatches(queryToken, e.ADMIN_TOKEN));
     if (!tokenOk) {
       return json({ error: "Unauthorized" }, 401, { "X-Request-Id": requestId });
     }

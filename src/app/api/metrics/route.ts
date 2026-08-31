@@ -1,12 +1,25 @@
 // GET /api/metrics — Prometheus text exposition (§7.2)
+// AUDIT B-13: эндпоинт больше не публичный — требует api-scope (cookie/API_KEY),
+// иначе наружу утекают счётчики логинов/регистраций и трафика по путям.
 import { NextRequest } from "next/server";
 import { metricsText } from "@/lib/metrics";
 import { set } from "@/lib/metrics";
 import { db } from "@/lib/db";
+import { authorizeRequest } from "@/lib/auth";
 import { getRateLimiterStats } from "@/lib/rate-limit";
 import { circuitStatus } from "@/lib/routing/circuit-breaker";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(request: NextRequest) {
+  const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
+  const auth = await authorizeRequest(request, "api");
+  if (!auth.ok) {
+    return new Response("# unauthorized\n", {
+      status: 401,
+      headers: { "Content-Type": "text/plain; charset=utf-8", "X-Request-Id": requestId },
+    });
+  }
   try {
     // Обновляем gauge-метрики
     const sessionCount = await db.session.count({ where: { deletedAt: null } });

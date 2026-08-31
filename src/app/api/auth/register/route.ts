@@ -1,5 +1,7 @@
 // POST /api/auth/register — multi-user registration.
-// First registered user becomes admin (bootstrapping); subsequent users get role="user".
+// AUDIT B-1: регистрация выключена по умолчанию (single-user продукт). Включается
+// только явным env REGISTRATION_ENABLED=true; при включении ВСЕ новые аккаунты
+// получают role="user" — авто-эскалации до admin больше нет.
 import { NextRequest, NextResponse } from "next/server";
 import { zRegisterBody } from "@/lib/validation";
 import { hashPassword, issueUserCookie, setSessionCookie } from "@/lib/auth";
@@ -15,6 +17,13 @@ export const dynamic = "force-dynamic";
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   try {
+    // AUDIT B-1: гейт регистрации — по умолчанию 403.
+    if (env().REGISTRATION_ENABLED !== "true") {
+      return NextResponse.json(
+        { error: "Регистрация отключена на этом сервере" },
+        { status: 403, headers: { "X-Request-Id": requestId } }
+      );
+    }
     const body = await request.json().catch(() => null);
     const parsed = zRegisterBody.safeParse(body);
     if (!parsed.success) {
@@ -45,9 +54,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // First user becomes admin
+    // AUDIT B-1: авто-эскалация до admin при пустой таблице User удалена —
+    // любой новый аккаунт строго role="user" (админ назначается только вручную).
     const userCount = await userDb.count();
-    const role = userCount === 0 ? "admin" : "user";
+    if (userCount === 0) {
+      return NextResponse.json(
+        { error: "Первый аккаунт должен быть создан администратором сервера" },
+        { status: 403, headers: { "X-Request-Id": requestId } }
+      );
+    }
+    const role = "user";
 
     const passwordHash = await hashPassword(password);
     const user = await userDb.create({ email, passwordHash, role });

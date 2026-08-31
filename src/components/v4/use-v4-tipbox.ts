@@ -63,6 +63,23 @@ export function bindTips(root: ParentNode = document) {
       el.addEventListener("mouseenter", () => showTip(el));
       el.addEventListener("mouseleave", hideTip);
     }
+    // AUDIT B-18: доступность с клавиатуры — элементы с data-tip становятся
+    // фокусируемыми (tabindex=0), тултип показывается на focus, скрывается на blur,
+    // Enter/Space переключают (для plain-span; кнопки и так кликабельны).
+    if (!el.hasAttribute("tabindex")) {
+      el.setAttribute("tabindex", "0");
+      el.setAttribute("role", el.getAttribute("role") || "tooltip-trigger");
+    }
+    el.addEventListener("focus", () => showTip(el));
+    el.addEventListener("blur", hideTip);
+    el.addEventListener("keydown", (e: Event) => {
+      const ke = e as KeyboardEvent;
+      if (ke.key === "Enter" || ke.key === " ") {
+        ke.preventDefault();
+        if (tipOwner === el) hideTip();
+        else showTip(el);
+      }
+    });
   }
 }
 

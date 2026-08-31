@@ -1,6 +1,6 @@
-// src/lib/metrics-methodology.ts — v2.9 методология (62 метрики в 8 группах + routeId).
+// src/lib/metrics-methodology.ts — v2.10.4 методология (62 метрики в 8 группах + routeId).
 //
-// Реализует все формулы из docs/METHODOLOGY.md (v2.9). Группы:
+// Реализует все формулы из docs/METHODOLOGY.md (v2.10.4). Группы:
 //   1. Базовые (13) — Duration, Distance, AvgSpeed, MaxSpeed, MaxSpeedAllTime,
 //      MovingTime (state machine §4.6), IdleTime (независимый §4.7), PointCount,
 //      StartTime/EndTime, StartCoord/EndCoord, ActiveTrip (§4.11)

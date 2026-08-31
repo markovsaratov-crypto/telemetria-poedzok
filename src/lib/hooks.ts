@@ -68,6 +68,28 @@ export interface StatsResponse {
   heatmapSessions: { startTime: string; pointCount: number }[];
   capacity: { targetLoadRpm: number; rateLimitMaxIngest: number; headroom: number };
   version: string;
+  // DIAG-1: трассировка попыток инжеста (переживает рестарты — Setting в БД)
+  ingestTrace?: {
+    last: {
+      at: string;
+      route: "sensorlogger" | "ingest";
+      deviceId: string | null;
+      outcome: "accepted" | "empty" | "no_gps" | "dropped_all" | "invalid" | "duplicate";
+      points: number;
+      dropped: number;
+      bytes: number | null;
+    } | null;
+    recent: Array<{
+      at: string;
+      route: string;
+      deviceId: string | null;
+      outcome: string;
+      points: number;
+      dropped: number;
+      bytes: number | null;
+    }>;
+    updatedAt: string | null;
+  } | null;
 }
 
 export function useStats() {

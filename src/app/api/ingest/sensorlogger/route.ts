@@ -11,6 +11,7 @@ import { env } from "@/lib/env";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
+import { recordIngestAttempt } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток
 import { randomUUID } from "crypto";
 
 const SESSION_GAP_MS = 60_000; // 60с gap = новая сессия
@@ -160,6 +161,12 @@ export async function POST(request: NextRequest) {
         : [body as RawPoint];
     if (items.length === 0) {
       // SensorLogger "Test Push" шлёт пустой/минимальный body — считаем тест успешным
+      // DIAG-1: «тихий успех» для приложения — трассируем, чтобы отличить от реальной отправки
+      recordIngestAttempt({
+        at: new Date().toISOString(), route: "sensorlogger", deviceId,
+        outcome: "empty", points: 0, dropped: 0,
+        bytes: Buffer.byteLength(JSON.stringify(body ?? null)),
+      });
       return json({ ok: true, test: true, message: "SensorLogger push test passed. Ready to receive GPS data.", deviceId, deviceName }, 200, { "X-Request-Id": requestId });
     }
 
@@ -185,7 +192,15 @@ export async function POST(request: NextRequest) {
       });
     }
     if (points.length === 0) {
-      // Нет GPS-данных в батче, но формат валидный — считаем тестом
+      // Нет GPS-данных в батче, но формат валидный — считаем тестом.
+      // DIAG-1: главный источник «приложение отправляет успешно, а поездок нет» —
+      // батч приходит без location (или все точки отфильтрованы по accuracy).
+      recordIngestAttempt({
+        at: new Date().toISOString(), route: "sensorlogger", deviceId,
+        outcome: droppedInaccurate > 0 ? "dropped_all" : "no_gps",
+        points: 0, dropped: droppedInaccurate,
+        bytes: Buffer.byteLength(JSON.stringify(body)),
+      });
       return json(
         { ok: true, test: true, message: "No GPS points extracted from batch (missing location data). Push test passed.", deviceId, deviceName },
         200,
@@ -248,6 +263,11 @@ export async function POST(request: NextRequest) {
     });
 
     inc("ingest_total", "Total ingest requests", 1, "sensorlogger");
+    recordIngestAttempt({
+      at: new Date().toISOString(), route: "sensorlogger", deviceId,
+      outcome: "accepted", points: points.length, dropped: droppedInaccurate,
+      bytes: payloadBytes,
+    });
     logger.info("SensorLogger ingest", {
       requestId,
       sessionId,

@@ -6,6 +6,7 @@ import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { env } from "@/lib/env";
+import { readIngestTrace } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток инжеста
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -78,6 +79,10 @@ export async function GET(request: NextRequest) {
       orderBy: { startTime: "asc" },
     });
 
+    // DIAG-1: трассировка канала приёма — «тихие» исходы инжеста видны в админке L1.
+    // Не в /health: он публичный, а deviceId/размеры попыток — не для наружи.
+    const ingestTrace = await readIngestTrace().catch(() => ({ last: null, recent: [], updatedAt: null }));
+
     return json(
       {
         totalSessions,
@@ -100,6 +105,8 @@ export async function GET(request: NextRequest) {
           headroom: env().RATE_LIMIT_MAX_INGEST - env().TARGET_LOAD_RPM,
         },
         version: env().APP_VERSION,
+        // DIAG-1: {last, recent (≤20), updatedAt} — попытки инжеста всех исходов
+        ingestTrace,
       },
       200,
       { "X-Request-Id": requestId }

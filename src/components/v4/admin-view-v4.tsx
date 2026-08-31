@@ -40,6 +40,7 @@ import {
   useGitHubBackups,
   useCreateGitHubBackup,
   useSessions,
+  type StatsResponse,
 } from "@/lib/hooks";
 import {
   Card,
@@ -59,11 +60,14 @@ import { bindTips } from "./use-v4-tipbox";
 import { CsvImport } from "@/components/csv-import";
 import { ZipImport } from "@/components/zip-import";
 
-// Версии документов (v2.10.4): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
-// При следующем релизе доков обновить здесь + строки изменений ниже + шапки файлов в docs/.
+// Версии документов (v2.10.6): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
+// При следующем релизе доков обновить здесь + строки изменений ниже + шапки файлов в docs/
+// (методология не менялась с v2.10.4 — prev у неё остаётся v2.9).
 const DOCS = {
-  version: "v2.10.4 · 31.08",
-  prev: "v2.9 · 29.08",
+  methodology: "v2.10.4 · 31.08",
+  methodologyPrev: "v2.9 · 29.08",
+  spec: "v2.10.6 · 31.08",
+  specPrev: "v2.10.4 · 31.08",
 } as const;
 
 export function AdminViewV4() {
@@ -187,19 +191,19 @@ function A1ParamsBlock() {
               <span>
                 Методология
                 <small>
-                  docs/METHODOLOGY.md · <s>было {DOCS.prev}</s>
+                  docs/METHODOLOGY.md · <s>было {DOCS.methodologyPrev}</s>
                 </small>
               </span>
-              <b className="c-plum">{DOCS.version}</b>
+              <b className="c-plum">{DOCS.methodology}</b>
             </div>
             <div className="param">
               <span>
                 Спецификация администратора
                 <small>
-                  docs/ADMIN_SPEC.md · <s>было {DOCS.prev}</s>
+                  docs/ADMIN_SPEC.md · <s>было {DOCS.specPrev}</s>
                 </small>
               </span>
-              <b className="c-plum">{DOCS.version}</b>
+              <b className="c-plum">{DOCS.spec}</b>
             </div>
           </div>
           <div className="doc-log">
@@ -224,6 +228,10 @@ function A1ParamsBlock() {
               <li>
                 <b className="c-plum">UI</b> разрывы <s>1323 сек</s> → 22 мин; точность AvgSpeed в API{" "}
                 <b className="c-plum">0,001 м/с</b> (поверхности сходятся)
+              </li>
+              <li>
+                <b className="c-plum">спека v2.10.6</b> диагностика канала приёма: каждая попытка инжеста
+                (включая <s>«тихие» 200 OK без GPS-точек</s>) фиксируется и видна в АДМИН → L1
               </li>
             </ul>
           </div>
@@ -782,6 +790,102 @@ function SystemInfoLegacyCard() {
           </div>
         ))}
       </div>
+
+      {/* DIAG-1 (v2.10.6): диагностика канала приёма. «Тихие» исходы инжеста
+          (пустой батч / без GPS / точки отброшены по accuracy / 401 / 400)
+          раньше не оставляли следов в БД — приложение показывало «отправлено
+          успешно», а поездок не было. Теперь каждая авторизованная попытка
+          фиксируется в Setting «diag.ingest.trace» и видна здесь. */}
+      <IngestChannelDiag trace={stats?.ingestTrace ?? null} />
+    </div>
+  );
+}
+
+// === DIAG-1: диагностика канала приёма данных (ингест) ===
+const INGEST_OUTCOME_LABEL: Record<string, string> = {
+  accepted: "точки приняты",
+  empty: "пустой батч (test push)",
+  no_gps: "нет GPS-точек в батче",
+  dropped_all: "все точки отброшены (точность > 100 м)",
+  invalid: "невалидный формат (400)",
+  duplicate: "дубль по идемпотентности",
+};
+
+function IngestChannelDiag({
+  trace,
+}: {
+  trace: NonNullable<StatsResponse["ingestTrace"]> | null;
+}) {
+  const last = trace?.last ?? null;
+  const recent = trace?.recent ?? [];
+
+  const lastAt = last ? new Date(last.at) : null;
+  const lastTime = lastAt
+    ? lastAt.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : "—";
+  const lastDay = lastAt ? lastAt.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" }) : "";
+
+  const statusColor =
+    !last
+      ? "var(--red)" // попыток не было вовсе — канал молчит
+      : last.outcome === "accepted"
+        ? "var(--plum)"
+        : "var(--amber)";
+  const statusText = !last
+    ? "попыток приёма не зафиксировано"
+    : last.outcome === "accepted"
+      ? `${lastDay} ${lastTime} · ${last.deviceId ?? "?"} · принято ${fmtNumber(last.points)} т.`
+      : `${lastDay} ${lastTime} · ${last.deviceId ?? "?"} · ${INGEST_OUTCOME_LABEL[last.outcome] ?? last.outcome}`;
+
+  const hint = !last
+    ? "Ни один запрос инжеста не дошёл до сервера с момента включения диагностики: проверьте URL и токен в приложении"
+    : last.outcome === "accepted"
+      ? "Канал работает: точки дошли до БД"
+      : last.outcome === "no_gps"
+        ? "Запрос дошёл, но в батче нет location — приложение шлёт сенсоры без GPS (проверьте разрешение геолокации в приложении)"
+        : last.outcome === "dropped_all"
+          ? "Запрос дошёл, но все точки отброшены фильтром точности > 100 м (слабый GPS-сигнал)"
+          : last.outcome === "empty"
+            ? "Пришёл пустой батч — это «Test Push», данных нет"
+            : last.outcome === "invalid"
+              ? "Формат тела запроса не прошёл валидацию (400)"
+              : "Повторная отправка уже известной сессии";
+
+  return (
+    <div className="ingest-diag">
+      <div className="param" style={{ borderBottom: "none" }}>
+        <span>
+          Канал приёма (инжест)
+          <small>каждая попытка фиксируется в БД · переживает рестарты</small>
+        </span>
+        <b style={{ color: statusColor }}>{statusText}</b>
+      </div>
+      <div className="ingest-hint">{hint}</div>
+      {recent.length > 1 && (
+        <div className="ingest-list-wrap">
+          <div className="doc-log-cap">последние попытки · всего зафиксировано {recent.length}</div>
+          <ul className="ingest-list">
+            {recent.slice(0, 8).map((r, i) => {
+              const t = new Date(r.at);
+              const color = r.outcome === "accepted" ? "var(--plum)" : "var(--amber)";
+              return (
+                <li key={i}>
+                  <span className="mono">
+                    {t.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" })}{" "}
+                    {t.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                  </span>
+                  <span>{r.route === "sensorlogger" ? "SensorLogger" : "API"}</span>
+                  <span>{r.deviceId ?? "—"}</span>
+                  <span style={{ color }}>{INGEST_OUTCOME_LABEL[r.outcome] ?? r.outcome}</span>
+                  <span className="mono">
+                    {r.outcome === "accepted" ? `${fmtNumber(r.points)} т.` : r.dropped > 0 ? `−${fmtNumber(r.dropped)} т.` : ""}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

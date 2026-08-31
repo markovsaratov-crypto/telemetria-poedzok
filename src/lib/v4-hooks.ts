@@ -162,6 +162,16 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
     SessionStats["route"]
   >[];
 
+  // FIX-C1/C2: активные составляющие периода — сумма активных длительностей/хвостов
+  // поездок (§4.11). Раньше агрегат avgSpeed и Δ по времени считались от полной
+  // длительности записей — стоянки-хвосты занижали среднюю и завышали отклонение от плана.
+  const activeDurations = m.map((x) => (x.activeTrip?.hasActiveTrip ? x.activeTrip.activeDuration : 0));
+  const activeDurTotal = sum(activeDurations);
+  const preIdleTotal = sum(m.map((x) => x.activeTrip?.preTripIdle ?? 0));
+  const postIdleTotal = sum(m.map((x) => x.activeTrip?.postTripIdle ?? 0));
+  const activeIdleTotal = sum(m.map((x) => x.activeTrip?.activeIdleTime ?? 0));
+  const anyActive = activeDurations.some((d) => d > 0);
+
   const planDistanceM = sum(routes.map((r) => r.planDistanceM));
   const planDurationSec = sum(routes.map((r) => r.planDurationSec));
   const trafficDurationSec = sum(routes.map((r) => r.trafficDurationSec));
@@ -181,6 +191,9 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
 
   const hours = duration / 3600;
   const distTotal = distance;
+  // FIX-C1: средняя скорость периода = Σ активных дистанций / Σ активных длительностей
+  // (согласовано с поездиным KPI §4.3). Fallback на полную длительность — для legacy-данных.
+  const avgSpeedBase = activeDurTotal > 0 ? activeDurTotal : duration;
 
   return {
     sessionId,
@@ -194,7 +207,7 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
     hasAltitude: sorted.some((s) => s.hasAltitude),
     routeHash: null,
     topologyHash: null,
-    avgSpeed: duration > 0 ? distance / duration : null,
+    avgSpeed: avgSpeedBase > 0 ? distance / avgSpeedBase : null,
     maxSpeed: Math.max(0, ...sorted.map((s) => s.maxSpeed ?? 0)),
     avgAltitude: wavg(
       sorted.map((s) => ({ v: s.avgAltitude, w: s.pointCount ?? 0 })) as Array<{ v: number | null; w: number }>
@@ -267,15 +280,17 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
         rating: avg(m.map((x) => x.sessionReliability?.value ?? null)) != null ? rating : "н/д",
       },
       activeTrip: {
-        hasActiveTrip: false,
-        activeStartTime: 0,
-        activeEndTime: 0,
-        activeDuration: 0,
-        activeStartCoord: { lat: 0, lon: 0 },
-        activeEndCoord: { lat: 0, lon: 0 },
-        preTripIdle: 0,
-        postTripIdle: 0,
-        activeIdleTime: 0,
+        // FIX-C1/C2: агрегат активных поездок периода (суммы по поездкам §4.11) —
+        // шапка периода и KPI «в поездках» теперь показывают честное активное время
+        hasActiveTrip: anyActive,
+        activeStartTime: m.find((x) => x.activeTrip?.hasActiveTrip)?.activeTrip.activeStartTime ?? 0,
+        activeEndTime: [...m].reverse().find((x) => x.activeTrip?.hasActiveTrip)?.activeTrip.activeEndTime ?? 0,
+        activeDuration: activeDurTotal,
+        activeStartCoord: m.find((x) => x.activeTrip?.hasActiveTrip)?.activeTrip.activeStartCoord ?? { lat: 0, lon: 0 },
+        activeEndCoord: [...m].reverse().find((x) => x.activeTrip?.hasActiveTrip)?.activeTrip.activeEndCoord ?? { lat: 0, lon: 0 },
+        preTripIdle: preIdleTotal,
+        postTripIdle: postIdleTotal,
+        activeIdleTime: activeIdleTotal,
       },
       motion: { movingTime, idleTime, gapTime, states: [] },
     },
@@ -287,7 +302,10 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       trafficDurationSec,
       timeLostToTrafficSec,
       durationDeviationPct:
-        planDurationSec > 0 ? ((duration - planDurationSec) / planDurationSec) * 100 : null,
+        // FIX-C2: факт = Σ активных длительностей (§6.2), а не полные записи
+        planDurationSec > 0
+          ? ((activeDurTotal > 0 ? activeDurTotal : duration) - planDurationSec) / planDurationSec * 100
+          : null,
       distanceDeviationPct:
         planDistanceM > 0 ? ((distance - planDistanceM) / planDistanceM) * 100 : null,
       speedDeviationPct: null,

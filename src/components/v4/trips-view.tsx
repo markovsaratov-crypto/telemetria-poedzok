@@ -412,10 +412,10 @@ function TripBody({
   const moveMin = Math.round(stats.movingTime / 60);
   const idleMin = Math.round(stats.idleTime / 60);
   const gapSec = stats.gapTime ?? 0;
-  const avgKmh =
-    stats.distance > 0 && stats.duration > 0
-      ? (stats.distance / stats.duration) * 3.6
-      : null;
+  // FIX-C1: средняя — из API (§4.3: активная дистанция / активная длительность).
+  // Раньше пересчитывалась локально как «вся дистанция / вся длительность» —
+  // расходилась с подписью «активной части» и занижалась хвостами.
+  const avgKmh = stats.avgSpeed != null ? stats.avgSpeed * 3.6 : null;
   const maxKmh = stats.maxSpeed != null ? stats.maxSpeed * 3.6 : null;
 
   return (
@@ -439,7 +439,7 @@ function TripBody({
         />
         <Stat
           value={`${Math.round(stats.duration / 60)} мин`}
-          tip="Длительность записи (§4.1): от первой до последней точки, включая стоянки"
+          tip="Длительность записи (§4.1): от первой до последней точки, включая стоянки-«хвосты». Аналитика (дистанция, скорость) — по активной поездке (§4.11)"
           label="Длительность"
         />
         <Stat

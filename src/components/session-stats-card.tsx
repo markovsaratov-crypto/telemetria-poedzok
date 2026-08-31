@@ -156,40 +156,54 @@ export function SessionStatsCard({
     return null;
   }
 
+  // FIX-C1 (эргономика): расшифровка активной части прямо в тайлах — пользователь видит,
+  // что именно «Дистанция» и «Ср. скорость» считаются без стоянок-хвостов (§4.11)
+  const at = stats.methodology?.activeTrip;
+  const tailsSec = at?.hasActiveTrip ? Math.max(0, at.preTripIdle + at.postTripIdle) : 0;
+  const activeIdleSec = at?.hasActiveTrip ? Math.max(0, at.activeIdleTime) : 0;
+  const rawDist = stats.rawDistanceM ?? stats.distance;
+  const driftM = Math.max(0, rawDist - stats.distance);
+
   const items = [
     {
       icon: <RouteIcon className="h-3 w-3" />,
       label: "Дистанция",
       value: stats.distance > 0 ? `${fmtNumber(stats.distance / 1000, 2)} км` : "—",
-      sub: `${fmtNumber(stats.distance)} м`,
+      sub:
+        driftM > 30
+          ? `без хвостов · дрейф +${fmtNumber(driftM, 0)} м исключён`
+          : `${fmtNumber(stats.distance)} м`,
       color: "text-emerald-600 dark:text-emerald-400",
     },
     {
       icon: <Clock className="h-3 w-3" />,
       label: "Длительность",
       value: formatDuration(stats.duration),
-      sub: "общее время",
+      sub: tailsSec > 30 ? `в т.ч. хвосты ${formatDuration(tailsSec)} — вне аналитики` : "общее время",
       color: "text-teal-600 dark:text-teal-400",
     },
     {
       icon: <Timer className="h-3 w-3" />,
       label: "В движении",
       value: formatDuration(stats.movingTime),
-      sub: `${Math.round((stats.movingTime / (stats.duration || 1)) * 100)}% времени`,
+      sub: `${Math.round((stats.movingTime / (stats.duration || 1)) * 100)}% записи`,
       color: "text-emerald-600 dark:text-emerald-400",
     },
     {
       icon: <Coffee className="h-3 w-3" />,
       label: "Стоянки",
       value: formatDuration(stats.idleTime),
-      sub: `${Math.round((stats.idleTime / (stats.duration || 1)) * 100)}% времени`,
+      sub:
+        tailsSec > 30
+          ? `в поездке ${formatDuration(activeIdleSec)} · хвосты ${formatDuration(tailsSec)}`
+          : `${Math.round((stats.idleTime / (stats.duration || 1)) * 100)}% записи`,
       color: "text-amber-600 dark:text-amber-400",
     },
     {
       icon: <Gauge className="h-3 w-3" />,
       label: "Ср. скорость",
       value: stats.avgSpeed != null ? `${fmtNumber(stats.avgSpeed * 3.6, 1)} км/ч` : "—",
-      sub: stats.avgSpeed != null ? `${fmtNumber(stats.avgSpeed, 1)} м/с` : "нет данных",
+      sub: stats.avgSpeed != null ? `${fmtNumber(stats.avgSpeed, 1)} м/с · по активной части` : "нет поездки",
       color: "text-teal-600 dark:text-teal-400",
     },
     {
@@ -239,7 +253,12 @@ export function SessionStatsCard({
           Детальная статистика
         </CardTitle>
         <CardDescription className="text-xs flex flex-wrap items-center gap-2">
-          <span>{stats.pointCount} точек · {fmtNumber(stats.distance / 1000, 2)} км · {formatDuration(stats.duration)}</span>
+          <span>
+            {stats.pointCount} точек · {fmtNumber(stats.distance / 1000, 2)} км · {formatDuration(stats.duration)}
+            {at?.hasActiveTrip && tailsSec > 30 && (
+              <> · активная поездка <span className="font-medium text-foreground">{formatDuration(at.activeDuration)}</span> (хвосты {formatDuration(tailsSec)})</>
+            )}
+          </span>
           {stats.routeHash && (
             <span className="inline-flex items-center rounded-full border bg-muted/50 px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground" title={`topology: ${stats.topologyHash ?? "—"}`}>
               {stats.routeHash}
@@ -399,7 +418,7 @@ function MethodologyGrid({ m }: { m: MethodologyMetrics }) {
   const srelVal = m.sessionReliability?.value ?? null;
   const items = [
     // Группа 1 — базовые
-    { icon: <Activity className="h-3 w-3" />, label: "Активная поездка", value: m.activeTrip?.hasActiveTrip ? formatDuration(m.activeTrip.activeDuration) : "нет", sub: m.activeTrip?.hasActiveTrip ? `хвосты ${formatDuration(m.activeTrip.preTripIdle + m.activeTrip.postTripIdle)}` : "нет движения", color: m.activeTrip?.hasActiveTrip ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground" },
+    { icon: <Activity className="h-3 w-3" />, label: "Активная поездка", value: m.activeTrip?.hasActiveTrip ? formatDuration(m.activeTrip.activeDuration) : "нет", sub: m.activeTrip?.hasActiveTrip ? `до старта ${formatDuration(m.activeTrip.preTripIdle)} · после финиша ${formatDuration(m.activeTrip.postTripIdle)}` : "нет движения", color: m.activeTrip?.hasActiveTrip ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground" },
     { icon: <Scissors className="h-3 w-3" />, label: "Разрывы трека", value: String(m.gapCount), sub: m.gapTime > 0 ? `потеряно ${formatDuration(m.gapTime)}` : "нет разрывов", color: m.gapCount > 0 ? "text-amber-600 dark:text-amber-400" : "" },
     // Группа 2 — скоростной анализ (по активной части)
     { icon: <ChartBar className="h-3 w-3" />, label: "Скорость P50", value: m.speedP50 != null ? `${fmtNumber(m.speedP50 * 3.6, 1)} км/ч` : "—", sub: "медиана" },

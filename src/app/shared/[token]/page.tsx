@@ -25,6 +25,14 @@ interface SharedPayload {
   pointCount: number;
   points: SharedPoint[];
   expiresAt: string;
+  // FIX-C3: серверные KPI по активной части (§4.11) — считаются в /api/share
+  distanceM?: number;
+  rawDistanceM?: number;
+  activeDurationSec?: number;
+  preTripIdleSec?: number;
+  postTripIdleSec?: number;
+  hasActiveTrip?: boolean;
+  maxSpeedMs?: number;
 }
 
 // P2-14: канонический гаверсинус — src/lib/geo.ts (была локальная копия)
@@ -107,14 +115,37 @@ export default function SharedPage({ params }: { params: Promise<{ token: string
   // а не Number(...) (NaN → «Invalid Date»). Поддержка числовых мс оставлена для совместимости.
   const startTimeMs = toMs(data.startTime);
   const endTimeMs = toMs(data.endTime);
-  let distance = 0;
-  let maxSpeed = 0;
-  for (let i = 1; i < pts.length; i++) {
-    distance += haversineM(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
-    if (pts[i].speed != null) maxSpeed = Math.max(maxSpeed, pts[i].speed!);
-  }
   const durationSec = Math.max(0, (endTimeMs - startTimeMs) / 1000);
-  const avgSpeed = durationSec > 0 && distance > 0 ? distance / durationSec : null;
+
+  // FIX-C3: KPI — из серверного расчёта по активной части (согласован с админкой):
+  //   дистанция — без дрейфа «хвостов», средняя — активная дистанция / активное время,
+  //   макс — с фильтром GPS-выбросов. Локальный пересчёт оставлен как fallback
+  //   (устаревший/кэшированный payload без новых полей).
+  const activeDuration = data.activeDurationSec ?? 0;
+  const tailsSec = Math.max(0, (data.preTripIdleSec ?? 0) + (data.postTripIdleSec ?? 0));
+  let distance: number;
+  let maxSpeed: number;
+  if (data.distanceM != null) {
+    distance = data.distanceM;
+    maxSpeed = data.maxSpeedMs ?? 0;
+  } else {
+    distance = 0;
+    maxSpeed = 0;
+    for (let i = 1; i < pts.length; i++) {
+      distance += haversineM(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
+      if (pts[i].speed != null) maxSpeed = Math.max(maxSpeed, pts[i].speed!);
+    }
+  }
+  const avgSpeed =
+    data.distanceM != null
+      ? activeDuration > 0 && distance > 0
+        ? distance / activeDuration
+        : null
+      : durationSec > 0 && distance > 0
+        ? distance / durationSec
+        : null;
+  const rawDistance = data.rawDistanceM ?? distance;
+  const driftM = Math.max(0, rawDistance - distance);
 
   // SVG-превью трека
   const lats = pts.map((p) => p.lat);
@@ -148,9 +179,24 @@ export default function SharedPage({ params }: { params: Promise<{ token: string
         </div>
 
         <div className="grid grid-cols-3 gap-3">
-          <Stat icon={<RouteIcon className="h-4 w-4" />} label="Дистанция" value={distance > 0 ? `${fmtNum(distance / 1000)} км` : "—"} />
-          <Stat icon={<Timer className="h-4 w-4" />} label="Длительность" value={fmtDuration(durationSec)} />
-          <Stat icon={<Gauge className="h-4 w-4" />} label="Скорость" value={avgSpeed ? `${fmtNum(avgSpeed * 3.6, 1)} км/ч` : "—"} sub={maxSpeed ? `макс ${fmtNum(maxSpeed * 3.6, 0)} км/ч` : undefined} />
+          <Stat
+            icon={<RouteIcon className="h-4 w-4" />}
+            label="Дистанция"
+            value={distance > 0 ? `${fmtNum(distance / 1000)} км` : "—"}
+            sub={driftM > 30 ? `без хвостов · дрейф −${fmtNum(driftM / 1000, 2)} км` : undefined}
+          />
+          <Stat
+            icon={<Timer className="h-4 w-4" />}
+            label="Длительность"
+            value={fmtDuration(durationSec)}
+            sub={tailsSec > 30 ? `активная поездка ${fmtDuration(activeDuration)}` : undefined}
+          />
+          <Stat
+            icon={<Gauge className="h-4 w-4" />}
+            label="Скорость"
+            value={avgSpeed ? `${fmtNum(avgSpeed * 3.6, 1)} км/ч` : "—"}
+            sub={maxSpeed ? `макс ${fmtNum(maxSpeed * 3.6, 0)} км/ч${activeDuration > 0 ? " · по активной части" : ""}` : undefined}
+          />
         </div>
 
         <div className="rounded-lg border bg-card/50 overflow-hidden">

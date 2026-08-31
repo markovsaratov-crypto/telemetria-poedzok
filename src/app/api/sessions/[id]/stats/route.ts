@@ -8,6 +8,7 @@ import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { computeMethodologyMetrics, calibrateEcoScoreBaselinesFromCorpus, type EcoScoreBaselines } from "@/lib/metrics-methodology";
+import { computeMovingTime, computeActiveTrip } from "@/lib/active-trip";
 import { avgSpeedMs, meanPointSpeedMs, maxSpeedMs, normalizeSessionSpeeds } from "@/lib/kpi"; // P2-13: единый источник KPI
 import { haversineM } from "@/lib/geo"; // P2-14: канонический гаверсинус
 import { trackLatency } from "@/lib/latency"; // P2-16: замер api_latency_p95
@@ -312,8 +313,19 @@ export async function GET(
       );
     }
 
-    // Расчёт дистанции
-    let distance = 0;
+    // Расчёт дистанций: FIX-C1 — аналитическая дистанция считается по АКТИВНОМУ ОКНУ
+    // поездки (§4.11 [ActiveStartTime, ActiveEndTime]): дрейф GPS в «хвостах» (стоянка
+    // до старта и после финиша) больше не накручивает дистанцию и AvgSpeed.
+    // rawDistance (вся запись) отдаётся отдельно как rawDistanceM — для прозрачности.
+    // Окно вычисляем ДО основного цикла: state machine §4.6 + границы §4.11
+    // (внутри computeMethodologyMetrics пересчитываются ещё раз с теми же входами —
+    // детерминированно, дублирование только по CPU, не по семантике).
+    const motion = computeMovingTime(points);
+    const activeTrip = computeActiveTrip(points, motion);
+    const hasActive = activeTrip.hasActiveTrip;
+
+    let distance = 0; // FIX-C1: активная дистанция (метрика KPI, план-факт, EcoScore)
+    let rawDistance = 0; // вся запись (диагностика хвостов)
     let speedSum = 0;
     let speedCount = 0;
     let elevationGain = 0;
@@ -327,10 +339,16 @@ export async function GET(
     for (let i = 0; i < points.length; i++) {
       const p = points[i];
 
-      // Distance
+      // Distance: raw — по всем интервалам, active — только внутри активного окна
+      // (критерий тот же, что в route-comparison.ts: правая точка интервала ≥ старта,
+      // левая ≤ финиша; интервалы «хвостовой» стоянки с её дрейфом отбрасываются)
       if (i > 0) {
         const prev = points[i - 1];
-        distance += haversineM(prev.lat, prev.lon, p.lat, p.lon);
+        const d = haversineM(prev.lat, prev.lon, p.lat, p.lon);
+        rawDistance += d;
+        if (hasActive && p.timestamp >= activeTrip.activeStartTime && prev.timestamp <= activeTrip.activeEndTime) {
+          distance += d;
+        }
       }
 
       // Speed stats — сумма для meanPointSpeed (НЕ KPI AvgSpeed, см. ниже)
@@ -361,10 +379,15 @@ export async function GET(
     // v2.9: метрики методологии (§12) — state machine + ActiveTrip + CAP EcoScore + новые поведенческие
     // v2.10.0 R6.1: EcoScore использует corpus-calibrated baselines (median of all sessions in DB)
     // instead of DEFAULT_BASELINES that produce EcoScore=0 on noisy synthetic CSV data.
+    // FIX-C1: в методологию передаётся АКТИВНАЯ дистанция — знаменатели EcoScore
+    // (rates per km) и гейты «достаточно ли поездки» согласованы с активной частью,
+    // как и перебор ускорений, который и так фильтруется тем же окном.
     const ecoBaselines = await getCorpusEcoBaselines();
     const methodology = computeMethodologyMetrics(points, distance, durationSec, ecoBaselines);
     // v2.9: AvgSpeed = Distance / ActiveDuration (§4.3 + §4.11)
-    const avgSpeed = avgSpeedMs(distance, durationSec, methodology.activeTrip.activeDuration);
+    // FIX-C1: числитель и знаменатель — обе активные части (раньше гибрид
+    // «вся запись / активное время»). Нет поездки → null (а не дрейф/длительность).
+    const avgSpeed = hasActive ? avgSpeedMs(distance, durationSec, activeTrip.activeDuration) : null;
     const speedMean = meanPointSpeedMs(points);
 
     // Bounding box
@@ -378,7 +401,12 @@ export async function GET(
     };
 
     // P1-7: план-факт из завершённого TrafficJob
-    const route = await computePlanFact(id, distance, durationSec, avgSpeed);
+    // FIX-C2: §6.2/§6.3 — фактическое время = ActiveDuration (не вся запись):
+    // стоянка-хвост до старта больше не завышает DurationDeviation. Нет поездки —
+    // передаём длительность записи как есть (сравнение всё равно покажет Δ, но без
+    // ложной точности: plan обычно отсутствует у пустых сессий).
+    const actualDurationSec = hasActive ? activeTrip.activeDuration : durationSec;
+    const route = await computePlanFact(id, distance, actualDurationSec, avgSpeed);
     // v2.9.3: спидограмма (даунсемпл ≤240 точек, сек от старта, км/ч, состояние)
     // v2.9.4: сэмплы дополнены alt/lat/lng (высотный профиль + связка с картой)
     const speedProfile = buildSpeedProfile(points, startTime);
@@ -390,7 +418,10 @@ export async function GET(
       {
         sessionId: id,
         pointCount: points.length,
+        // FIX-C1: distance — активная дистанция поездки (KPI); rawDistanceM — вся запись
+        // (диагностика: сколько «накрутил» дрейф в хвостах)
         distance: Math.round(distance),
+        rawDistanceM: Math.round(rawDistance),
         duration: Math.round(durationSec),
         // v2.9.3: спидограмма для графика скорость-время
         speedProfile,

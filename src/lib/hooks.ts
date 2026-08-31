@@ -170,7 +170,10 @@ export function useSession(id: string | null) {
 export interface SessionStats {
   sessionId: string;
   pointCount: number;
+  // FIX-C1: distance — дистанция АКТИВНОЙ поездки (§4.11); rawDistanceM — вся запись
+  // (разница = дрейф GPS в хвостах стоянки до старта/после финиша)
   distance: number;
+  rawDistanceM?: number;
   duration: number;
   movingTime: number;
   idleTime: number;

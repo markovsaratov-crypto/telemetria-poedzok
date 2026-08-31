@@ -289,12 +289,13 @@ export function TelematikaLayout(props: LayoutProps) {
               {PERIOD_LIST.map((p) => (
                 <button
                   key={p.id}
-                  className={`pill ${period === p.id && !selectedSessionId ? "active" : ""} ${selectedSessionId ? "dim" : ""}`}
+                  className={`pill ${period === p.id ? "active" : ""}`}
                   onClick={() => {
                     onPeriodChange(p.id);
+                    // v2.10.2: клик по периоду → период-режим (все поездки периода).
                     onSelectedSessionChange(null);
                   }}
-                  title={`Период: ${p.label}`}
+                  title={`Период: ${p.label} — метрики по всем поездкам за период`}
                 >
                   {p.label}
                 </button>
@@ -326,7 +327,7 @@ export function TelematikaLayout(props: LayoutProps) {
                 ) : sessionsList.length === 0 ? (
                   <span>Нет поездок</span>
                 ) : (
-                  <span>Поездка…</span>
+                  <span>Все поездки · период</span>
                 )}
                 <ChevronDown className="chev h-3 w-3" />
               </button>
@@ -341,6 +342,21 @@ export function TelematikaLayout(props: LayoutProps) {
                     autoFocus
                   />
                   <div className="trip-filter-list">
+                    {/* v2.10.2: сброс к период-режиму — метрики по всем поездкам периода */}
+                    <button
+                      className={`trip-filter-item period-reset ${!selectedSessionId ? "selected" : ""}`}
+                      onClick={() => {
+                        onSelectedSessionChange(null);
+                        setTripFilterOpen(false);
+                      }}
+                    >
+                      <span>
+                        <b>Все поездки периода</b>
+                        <br />
+                        <span className="mono">агрегат за выбранный период</span>
+                      </span>
+                      <span className="mono">период</span>
+                    </button>
                     {filteredSessions.length === 0 ? (
                       <div className="trip-filter-empty">
                         {sessionsList.length === 0 ? "Список поездок пуст" : "Ничего не найдено"}

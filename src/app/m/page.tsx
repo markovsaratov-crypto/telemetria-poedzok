@@ -90,7 +90,7 @@ export default function MobilePage() {
         {tab === "analytics" && (
           <AnalyticsView period={period} sessionId={selectedSessionId} />
         )}
-        {tab === "trips" && <TripsView />}
+        {tab === "trips" && <TripsView onGoAdmin={() => setTab("admin")} />}
         {tab === "admin" && <AdminViewV4 />}
       </TelematikaLayout>
 

@@ -14,7 +14,6 @@ import {
   Database,
   HardDrive,
   Hash,
-  GitBranch,
   Zap,
   ShieldCheck,
   RotateCcw,
@@ -24,6 +23,9 @@ import {
   CheckCircle2,
   AlertCircle,
   RefreshCw,
+  Radio,
+  Copy,
+  Send,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
@@ -37,6 +39,7 @@ import {
   useUpdateSetting,
   useGitHubBackups,
   useCreateGitHubBackup,
+  useSessions,
 } from "@/lib/hooks";
 import {
   Card,
@@ -69,6 +72,7 @@ export function AdminViewV4() {
       <A3QualitySummaryBlock />
       <A4PipelineBlock />
       <A5ImportBlock />
+      <A6IngestDiagBlock />
 
       {/* === Разделитель legacy === */}
       <div className="legacy-grid">
@@ -387,6 +391,260 @@ function A5ImportBlock() {
   );
 }
 
+// === A6: Канал загрузки (диагностика инжеста) ===
+// Отвечает на вопрос «почему не подтягиваются новые поездки»:
+// показывает свежесть последней сессии в БД, URL эндпоинта для SensorLogger
+// и позволяет прямо из браузера проверить доступность сервера и валидность
+// INGEST_TOKEN (тест-push с пустым батчем — данных не создаёт).
+function A6IngestDiagBlock() {
+  const sessions = useSessions({ limit: 5 });
+  const list = sessions.data?.sessions ?? [];
+  const latest = list.length
+    ? Math.max(...list.map((s) => new Date(s.endTime ?? s.startTime).getTime()))
+    : null;
+  const hoursAgo = latest != null ? (Date.now() - latest) / 3_600_000 : null;
+
+  const [token, setToken] = React.useState("");
+  const [testing, setTesting] = React.useState(false);
+  const [result, setResult] = React.useState<{
+    status: number;
+    ms: number;
+    body: unknown;
+    withToken: boolean;
+    networkError?: string;
+  } | null>(null);
+
+  async function runTest() {
+    const withToken = token.trim().length > 0;
+    setTesting(true);
+    setResult(null);
+    const t0 = performance.now();
+    try {
+      const url = `/api/ingest/sensorlogger?deviceId=diag-web${
+        withToken ? `&token=${encodeURIComponent(token.trim())}` : ""
+      }`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "[]",
+      });
+      let body: unknown = null;
+      try {
+        body = await res.json();
+      } catch {
+        /* не JSON — ок */
+      }
+      setResult({ status: res.status, ms: Math.round(performance.now() - t0), body, withToken });
+    } catch (e) {
+      setResult({
+        status: 0,
+        ms: Math.round(performance.now() - t0),
+        body: null,
+        withToken,
+        networkError: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const endpointUrl = `${origin}/api/ingest/sensorlogger?token=<INGEST_TOKEN>&deviceId=<ID>`;
+
+  function copyUrl() {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(endpointUrl).then(
+        () => toast.success("URL для SensorLogger скопирован"),
+        () => toast.error("Не удалось скопировать")
+      );
+    }
+  }
+
+  // Интерпретация результата теста
+  let verdict: { tone: "ok" | "warn" | "err"; title: string; text: string } | null =
+    null;
+  if (result) {
+    if (result.status === 0) {
+      verdict = {
+        tone: "err",
+        title: "Сервер недоступен",
+        text: `Браузер не смог достучаться до эндпоинта: ${result.networkError ?? "сетевая ошибка"}. Проверьте соединение.`,
+      };
+    } else if (result.status === 401) {
+      verdict = result.withToken
+        ? {
+            tone: "err",
+            title: "Токен отклонён (401)",
+            text: "Сервер доступен, но INGEST_TOKEN не совпадает с токеном на сервере (переменная INGEST_TOKEN в окружении). Обновите токен в настройках HTTP Push в SensorLogger — именно из-за этого поездки молча не доходят.",
+          }
+        : {
+            tone: "ok",
+            title: "Сервер доступен",
+            text: "Эндпоинт отвечает (401 без токена — это норма: токен обязателен). Чтобы проверить сам токен, вставьте его в поле выше и повторите тест.",
+          };
+    } else if (result.status === 200) {
+      verdict = {
+        tone: "ok",
+        title: "Канал и токен работают",
+        text: "URL и INGEST_TOKEN верны — сервер принял тест-push. Если новые поездки всё равно не появляются, проблема в настройке SensorLogger на iPhone (см. чек-лист ниже): сервер от телефона данных не получает.",
+      };
+    } else {
+      verdict = {
+        tone: "warn",
+        title: `Неожиданный ответ: HTTP ${result.status}`,
+        text: "Сервер ответил неожиданным образом — смотрите тело ответа ниже.",
+      };
+    }
+  }
+
+  const toneClass =
+    verdict?.tone === "ok"
+      ? "diag-ok"
+      : verdict?.tone === "err"
+        ? "diag-err"
+        : "diag-warn";
+
+  return (
+    <section>
+      <div className="sec-head">
+        <span className="sec-num">A6</span>
+        <span className="sec-title">Канал загрузки</span>
+        <span className="sec-sub">SensorLogger → /api/ingest/sensorlogger</span>
+      </div>
+      <div className="card">
+        {/* Свежесть данных */}
+        <div className="diag-row">
+          <Radio className="h-3.5 w-3.5" style={{ flexShrink: 0 }} />
+          {latest == null ? (
+            <span className="diag-last" style={{ color: "var(--red)" }}>
+              В базе нет ни одной сессии — данные не приходили никогда.
+            </span>
+          ) : (
+            <span
+              className="diag-last"
+              style={{ color: hoursAgo! > 24 ? "var(--amber)" : "var(--plum)" }}
+            >
+              Последняя загрузка: {" "}
+              <b>
+                {new Date(latest).toLocaleString("ru-RU", {
+                  day: "2-digit",
+                  month: "short",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </b>{" "}
+              ({formatAge(hoursAgo!)} назад)
+              {hoursAgo! > 24
+                ? " — новых данных с телефона не поступало."
+                : " — канал живой."}
+            </span>
+          )}
+        </div>
+
+        {/* URL для SensorLogger */}
+        <div className="diag-url">
+          <span className="diag-url-label">URL для SensorLogger (HTTP Push):</span>
+          <div className="diag-url-row">
+            <code className="mono">{endpointUrl}</code>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={copyUrl}
+              className="diag-copy"
+              aria-label="Скопировать URL"
+            >
+              <Copy className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          <span className="diag-url-hint">
+            Подставьте вместо &lt;INGEST_TOKEN&gt; значение переменной INGEST_TOKEN
+            (окружение сервера), вместо &lt;ID&gt; — любой идентификатор устройства,
+            например iphone15pro.
+          </span>
+        </div>
+
+        {/* Тест канала */}
+        <div className="diag-test">
+          <span className="diag-url-label">Проверка канала из браузера:</span>
+          <div className="diag-test-row">
+            <Input
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="INGEST_TOKEN (необязательно)"
+              className="mono diag-token"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <Button onClick={runTest} disabled={testing} className="diag-run">
+              {testing ? (
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Send className="h-3.5 w-3.5" />
+              )}
+              {testing ? "Проверяю…" : "Проверить"}
+            </Button>
+          </div>
+          <span className="diag-url-hint">
+            Без токена — проверка доступности сервера (ожидаем 401). С токеном —
+            полная проверка: URL + токен (ожидаем «push test passed»). Тест
+                ничего не записывает в базу.
+          </span>
+
+          {result ? (
+            <div className={`diag-result ${toneClass}`} role="status">
+              <div className="diag-result-head">
+                <b>{verdict?.title}</b>
+                <span className="mono">HTTP {result.status || "—"} · {result.ms} мс</span>
+              </div>
+              <p>{verdict?.text}</p>
+              <details className="diag-raw">
+                <summary>Тело ответа</summary>
+                <pre className="mono">{JSON.stringify(result.body, null, 2)}</pre>
+              </details>
+            </div>
+          ) : null}
+        </div>
+
+        {/* Чек-лист для телефона */}
+        <details className="diag-checklist">
+          <summary>
+            Чек-лист: что проверить на iPhone, если поездки не доходят
+          </summary>
+          <ol>
+            <li>
+              В SensorLogger запущена сессия логирования с включённым{" "}
+              <b>HTTP Push</b> (Log → сессия, где указан этот URL). Обычная
+              запись без Push копит данные только в файлы на телефоне.
+            </li>
+            <li>
+              <b>Background App Refresh</b> включён для SensorLogger:
+              Настройки → Основные → Обновление контента.
+            </li>
+            <li>
+              В настройках HTTP Push URL совпадает с показанным выше (домен,
+              путь, токен, deviceId). Опечатка в токене = тихие 401.
+            </li>
+            <li>
+              Кнопка <b>Test Push</b> в настройках SensorLogger возвращает
+              «push test passed».
+            </li>
+            <li>
+              Телефон не в VPN/фильтрующем Wi-Fi — попробуйте мобильный
+              интернет и повторите запись.
+            </li>
+          </ol>
+        </details>
+      </div>
+    </section>
+  );
+}
+
+function formatAge(hours: number): string {
+  if (hours < 1) return `${Math.max(1, Math.round(hours * 60))} мин`;
+  if (hours < 48) return `${Math.round(hours)} ч`;
+  return `${Math.round(hours / 24)} дн`;
+}
+
 // === Legacy: Состояние системы ===
 function SystemInfoLegacyCard() {
   const { data: health } = useHealth();
@@ -415,11 +673,6 @@ function SystemInfoLegacyCard() {
       icon: <Activity className="h-3.5 w-3.5" />,
       label: "Uptime",
       value: health ? `${Math.round(health.uptime / 60)} мин` : "—",
-    },
-    {
-      icon: <GitBranch className="h-3.5 w-3.5" />,
-      label: "Версия",
-      value: health?.version || "—",
     },
     {
       icon: <Database className="h-3.5 w-3.5" />,

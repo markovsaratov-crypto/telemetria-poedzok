@@ -434,7 +434,9 @@ export async function GET(
         // v2.9 §10.0: детерминированные хэши маршрута
         routeHash: session.routeHash,
         topologyHash: session.topologyHash,
-        avgSpeed: avgSpeed != null ? Math.round(avgSpeed * 10) / 10 : null,
+        // FIX-U2: точность 0,001 м/с (≈0,004 км/ч) — округление до 0,1 м/с давало
+        // расхождение поверхностей: админка 3,6 км/ч vs shared 3,7 км/ч на одной поездке.
+        avgSpeed: avgSpeed != null ? Math.round(avgSpeed * 1000) / 1000 : null,
         // P2-13: средняя по точкам — отдельно от KPI AvgSpeed (§4.3)
         speedMeanMs: speedMean != null ? Math.round(speedMean * 10) / 10 : null,
         maxSpeed: Math.round(maxSpeed * 10) / 10,

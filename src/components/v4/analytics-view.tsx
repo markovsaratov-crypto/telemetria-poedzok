@@ -27,6 +27,7 @@ import {
   heatColor,
   type PeriodKey,
 } from "@/lib/v4-utils";
+import { fmtSecShort, fmtSecFull } from "@/lib/format";
 import {
   useSessionStats,
   useRouteComparison,
@@ -240,7 +241,7 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
         <i
           className="ml-gap"
           style={{ width: `${gapPct}%`, minWidth: gapSec > 0 ? "3px" : "0" }}
-          data-tip={`Разрывы записи за период: суммарно ${fmtInt(gapSec)} сек`}
+          data-tip={`Разрывы записи за период (§4.6 states='gap', >30 сек): суммарно ${fmtSecFull(gapSec)}`}
         />
       </div>
       <div className="mline-cap">
@@ -254,7 +255,7 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
         </span>
         <span>
           <i style={{ background: "repeating-linear-gradient(90deg,#C99A2E 0 3px,#F3E3C9 3px 6px)" }} />
-          разрывы · {fmtInt(gapSec)} сек
+          разрывы · {fmtSecShort(gapSec)}
         </span>
       </div>
     </div>
@@ -354,7 +355,7 @@ function SessionHeader({
         <i
           className="ml-gap"
           style={{ width: `${gapPct}%`, minWidth: gapSec > 0 ? "3px" : "0" }}
-          data-tip={`Разрывы записи (§4.6 states='gap'): ${fmtInt(stats.methodology?.gapCount ?? 0)} разрыва суммарно ${fmtInt(gapSec)} сек — интервалы между точками длиннее 30 сек`}
+          data-tip={`Разрывы записи (§4.6 states='gap'): ${fmtInt(stats.methodology?.gapCount ?? 0)} разрыва суммарно ${fmtSecFull(gapSec)} — интервалы между точками длиннее 30 сек`}
         />
       </div>
       <div className="mline-cap">
@@ -368,7 +369,7 @@ function SessionHeader({
         </span>
         <span>
           <i style={{ background: "repeating-linear-gradient(90deg,#C99A2E 0 3px,#F3E3C9 3px 6px)" }} />
-          разрывы · {fmtInt(gapSec)} сек
+          разрывы · {fmtSecShort(gapSec)}
         </span>
       </div>
     </div>

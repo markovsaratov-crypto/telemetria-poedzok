@@ -38,6 +38,20 @@ function fmtDuration(sec: number): string {
   return h > 0 ? `${h} ч ${m} мин` : m > 0 ? `${m} мин ${s} с` : `${s} с`;
 }
 
+// AUDIT B-3: ISO-строка ИЛИ epoch-миллисекунды → мс. Некорректное → NaN (покажется «—»).
+function toMs(v: number | string): number {
+  if (typeof v === "number") return v;
+  const n = Number(v);
+  if (Number.isFinite(n) && v.trim() !== "") return n;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? t : NaN;
+}
+
+// AUDIT B-3: русская локаль — десятичная запятая (было «2.53 км»).
+function fmtNum(n: number, digits = 2): string {
+  return Number.isFinite(n) ? n.toFixed(digits).replace(".", ",") : "—";
+}
+
 export default function SharedPage({ params }: { params: Promise<{ token: string }> }) {
   const { token } = use(params);
   const [state, setState] = React.useState<
@@ -89,13 +103,17 @@ export default function SharedPage({ params }: { params: Promise<{ token: string
 
   const { data } = state;
   const pts = data.points;
+  // AUDIT B-3: API отдаёт startTime/endTime как ISO-строки — парсим напрямую через Date,
+  // а не Number(...) (NaN → «Invalid Date»). Поддержка числовых мс оставлена для совместимости.
+  const startTimeMs = toMs(data.startTime);
+  const endTimeMs = toMs(data.endTime);
   let distance = 0;
   let maxSpeed = 0;
   for (let i = 1; i < pts.length; i++) {
     distance += haversineM(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
     if (pts[i].speed != null) maxSpeed = Math.max(maxSpeed, pts[i].speed!);
   }
-  const durationSec = Math.max(0, (Number(data.endTime) - Number(data.startTime)) / 1000);
+  const durationSec = Math.max(0, (endTimeMs - startTimeMs) / 1000);
   const avgSpeed = durationSec > 0 && distance > 0 ? distance / durationSec : null;
 
   // SVG-превью трека
@@ -123,16 +141,16 @@ export default function SharedPage({ params }: { params: Promise<{ token: string
           </h1>
           <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-1">
             <Calendar className="h-3.5 w-3.5" />
-            {new Date(Number(data.startTime)).toLocaleString("ru-RU")}
+            {new Date(startTimeMs).toLocaleString("ru-RU")}
             <span className="mx-1">·</span>
             действует до {new Date(data.expiresAt).toLocaleString("ru-RU")}
           </p>
         </div>
 
         <div className="grid grid-cols-3 gap-3">
-          <Stat icon={<RouteIcon className="h-4 w-4" />} label="Дистанция" value={distance > 0 ? `${(distance / 1000).toFixed(2)} км` : "—"} />
+          <Stat icon={<RouteIcon className="h-4 w-4" />} label="Дистанция" value={distance > 0 ? `${fmtNum(distance / 1000)} км` : "—"} />
           <Stat icon={<Timer className="h-4 w-4" />} label="Длительность" value={fmtDuration(durationSec)} />
-          <Stat icon={<Gauge className="h-4 w-4" />} label="Скорость" value={avgSpeed ? `${(avgSpeed * 3.6).toFixed(1)} км/ч` : "—"} sub={maxSpeed ? `макс ${(maxSpeed * 3.6).toFixed(0)} км/ч` : undefined} />
+          <Stat icon={<Gauge className="h-4 w-4" />} label="Скорость" value={avgSpeed ? `${fmtNum(avgSpeed * 3.6, 1)} км/ч` : "—"} sub={maxSpeed ? `макс ${fmtNum(maxSpeed * 3.6, 0)} км/ч` : undefined} />
         </div>
 
         <div className="rounded-lg border bg-card/50 overflow-hidden">
@@ -149,7 +167,7 @@ export default function SharedPage({ params }: { params: Promise<{ token: string
           </svg>
         </div>
         <p className="text-[10px] text-muted-foreground">
-          {data.pointCount} точек · телеметрия «Телеметрия поездок v2.9»
+          {data.pointCount} точек · «Телематика Маркова»
         </p>
       </div>
     </Shell>

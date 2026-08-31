@@ -34,6 +34,11 @@ export async function POST(
     // P1-9: уважаем expiresInHours из тела (раньше жёстко 7 дней)
     const body = await request.json().catch(() => ({}));
     const parsed = zShareBody.safeParse(body ?? {});
+    // AUDIT B-19: невалидное тело раньше молча давало ссылку на 7 дней —
+    // теперь честный 400, чтобы вызывающий код узнал об ошибке.
+    if (body != null && !parsed.success) {
+      return json({ error: "Validation failed", details: parsed.error.flatten() }, 400, { "X-Request-Id": requestId });
+    }
     const ttlHours = parsed.success
       ? Math.min(Math.max(parsed.data.expiresInHours ?? SHARE_DEFAULT_TTL_HOURS, 1), SHARE_MAX_TTL_HOURS)
       : SHARE_DEFAULT_TTL_HOURS;

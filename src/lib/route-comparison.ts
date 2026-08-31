@@ -1,4 +1,4 @@
-// src/lib/route-comparison.ts — сравнительные метрики по routeHash-группам (методология v2.9 §10.0–§10.6).
+// src/lib/route-comparison.ts — сравнительные метрики по routeHash-группам (методология §10.0–§10.6).
 // Группировка концептуально одинаковых поездок по детерминированному routeHash (§10.0),
 // агрегаты по ActiveDuration (§4.11), фильтр SessionReliability ≥ 0.6 (§10.1),
 // Theil-Sen-тренд (§10.5), HotspotSegments P75 < 0.5 (§10.6).
@@ -468,12 +468,12 @@ export async function groupRouteGpx(routeHash: string): Promise<string | null> {
   const avgKm = sessions.reduce((a, s) => a + s.distanceM, 0) / sessions.length / 1000;
   const name = `route ${routeHash}`;
   const desc = `Канонический маршрут группы routeHash ${routeHash}: ${sessions.length} поездк(и/а), ` +
-    `ср. ActiveDuration ${stats.avg ?? "—"}с, ср. дистанция ${avgKm.toFixed(1)} км (методология v2.9 §10.0)`;
+    `ср. ActiveDuration ${stats.avg ?? "—"}с, ср. дистанция ${avgKm.toFixed(1)} км (методология §10.0)`;
   const trkpts = polyline
     .map((p) => `      <trkpt lat="${p.lat.toFixed(6)}" lon="${p.lon.toFixed(6)}"></trkpt>`)
     .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="Telemetria v2.9" xmlns="http://www.topografix.com/GPX/1/1">
+<gpx version="1.1" creator="Телематика Маркова" xmlns="http://www.topografix.com/GPX/1/1">
   <metadata>
     <name>${name}</name>
     <desc>${desc}</desc>

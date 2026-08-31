@@ -6,6 +6,7 @@
 import { NextRequest } from "next/server";
 import { libsql } from "@/lib/db";
 import { extractBearer } from "@/lib/auth";
+import { tokenMatches } from "@/lib/token-check"; // AUDIT B-16: timing-safe сравнение
 import { env } from "@/lib/env";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
@@ -124,9 +125,10 @@ export async function POST(request: NextRequest) {
     const queryToken = url.searchParams.get("token");
     const bearer = extractBearer(request);
     const e = env();
+    // AUDIT B-16: timing-safe сравнение (раньше === — утечка по времени)
     const tokenOk =
-      (bearer && bearer === e.INGEST_TOKEN) ||
-      (queryToken && queryToken === e.INGEST_TOKEN);
+      (await tokenMatches(bearer, e.INGEST_TOKEN)) ||
+      (await tokenMatches(queryToken, e.INGEST_TOKEN));
     if (!tokenOk) {
       return json(
         { error: "Unauthorized: invalid or missing INGEST_TOKEN. Use Authorization: Bearer <token> or ?token=<token>" },
@@ -162,9 +164,26 @@ export async function POST(request: NextRequest) {
     }
 
     // 4. Нормализация точек
+    // AUDIT B-5: точки с accuracy > 100 м отбрасываются на входе — координаты
+    // и скорости недостоверны (раньше мусор с accuracy 400–585 м писался в БД
+    // и портил дистанцию/метрики).
+    const MAX_POINT_ACCURACY_M = 100;
+    let droppedInaccurate = 0;
     const points = items
       .map(extractPoint)
-      .filter((p): p is NormalizedPoint => p !== null);
+      .filter((p): p is NormalizedPoint => {
+        if (p === null) return false;
+        if (p.accuracy != null && p.accuracy > MAX_POINT_ACCURACY_M) {
+          droppedInaccurate++;
+          return false;
+        }
+        return true;
+      });
+    if (droppedInaccurate > 0) {
+      logger.warn("SensorLogger ingest: dropped inaccurate points", {
+        requestId, deviceId, dropped: droppedInaccurate, received: items.length,
+      });
+    }
     if (points.length === 0) {
       // Нет GPS-данных в батче, но формат валидный — считаем тестом
       return json(
@@ -272,9 +291,10 @@ export async function GET(request: NextRequest) {
   const queryToken = url.searchParams.get("token");
   const bearer = extractBearer(request);
   const e = env();
+  // AUDIT B-16: timing-safe сравнение
   const tokenOk =
-    (bearer && bearer === e.INGEST_TOKEN) ||
-    (queryToken && queryToken === e.INGEST_TOKEN);
+    (await tokenMatches(bearer, e.INGEST_TOKEN)) ||
+    (await tokenMatches(queryToken, e.INGEST_TOKEN));
   if (!tokenOk) {
     return json({ ok: false, error: "Unauthorized" }, 401);
   }

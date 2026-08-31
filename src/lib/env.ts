@@ -10,6 +10,9 @@ const schema = z.object({
   INGEST_TOKEN: z.string().min(1).default("ingest-token-32-chars-minimum-aaaaaaa"),
   CRON_SECRET: z.string().min(1).default("cron-secret-32-chars-minimum-bbbbbbbb"),
   ADMIN_TOKEN: z.string().min(1).default("admin-token-32-chars-minimum-cccccccc"),
+  // AUDIT B-1: регистрация новых пользователей — выключена по умолчанию (single-user продукт).
+  // Включается только явным REGISTRATION_ENABLED=true.
+  REGISTRATION_ENABLED: z.string().default("false"),
   RATE_LIMIT_MAX_INGEST: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_MAX_DEFAULT: z.coerce.number().int().positive().default(60),
   RATE_LIMIT_MAX_AUTH: z.coerce.number().int().positive().default(5),
@@ -78,6 +81,32 @@ export type Env = z.infer<typeof schema>;
 
 let cached: Env | null = null;
 
+// AUDIT B-2: fail-closed секреты. В production дефолтные (публично известные) значения
+// секретов недопустимы — приложение обязано упасть на старте, а не молча принять их.
+const PROD_INSECURE_DEFAULTS: Partial<Record<keyof Env, string>> = {
+  LOGIN_PASSWORD: "change-me-please-32-chars-minimum-aaaaaa",
+  SESSION_SECRET: "super-secret-session-key-32-chars-minimum",
+  API_KEY: "api-key-server-side-32-chars-minimum-xxx",
+  INGEST_TOKEN: "ingest-token-32-chars-minimum-aaaaaaa",
+  CRON_SECRET: "cron-secret-32-chars-minimum-bbbbbbbb",
+  ADMIN_TOKEN: "admin-token-32-chars-minimum-cccccccc",
+};
+
+function assertProdSecrets(e: Env): void {
+  if (e.NODE_ENV !== "production") return;
+  const insecure: string[] = [];
+  for (const [key, bad] of Object.entries(PROD_INSECURE_DEFAULTS)) {
+    if (e[key as keyof Env] === bad) insecure.push(key);
+  }
+  if (insecure.length > 0) {
+    // Fail-closed: с публично известными секретами прод не поднимается.
+    throw new Error(
+      `[env] PRODUCTION FAIL-CLOSED: используются дефолтные (небезопасные) значения: ${insecure.join(", ")}. ` +
+        "Задайте реальные значения через переменные окружения."
+    );
+  }
+}
+
 export function env(): Env {
   if (cached) return cached;
   // Use safeParse with defaults — never throw, always return a valid Env
@@ -93,6 +122,7 @@ export function env(): Env {
       INGEST_TOKEN: process.env.INGEST_TOKEN || "ingest-token-32-chars-minimum-aaaaaaa",
       CRON_SECRET: process.env.CRON_SECRET || "cron-secret-32-chars-minimum-bbbbbbbb",
       ADMIN_TOKEN: process.env.ADMIN_TOKEN || "admin-token-32-chars-minimum-cccccccc",
+      REGISTRATION_ENABLED: process.env.REGISTRATION_ENABLED || "false",
       RATE_LIMIT_MAX_INGEST: Number(process.env.RATE_LIMIT_MAX_INGEST) || 120,
       RATE_LIMIT_MAX_DEFAULT: Number(process.env.RATE_LIMIT_MAX_DEFAULT) || 60,
       RATE_LIMIT_MAX_AUTH: Number(process.env.RATE_LIMIT_MAX_AUTH) || 5,
@@ -158,10 +188,12 @@ export function env(): Env {
       APP_VERSION: pkg.version,
     };
     cached = defaults;
+    assertProdSecrets(cached);
     return cached;
   }
   // v2.7: APP_VERSION всегда из package.json (единый источник; env дашборда не может перекрыть релиз)
   cached = { ...parsed.data, APP_VERSION: pkg.version };
+  assertProdSecrets(cached);
   return cached;
 }
 

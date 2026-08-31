@@ -8,7 +8,7 @@ import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { computeMethodologyMetrics, calibrateEcoScoreBaselinesFromCorpus, type EcoScoreBaselines } from "@/lib/metrics-methodology";
-import { avgSpeedMs, meanPointSpeedMs, maxSpeedMs } from "@/lib/kpi"; // P2-13: единый источник KPI
+import { avgSpeedMs, meanPointSpeedMs, maxSpeedMs, normalizeSessionSpeeds } from "@/lib/kpi"; // P2-13: единый источник KPI
 import { haversineM } from "@/lib/geo"; // P2-14: канонический гаверсинус
 import { trackLatency } from "@/lib/latency"; // P2-16: замер api_latency_p95
 
@@ -295,10 +295,14 @@ export async function GET(
       return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     }
 
-    const points = session.gpsPoints.map((p) => ({
+    const rawPoints = session.gpsPoints.map((p) => ({
       ...p,
       timestamp: Number(p.timestamp),
     }));
+    // AUDIT B-4: нормализация скоростей — чинит сессии, где записанное поле speed
+    // не соответствует геометрии (max 20 км/ч при 80-километровой поездке и т.п.).
+    // Согласованным данным не меняет ничего.
+    const points = normalizeSessionSpeeds(rawPoints);
 
     if (points.length === 0) {
       return json(

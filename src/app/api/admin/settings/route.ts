@@ -21,7 +21,15 @@ export async function GET(request: NextRequest) {
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
     const settings = await listOverridableSettings();
-    return json({ settings }, 200, { "X-Request-Id": requestId });
+    // AUDIT B-14: чувствительные значения не отдаются наружу целиком — маска
+    // «****xx» (последние 2 символа, как в /api/test-2gis). UI показывает
+    // маску как плейсхолдер; новое значение вводится только при изменении.
+    const masked = settings.map((s) =>
+      s.isSensitive && s.value
+        ? { ...s, value: `****${s.value.slice(-2)}`, masked: true }
+        : { ...s, masked: false }
+    );
+    return json({ settings: masked }, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Settings list error", {
       requestId,

@@ -7,6 +7,7 @@
 //   §5.3 SpeedDistribution — 6 бакетов по 20 км/ч, Σ percent = 100%
 //   §4.4 MaxSpeed — с фильтрацией GPS-выбросов (обоснование в isUsableSpeedPoint)
 
+import { haversineM } from "@/lib/geo"; // AUDIT B-4: геометрическая проверка скоростей
 export interface SpeedBucketDef {
   label: string;
   minKmh: number;
@@ -139,4 +140,75 @@ export function computeSpeedDistribution(points: SpeedPoint[]): SpeedDistributio
   }
 
   return { buckets, total };
+}
+
+// AUDIT B-4: нормализация сессионных скоростей.
+// Проблема: у ряда iPhone-сессий поле speed систематически НЕ соответствует геометрии
+// (например: 79,9 км за 92 мин при max(speed)=5,6 м/с → «Макс. 20 км/ч» при средней 52).
+// Решение: если записанные скорости глобально не согласуются с перемещением
+// (медиана пригодных скоростей < 40% от средней геометрической, при заметном движении),
+// скорости пересчитываются по геометрии (гаверсинус / dt) с защитами:
+//   - дрейф: перемещение < погрешности GPS → v = 0;
+//   - правдоподобность: v ≤ MAX_PLAUSIBLE_SPEED_MS;
+//   - интервалы только 0.5–30 сек (дальше — gap, скорость не тянется).
+// Хорошим данным (записанная скорость согласована) функция ничего не меняет.
+export interface NormalizablePoint {
+  lat: number;
+  lon: number;
+  speed: number | null;
+  altitude: number | null;
+  bearing: number | null;
+  accuracy: number | null;
+  timestamp: number;
+}
+
+export function normalizeSessionSpeeds<P extends NormalizablePoint>(points: P[]): P[] {
+  if (points.length < 2) return points;
+
+  // Средняя геометрическая скорость поездки (по гаверсинусу).
+  let dist = 0;
+  for (let i = 1; i < points.length; i++) {
+    dist += haversineM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
+  }
+  const durSec = Math.max(0, (points[points.length - 1].timestamp - points[0].timestamp) / 1000);
+  if (durSec <= 0) return points;
+  const geoAvg = dist / durSec;
+
+  // Пригодные записанные скорости.
+  const usable: number[] = [];
+  for (const p of points) {
+    if (isUsableSpeedPoint(p)) usable.push(p.speed as number);
+  }
+  if (usable.length === 0) return points; // нет годных записанных — метрики и так геометрические
+  usable.sort((a, b) => a - b);
+  const median = usable[Math.floor(usable.length / 2)];
+
+  // Критерий «глобально не согласованы»: заметное движение есть (geoAvg > 2 м/с ≈ 7 км/ч),
+  // а медиана записанных скоростей резко ниже геометрии.
+  const inconsistent = geoAvg > 2 && median < 0.4 * geoAvg;
+  if (!inconsistent) return points;
+
+  // Пересчёт по геометрии с защитами.
+  const out = points.map((p) => ({ ...p }));
+  let prevSpeed = 0;
+  for (let i = 1; i < out.length; i++) {
+    const dt = (points[i].timestamp - points[i - 1].timestamp) / 1000;
+    const disp = haversineM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
+    let v: number | null = null;
+    if (dt >= 0.5 && dt <= 30) {
+      v = disp / dt;
+      if (v > MAX_PLAUSIBLE_SPEED_MS) v = null;
+      // GPS-дрейф: перемещение меньше погрешности — стоим на месте.
+      const acc = Math.max(points[i].accuracy ?? 0, points[i - 1].accuracy ?? 0);
+      if (disp < acc) v = 0;
+    }
+    if (v != null) {
+      out[i].speed = Math.round(v * 100) / 100;
+      prevSpeed = out[i].speed as number;
+    } else {
+      out[i].speed = out[i].speed ?? prevSpeed;
+    }
+  }
+  out[0].speed = out[1]?.speed ?? out[0].speed;
+  return out;
 }

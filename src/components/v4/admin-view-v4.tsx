@@ -734,6 +734,7 @@ function RoutingSettingsLegacyCard() {
   const { data, isLoading, isFetching, refetch } = useSettings();
   const updateMut = useUpdateSetting();
   const [drafts, setDrafts] = React.useState<Record<string, string>>({});
+  const [dirty, setDirty] = React.useState<Record<string, boolean>>({});
   const [reveal, setReveal] = React.useState<Record<string, boolean>>({});
 
   const settings = data?.settings || [];
@@ -749,8 +750,15 @@ function RoutingSettingsLegacyCard() {
   async function handleSave(key: string) {
     const value = drafts[key];
     if (value === undefined) return;
+    // AUDIT B-14: сервер отдаёт секреты маской «****xx» — сохраняем только
+    // реально изменённые пользователем значения, иначе перезапишем секрет маской.
+    if (!dirty[key]) {
+      toast.info("Значение не изменено");
+      return;
+    }
     try {
       await updateMut.mutateAsync({ key, value });
+      setDirty((d) => ({ ...d, [key]: false }));
       toast.success(`Настройка обновлена: ${key}`);
     } catch (e) {
       toast.error("Ошибка сохранения", { description: (e as Error).message });
@@ -792,8 +800,14 @@ function RoutingSettingsLegacyCard() {
                 <Input
                   id={s.key}
                   type={s.isSensitive && !reveal[s.key] ? "password" : "text"}
-                  value={drafts[s.key] ?? ""}
-                  onChange={(e) => setDrafts({ ...drafts, [s.key]: e.target.value })}
+                  // AUDIT B-14: секрет показываем плейсхолдером-маской; реальное
+                  // значение вводится заново только при изменении.
+                  value={dirty[s.key] ? drafts[s.key] ?? "" : s.isSensitive ? "" : drafts[s.key] ?? ""}
+                  placeholder={s.isSensitive && !dirty[s.key] ? s.value || "не задан" : ""}
+                  onChange={(e) => {
+                    setDrafts({ ...drafts, [s.key]: e.target.value });
+                    setDirty({ ...dirty, [s.key]: true });
+                  }}
                   className="font-mono text-xs h-8"
                   style={{ background: "var(--wash)", borderColor: "var(--line)", color: "var(--text)" }}
                 />
@@ -812,7 +826,7 @@ function RoutingSettingsLegacyCard() {
                   size="sm"
                   variant="ghost"
                   onClick={() => handleSave(s.key)}
-                  disabled={updateMut.isPending}
+                  disabled={updateMut.isPending || !dirty[s.key]}
                   className="h-8"
                   title="Сохранить"
                 >

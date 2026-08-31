@@ -18,19 +18,21 @@ export function json(body: unknown, status = 200, headers?: Record<string, strin
   });
 }
 
+// AUDIT B-15: preflight отражает ТОЛЬКО собственный origin приложения.
+// Раньше отражался произвольный Origin + Allow-Credentials — опасная конфигурация.
 export function corsResponse(request: NextRequest) {
-  const origin = request.headers.get("origin") || "*";
-  return new NextResponse(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": origin,
-      "Access-Control-Allow-Methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers":
-        "Authorization, Content-Type, X-Client-Id, X-Request-Id",
-      "Access-Control-Allow-Credentials": "true",
-      "Access-Control-Max-Age": "86400",
-    },
-  });
+  const origin = request.headers.get("origin");
+  const sameOrigin = !!origin && origin === new URL(request.url).origin;
+  const headers: Record<string, string> = {
+    "Access-Control-Allow-Methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Client-Id, X-Request-Id",
+    "Access-Control-Max-Age": "86400",
+  };
+  if (sameOrigin) {
+    headers["Access-Control-Allow-Origin"] = origin as string;
+    headers["Access-Control-Allow-Credentials"] = "true";
+  }
+  return new NextResponse(null, { status: 204, headers });
 }
 
 export function setSecurityHeaders(response: NextResponse) {
@@ -59,10 +61,15 @@ export function setSecurityHeaders(response: NextResponse) {
   );
 }
 
-// Извлечение client IP (за Caddy/nginx прокси)
+// Извлечение client IP (за Caddy/nginx/Render прокси).
+// AUDIT B-9: берём ПОСЛЕДНЮЮ запись X-Forwarded-For — её добавил ближайший
+// доверенный прокси. Первую запись легко подделать (спуфинг для обхода rate-limit).
 export function getClientIP(request: NextRequest): string {
   const xff = request.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
+  if (xff) {
+    const parts = xff.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 0) return parts[parts.length - 1];
+  }
   const xreal = request.headers.get("x-real-ip");
   if (xreal) return xreal;
   return request.headers.get("x-client-ip") || "unknown";

@@ -150,7 +150,7 @@
 | Стилизация                | Tailwind CSS 4 + OKLCH               | Адаптивная вёрстка, CSS-переменные темы      |
 | Карта                     | React-Leaflet + Leaflet              | Интерактивная карта с GPS-треком             |
 | Валидация                 | Zod                                  | Схемы валидации всех API-запросов            |
-| ORM                       | Prisma 6.x                           | Типобезопасные запросы к БД                  |
+| ORM                       | @libsql/client + Prisma 6.x (типы)  | Прямые prepared-запросы; Prisma — генерация типов из schema.prisma (движок ORM не используется, см. src/lib/db.ts) |
 | БД (прод)                 | Turso / LibSQL                       | Реплицируемая SQLite                         |
 | БД (dev)                  | SQLite (локальный)                   | Локальная разработка                         |
 | Маршрутизация             | 2ГИС carrouting 6.0.0                | Построение маршрутов и пробки                |
@@ -664,6 +664,8 @@ Turso предоставляет автоматические point-in-time snap
 
 Ежедневный логический дамп через `BackupJob`. Полный экспорт всех таблиц в JSON-файл. Хранение 90 дней rolling. Файл сохраняется в `BACKUP_STORAGE_DIR` (или S3-совместимое хранилище). Верификация: контрольная сумма SHA-256, размер файла, обратное чтение.
 
+> **ВАЖНО (Render):** директория по умолчанию `/tmp/backups` — **эфемерная**: при каждом передеплое/рестарте инстанса файлы теряются. Долговременное хранение — GitHub Releases (`github-backup-cron`, еженедельно, требует `GITHUB_TOKEN`+`GITHUB_REPO` в env Render) или подключение постоянного диска. Без настроенного GitHub-бэкапа существует окно потери данных до недели. Restore-путь (`/api/admin/restore`) требует файл в файловой системе инстанса — перед restore дамп нужно залить обратно (например, через `/api/admin/backup` → restore по id не сработает после рестарта).
+
 ### 8.3. Уровень 3: GitHub backup
 
 Дополнительная копия JSON-дампа в GitHub-репозиторий. Создаёт коммит в указанной ветке. Преимущество: бесплатное хранение, версионирование, доступ из любой точки. Настраивается через `POST /api/admin/backup/github`.
@@ -753,8 +755,8 @@ Turso предоставляет автоматические point-in-time snap
 |------------------------|------------------------------|------------------------------------------------------|
 | Spoofing               | Подделка cookie сессии       | HMAC-SHA256 подпись с SESSION_SECRET                 |
 | Spoofing               | Подделка Bearer-токена       | Сравнение с env var, timing-safe                     |
-| Tampering              | Модификация GPS-точек        | Zod-валидация, Prisma parameterized queries          |
-| Tampering              | SQL-инъекция                 | Prisma parameterized queries (no raw SQL)            |
+| Tampering              | Модификация GPS-точек        | Zod-валидация, libsql prepared statements          |
+| Tampering              | SQL-инъекция                 | libsql prepared statements (no raw SQL)            |
 | Repudiation            | Отказ от действия            | AuditLog всех деструктивных операций                 |
 | Information Disclosure | Утечка токенов в bundle      | NEXT_PUBLIC_ не используется                        |
 | Information Disclosure | IDOR                         | Неприменим (single-user модель)                      |
@@ -793,7 +795,7 @@ CORS разрешён только для same-origin запросов. Для �
 
 ### 12.1. 2ГИС carrouting 6.0.0
 
-Primary провайдер. API: `https://routing.api.2gis.ru/carrouting/6.0.0`. Требует `TWO_GIS_API_KEY`. Возвращает: геометрию маршрута, плановую дистанцию, плановое время, данные о пробках по сегментам (`trafficSpeed`, `trafficDuration`), а также массив `segments[]` с полями `id`, `lat`, `lon`, `planSpeed`, `trafficSpeed`, `planDuration`, `trafficDuration`, `distance`, `nextSegmentIds` (топология), `bearing` (направление сегмента). Таймаут: 8 секунд.
+Primary провайдер. API: `https://catalog.api.2gis.ru/carrouting/6.0.0` (актуальный хост; устаревший `routing.api.2gis.ru` выведен из эксплуатации — см. `src/lib/routing/chain.ts`). Требует `TWO_GIS_API_KEY`. Возвращает: геометрию маршрута, плановую дистанцию, плановое время, данные о пробках по сегментам (`trafficSpeed`, `trafficDuration`), а также массив `segments[]` с полями `id`, `lat`, `lon`, `planSpeed`, `trafficSpeed`, `planDuration`, `trafficDuration`, `distance`, `nextSegmentIds` (топология), `bearing` (направление сегмента). Таймаут: 8 секунд.
 
 ### 12.2. OSRM Demo Server
 
@@ -956,7 +958,7 @@ GET /health?XTransformPort=3001
   "totalProcessed": 42,
   "totalFailed": 1,
   "uptimeSec": 3600,
-  "version": "2.9.0"
+  "version": "2.10.4"
 }
 ```
 
@@ -1013,7 +1015,7 @@ GET /health
   "worker": "ok",
   "circuits": { "2gis": "closed", "osrm": "closed" },
   "rateLimiter": { "buckets": 0, "backend": "memory" },
-  "version": "2.9.0",
+  "version": "2.10.4",
   "uptime": 3600,
   "targetLoadRpm": 100,
   "rateLimitMaxIngest": 120
@@ -1140,7 +1142,7 @@ curl https://your-domain/health | jq .
 #   "status": "ok",
 #   "db": "ok",
 #   "worker": "ok",
-#   "version": "2.9.0"
+#   "version": "2.10.4"
 # }
 ```
 
@@ -1442,7 +1444,7 @@ libsql dump.sql -u libsql://... -t token
 
 - AlertManager правила импортированы (включая новые v2.9: `hmm_mapmatching_fallback_rate`, `moving_time_control_sum_violations`, `eco_score_low_reliability_spike`).
 
-- Health-check endpoint отвечает 200 с `"version": "2.9.0"`.
+- Health-check endpoint отвечает 200 с `"version": "2.10.4"`.
 
 - Тестовый ingest прошёл успешно.
 

@@ -99,7 +99,7 @@ export function AdminViewV4() {
       </div>
 
       <div className="toast">
-        <b>Служебная вкладка.</b> Параметры и диагностика соответствуют разделам методики (параметры расчёта, идемпотентность, кэширование, цепочка маршрутизации). Блоки A1–A4 — справочные параметры, блоки L — live-интеграция с существующими API.
+        <b>Служебная вкладка.</b> Параметры и диагностика соответствуют разделам методики (параметры расчёта, идемпотентность, кэширование, цепочка маршрутизации). Блок A1 — константы расчёта (совпадают с методологией); A2–A4 — справочные ПРИМЕРЫ, не связанные с БД (live-данные — в блоках A6 и L). Подключение A2–A4 к реальным API — в бэклоге.
       </div>
     </div>
   );
@@ -240,7 +240,7 @@ function A2SessionsBlock() {
       <div className="sec-head">
         <span className="sec-num">A2</span>
         <span className="sec-title">Сессии · качество и привязка</span>
-        <span className="sec-sub">последние 6 из 92 · SensorLogger</span>
+        <span className="sec-sub">справочные примеры · не из БД</span>
       </div>
       <div className="card adm-tbl-wrap">
         <table className="adm-tbl">
@@ -334,7 +334,7 @@ function A3QualitySummaryBlock() {
       <div className="sec-head">
         <span className="sec-num">A3</span>
         <span className="sec-title">Сводка качества данных</span>
-        <span className="sec-sub">92 сессии · июнь–август</span>
+        <span className="sec-sub">справочные примеры · не из БД</span>
       </div>
       <div className="card">
         <div className="stats-grid" style={{ marginTop: 0 }}>
@@ -372,7 +372,7 @@ function A4PipelineBlock() {
       <div className="sec-head">
         <span className="sec-num">A4</span>
         <span className="sec-title">Пайплайн маршрутизации</span>
-        <span className="sec-sub">источники плана · цепочка 13</span>
+        <span className="sec-sub">источники плана · справочные примеры, не из БД</span>
       </div>
       <div className="card">
         <div className="pipe-bar">

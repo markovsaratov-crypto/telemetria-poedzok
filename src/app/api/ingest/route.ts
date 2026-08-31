@@ -7,6 +7,7 @@ import { db } from "@/lib/db";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
+import { recordIngestAttempt } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток
 import { recordIngestOutcome } from "@/lib/alerts"; // P2-16: правило ingest_error_rate
 import { trackLatency } from "@/lib/latency"; // P2-16: api_latency_p95
 
@@ -18,6 +19,15 @@ export async function POST(request: NextRequest) {
     const parsed = zIngestBody.safeParse(body);
     if (!parsed.success) {
       recordIngestOutcome(false); // P2-16: ошибка валидации участвует в ingest_error_rate
+      // DIAG-1: 400 — приложение может показывать «отправлено», не проверив статус
+      recordIngestAttempt({
+        at: new Date().toISOString(), route: "ingest",
+        deviceId: typeof (body as { deviceId?: unknown } | null)?.deviceId === "string"
+          ? (body as { deviceId?: string }).deviceId!.slice(0, 64)
+          : null,
+        outcome: "invalid", points: 0, dropped: 0,
+        bytes: body != null ? Buffer.byteLength(JSON.stringify(body)) : null,
+      });
       return json(
         { error: "Validation failed", details: parsed.error.flatten() },
         400,
@@ -33,6 +43,10 @@ export async function POST(request: NextRequest) {
     if (existing) {
       inc("ingest_duplicate_total", "Duplicate ingest (idempotency hit)", 1);
       recordIngestOutcome(true); // P2-16: дубль — успешный исход (идемпотентность)
+      recordIngestAttempt({
+        at: new Date().toISOString(), route: "ingest", deviceId,
+        outcome: "duplicate", points: 0, dropped: 0, bytes: null,
+      }); // DIAG-1
       trackLatency(request);
       return json(
         { sessionId: existing, duplicate: true },
@@ -116,6 +130,11 @@ export async function POST(request: NextRequest) {
       });
 
     inc("ingest_total", "Total ingest requests", 1);
+    recordIngestAttempt({
+      at: new Date().toISOString(), route: "ingest", deviceId,
+      outcome: "accepted", points: filtered.length, dropped: 0,
+      bytes: payloadBytes,
+    }); // DIAG-1
     recordIngestOutcome(true); // P2-16
     trackLatency(request); // P2-16
     logger.info("Ingest success", {

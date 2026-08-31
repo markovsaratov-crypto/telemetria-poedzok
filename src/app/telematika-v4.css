@@ -1553,6 +1553,54 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
   .v4-app .doc-grid { grid-template-columns: 1fr; }
   .v4-app .doc-log { padding-top: 8px; border-top: 1px dashed var(--line); }
 }
+
+/* === DIAG-1 (v2.10.6): канал приёма (инжест) в L1 === */
+.v4-app .ingest-diag {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.v4-app .ingest-diag .param { border-bottom: none; padding: 0; }
+.v4-app .ingest-hint {
+  margin-top: 6px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  color: var(--faint);
+  text-transform: none;
+}
+.v4-app .ingest-list-wrap { margin-top: 8px; }
+.v4-app .ingest-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  max-height: 148px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.v4-app .ingest-list li {
+  display: grid;
+  grid-template-columns: 84px 78px 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
+  padding: 2px 0;
+  border-bottom: 1px dotted var(--line);
+}
+.v4-app .ingest-list li:last-child { border-bottom: none; }
+.v4-app .ingest-list .mono { font-family: var(--mono); font-size: 10.5px; }
+@media (max-width: 720px) {
+  .v4-app .ingest-list li { grid-template-columns: 76px 1fr auto; }
+  .v4-app .ingest-list li span:nth-child(2) { display: none; }
+  .v4-app .ingest-diag .param { flex-direction: column; gap: 2px; }
+  .v4-app .ingest-diag .param b { font-size: 11px; }
+}
 .v4-app .pipe-bar {
   display: flex;
   height: 14px;

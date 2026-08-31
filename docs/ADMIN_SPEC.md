@@ -1,10 +1,12 @@
 # Спецификация администратора — «Телеметрия поездок»
 
-> **Сервис:** Телеметрия поездок v2.10.4 · **Версия документа:** 2.10.4 · **Дата:** 2026-08-31
+> **Сервис:** Телеметрия поездок v2.10.6 · **Версия документа:** 2.10.6 · **Дата:** 2026-08-31
 > **Объём:** 21 раздел · архитектура, деплой, токены, API, бэкапы, STRIDE, наблюдаемость
-> Формат: Markdown (релиз v2.10.4; только MD, без DOCX-издания — см. решение пользователя «4 только мд»)
+> Формат: Markdown (релиз v2.10.6; только MD, без DOCX-издания — см. решение пользователя «4 только мд»)
 > Источник истины по метрикам: `docs/METHODOLOGY.md` v2.10.4 (62 метрики в 8 группах + служебный идентификатор `routeId`).
 > **Изменения v2.9 → v2.10.4:** hardening аудита (регистрация закрыта по умолчанию, CORS same-origin, маскирование секретов в `GET /api/admin/settings`, лимиты zip-импорта 100 МБ/500 записей, timing-safe сверка токенов инжеста, отбрасывание точек accuracy > 100 м); `GET /api/share` — серверные KPI по методологии (активная часть, нормализация скоростей); точность AvgSpeed в API 0,001 м/с.
+> **Изменения v2.10.4 → v2.10.6 (DIAG-1):** диагностика канала приёма — каждая авторизованная попытка инжеста (оба роута: `/api/ingest`, `/api/ingest/sensorlogger`) фиксируется в Setting `diag.ingest.trace` с исходом (`accepted` / `empty` / `no_gps` / `dropped_all` / `invalid` / `duplicate`), выводится в `GET /api/stats` → `ingestTrace` и в АДМИН → L1 «Канал приёма (инжест)»; счётчики исходов в `/api/metrics`; 401-попытки в БД не пишутся (анти-абьюз). Причина: SensorLogger показывает «отправлено успешно» при любом HTTP-ответе, включая «тихие» 200 OK без GPS-точек — раньше такие отправки не оставляли следов. Подробности: `docs/OPERATIONS.md` §4.
+> **Изменения v2.10.4 → v2.10.6 (DIAG-1):** диагностика канала приёма — каждая авторизованная попытка инжеста (оба роута: `/api/ingest`, `/api/ingest/sensorlogger`) фиксируется в Setting `diag.ingest.trace` с исходом (`accepted` / `empty` / `no_gps` / `dropped_all` / `invalid` / `duplicate`), выводится в `GET /api/stats` → `ingestTrace` и в АДМИН → L1 «Канал приёма (инжест)»; счётчики исходов в `/api/metrics` (`ingest_attempts_total` и др.); 401-попытки в БД не пишутся (анти-абьюз). Причина: приложение SensorLogger показывает «отправлено успешно» при любом HTTP-ответе, включая «тихие» 200 OK без GPS-точек — раньше такие отправки не оставляли следов. Подробности: `docs/OPERATIONS.md` §4.
 
 ## Содержание
 
@@ -958,7 +960,7 @@ GET /health?XTransformPort=3001
   "totalProcessed": 42,
   "totalFailed": 1,
   "uptimeSec": 3600,
-  "version": "2.10.4"
+  "version": "2.10.6"
 }
 ```
 
@@ -1015,7 +1017,7 @@ GET /health
   "worker": "ok",
   "circuits": { "2gis": "closed", "osrm": "closed" },
   "rateLimiter": { "buckets": 0, "backend": "memory" },
-  "version": "2.10.4",
+  "version": "2.10.6",
   "uptime": 3600,
   "targetLoadRpm": 100,
   "rateLimitMaxIngest": 120
@@ -1142,7 +1144,7 @@ curl https://your-domain/health | jq .
 #   "status": "ok",
 #   "db": "ok",
 #   "worker": "ok",
-#   "version": "2.10.4"
+#   "version": "2.10.6"
 # }
 ```
 
@@ -1444,7 +1446,7 @@ libsql dump.sql -u libsql://... -t token
 
 - AlertManager правила импортированы (включая новые v2.9: `hmm_mapmatching_fallback_rate`, `moving_time_control_sum_violations`, `eco_score_low_reliability_spike`).
 
-- Health-check endpoint отвечает 200 с `"version": "2.10.4"`.
+- Health-check endpoint отвечает 200 с `"version": "2.10.6"`.
 
 - Тестовый ingest прошёл успешно.
 

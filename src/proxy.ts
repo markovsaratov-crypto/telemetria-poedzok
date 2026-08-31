@@ -132,6 +132,9 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       if (pathname === "/api/ingest" || pathname.startsWith("/api/ingest/")) {
         const token = bearer ?? queryToken;
         if (!token || !(await tokenMatches(token, e.INGEST_TOKEN))) {
+          // DIAG-1: неавторизованные попытки в БД не пишем (анти-абьюз) —
+          // только in-memory счётчик в /api/metrics
+          inc("ingest_unauthorized_total", "Ingest attempts rejected with 401 (bad or missing token)", 1, "ingest");
           return json({ error: "Unauthorized", reason: "Valid INGEST_TOKEN required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
         }
       } else if (pathname.startsWith("/api/cron/")) {

@@ -39,7 +39,7 @@ import {
   type RouteComparisonData,
   type RouteTrendData,
 } from "@/lib/hooks";
-import { useV4Track, useV4Events } from "@/lib/v4-hooks";
+import { useV4Track, useV4Events, usePeriodStats, type PeriodAggregate } from "@/lib/v4-hooks";
 import type { TrackResponse, EventsResponse } from "@/lib/api-client";
 import { bindTips } from "./use-v4-tipbox";
 import { GaugeArc } from "./widgets/gauge-arc";
@@ -83,48 +83,77 @@ export function AnalyticsView({ period, sessionId }: Props) {
   const groups = useRouteGroups(); // v2.10.1: для блока 10
   const heavy = useHeavySegments(); // v2.10.1: для блока 09
 
+  // v2.10.2: период-режим — метрики по ВСЕМ поездкам выбранного периода.
+  // Активен, когда конкретная поездка не выбрана (клик по period-pill).
+  // Выбор конкретной поездки в dropdown → только её данные (режим ниже).
+  const periodAgg = usePeriodStats(period);
+
   const rootRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
     if (rootRef.current) bindTips(rootRef.current);
   });
 
-  // Empty state when no session selected — но блоки 09/10 показываем сразу (агрегаты).
+  // === Период-режим: все метрики по поездкам за выбранный период ===
   if (!sessionId) {
-    return (
-      <div ref={rootRef}>
-        <div
-          className="card"
-          style={{
-            padding: "32px 20px",
-            textAlign: "center",
-            color: "var(--muted)",
-          }}
-        >
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 600,
-              color: "var(--text)",
-              marginBottom: 8,
-            }}
-          >
-            Выберите поездку
-          </div>
-          <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-            Откройте фильтр поездки вверху страницы и выберите конкретную сессию —
-            блоки 01–08 и 11 отобразят живые данные из API.
-            <br />
-            Блоки 09 (Тяжёлые участки) и 10 (Частые маршруты) показывают агрегаты
-            по всем routeHash-группам сразу.
+    const agg = periodAgg.data;
+
+    if (periodAgg.isLoading) {
+      return (
+        <div ref={rootRef}>
+          <div className="card" style={{ padding: "28px 20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+            Считаем метрики за период «{PERIOD_LABELS[period]}»…
           </div>
         </div>
+      );
+    }
+
+    if (periodAgg.isError) {
+      return (
+        <div ref={rootRef}>
+          <div className="card" style={{ padding: "28px 20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+            Не удалось загрузить метрики за период. Обновите страницу или нажмите ⟳ в панели сверху.
+          </div>
+          <HeavySegmentsBlock data={heavy.data} />
+          <RoutesBlock groups={groups.data} />
+        </div>
+      );
+    }
+
+    if (!agg || agg.trips === 0) {
+      return (
+        <div ref={rootRef}>
+          <div className="card" style={{ padding: "28px 20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+            За период «{PERIOD_LABELS[period]}» поездок нет.
+            <br />
+            Выберите другой период или конкретную поездку в фильтре «Все поездки · период».
+          </div>
+          <HeavySegmentsBlock data={heavy.data} />
+          <RoutesBlock groups={groups.data} />
+        </div>
+      );
+    }
+
+    // Блоки 01–08 и 11 — агрегат периода; 09/10 — агрегаты по routeHash-группам.
+    return (
+      <div ref={rootRef}>
+        <PeriodHeader agg={agg} period={period} />
+        <KpiBlock stats={agg.stats} period={period} aggregated />
+        <DrivingScoreBlock stats={agg.stats} events={agg.events} aggregated />
+        <SpeedProfileBlock stats={agg.stats} aggregated />
+        <PlanFactBlock stats={agg.stats} comparison={null} aggregated />
+        <MapBlock track={agg.track} isLoading={false} isError={false} aggregated />
+        <BehaviorBlock events={agg.events} stats={agg.stats} aggregated />
+        <TrafficBlock stats={agg.stats} aggregated />
+        <GeoBlock stats={agg.stats} aggregated />
         <HeavySegmentsBlock data={heavy.data} />
         <RoutesBlock groups={groups.data} />
+        <DataQualityBlock stats={agg.stats} aggregated />
       </div>
     );
   }
 
+  // === Режим конкретной поездки: данные только по ней ===
   return (
     <div ref={rootRef}>
       <SessionHeader stats={stats.data} period={period} />
@@ -139,6 +168,88 @@ export function AnalyticsView({ period, sessionId }: Props) {
       <HeavySegmentsBlock data={heavy.data} />
       <RoutesBlock groups={groups.data} />
       <DataQualityBlock stats={stats.data} />
+    </div>
+  );
+}
+
+// Подписи периодов (совпадают с PERIOD_LIST в telematika-layout).
+const PERIOD_LABELS: Record<PeriodKey, string> = {
+  today: "Сегодня",
+  week: "7 дней",
+  d30: "30 дней",
+  month: "Месяц",
+  all: "Всё время",
+};
+
+// Шапка периода (период-режим, v2.10.2): N поездок + диапазон дат + сводный таймлайн.
+function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey }) {
+  const totalMin = secToMin(agg.stats.duration);
+  const moveMin = secToMin(agg.stats.movingTime);
+  const idleMin = secToMin(agg.stats.idleTime);
+  const gapSec = agg.stats.gapTime ?? 0;
+  const total = Math.max(1, agg.stats.duration || 1);
+  const movePct = ((agg.stats.movingTime ?? 0) / total) * 100;
+  const idlePct = ((agg.stats.idleTime ?? 0) / total) * 100;
+  const gapPct = Math.max(0.1, (gapSec / total) * 100);
+
+  const d1 = new Date(agg.rangeStart);
+  const d2 = new Date(agg.rangeEnd);
+  const fmt = (d: Date) =>
+    d.toLocaleDateString("ru-RU", { day: "2-digit", month: "short" });
+
+  const tripsWord =
+    agg.trips % 10 === 1 && agg.trips % 100 !== 11
+      ? "поездка"
+      : [2, 3, 4].includes(agg.trips % 10) && ![12, 13, 14].includes(agg.trips % 100)
+        ? "поездки"
+        : "поездок";
+
+  return (
+    <div className="session">
+      <div className="session-top">
+        <span className="s-lab">период</span>
+        <b>
+          {PERIOD_LABELS[period]} · {fmt(d1)}–{fmt(d2)}
+        </b>
+        <span>
+          {agg.trips} {tripsWord}
+        </span>
+        <span className="muted">
+          · всего <b>{fmtInt(totalMin)} мин</b> · в движении <b>{fmtInt(moveMin)} мин</b> ·{" "}
+          {fmtInt(agg.stats.pointCount)} точек
+        </span>
+      </div>
+      <div className="mline">
+        <i
+          className="ml-move"
+          style={{ width: `${movePct}%` }}
+          data-tip={`Движение (сумма MovingTime всех поездок периода): ${fmtInt(moveMin)} мин`}
+        />
+        <i
+          className="ml-idle"
+          style={{ width: `${idlePct}%` }}
+          data-tip={`Стоянки (сумма IdleTime всех поездок периода): ${fmtInt(idleMin)} мин`}
+        />
+        <i
+          className="ml-gap"
+          style={{ width: `${gapPct}%`, minWidth: gapSec > 0 ? "3px" : "0" }}
+          data-tip={`Разрывы записи за период: суммарно ${fmtInt(gapSec)} сек`}
+        />
+      </div>
+      <div className="mline-cap">
+        <span>
+          <i className="ml-move" style={{ background: "var(--plum)" }} />
+          движение · {fmtInt(moveMin)} мин
+        </span>
+        <span>
+          <i style={{ background: "#DCC9D3" }} />
+          стоянки · {fmtInt(idleMin)} мин
+        </span>
+        <span>
+          <i style={{ background: "repeating-linear-gradient(90deg,#C99A2E 0 3px,#F3E3C9 3px 6px)" }} />
+          разрывы · {fmtInt(gapSec)} сек
+        </span>
+      </div>
     </div>
   );
 }
@@ -254,9 +365,11 @@ function SessionHeader({
 function KpiBlock({
   stats,
   period,
+  aggregated = false,
 }: {
   stats: SessionStats | null | undefined;
   period: PeriodKey;
+  aggregated?: boolean;
 }) {
   // Compute KPI values from live stats.
   const dur = stats ? secToMin(stats.duration) : 0;
@@ -284,7 +397,11 @@ function KpiBlock({
         <span className="sec-num">01</span>
         <span className="sec-title">Основные показатели</span>
         <span className="sec-sub">
-          {stats ? `${fmtInt(stats.pointCount)} точек · запись ${fmtInt(dur)} мин` : "загрузка статистики…"}
+          {stats
+            ? aggregated
+              ? `${fmtInt(stats.pointCount)} точек · все поездки периода`
+              : `${fmtInt(stats.pointCount)} точек · запись ${fmtInt(dur)} мин`
+            : "загрузка статистики…"}
         </span>
       </div>
       <div className="kpi-grid">
@@ -434,10 +551,13 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
 function DrivingScoreBlock({
   stats,
   events,
+  aggregated = false,
 }: {
   stats: SessionStats | null | undefined;
   events: EventsResponse | null | undefined;
+  aggregated?: boolean;
 }) {
+  void aggregated; // подписка блока на режим (период-агрегат) — данные уже агрегированы вызывающим
   // Canonical CAP value + breakdown from stats.methodology.ecoScore.
   // /stats endpoint computes EcoScore with corpus-calibrated baselines (median of
   // all sessions + 1.2x margin for small corpus per §7.3). Fallback to count-based
@@ -503,7 +623,7 @@ function DrivingScoreBlock({
 
   const ez = effZone(eff);
   const effPct = effToGaugePct(eff);
-  const effBigValue = `${eff > 0 ? "+" : "−"}${Math.abs(eff).toString().replace(".", ",")}`;
+  const effBigValue = `${eff > 0 ? "+" : "−"}${Math.abs(eff).toFixed(1).replace(".", ",")}`;
 
   return (
     <section>
@@ -603,8 +723,10 @@ function DrivingScoreBlock({
 // === Блок 03: Скоростной профиль ===
 function SpeedProfileBlock({
   stats,
+  aggregated = false,
 }: {
   stats: SessionStats | null | undefined;
+  aggregated?: boolean;
 }) {
   // Compute 6 buckets from speedProfile.v[] (km/h).
   // Buckets: 0-20 / 20-40 / 40-60 / 60-80 / 80-100 / 100+
@@ -688,10 +810,10 @@ function SpeedProfileBlock({
     <section>
       <div className="sec-head">
         <span className="sec-num">03</span>
-        <span className="sec-title">Скоростной профиль</span>
+        <span className="sec-title">Скоростной профиль{aggregated ? " · все поездки" : ""}</span>
         <span className="sec-sub">
           {stats?.speedProfile
-            ? `${stats.speedProfile.length} точек активной части · ${sp.p50} км/ч медиана`
+            ? `${stats.speedProfile.length} точек${aggregated ? " (все поездки периода)" : " активной части"} · ${sp.p50} км/ч медиана`
             : "загрузка скоростного профиля…"}
         </span>
       </div>
@@ -787,10 +909,13 @@ function Stat({
 function PlanFactBlock({
   stats,
   comparison,
+  aggregated = false,
 }: {
   stats: SessionStats | null | undefined;
   comparison: RouteComparisonData | null | undefined;
+  aggregated?: boolean;
 }) {
+  void aggregated; // план/факт в период-режиме — суммы по всем поездкам
   // v2.10.1: useMemo ДОЛЖЕН быть до любого early return (rules-of-hooks).
   // Поэтому все производные значения — через optional chaining, а useMemo хранит
   // пустой массив если stats ещё не загружен.
@@ -1070,16 +1195,18 @@ function MapBlock({
   track,
   isLoading,
   isError,
+  aggregated = false,
 }: {
   track: TrackResponse | null | undefined;
   isLoading: boolean;
   isError: boolean;
+  aggregated?: boolean;
 }) {
   return (
     <section>
       <div className="sec-head">
         <span className="sec-num">05</span>
-        <span className="sec-title">Карта поездки</span>
+        <span className="sec-title">{aggregated ? "Карта поездок за период" : "Карта поездки"}</span>
         <span className="sec-sub">
           {track
             ? `${track.points.length} точек · ${track.segments.length} сегментов · слой ${track.defaultLayer}`
@@ -1109,10 +1236,13 @@ function MapBlock({
 function BehaviorBlock({
   events,
   stats,
+  aggregated = false,
 }: {
   events: EventsResponse | null | undefined;
   stats: SessionStats | null | undefined;
+  aggregated?: boolean;
 }) {
+  void aggregated; // события в период-режиме — суммы по всем поездкам
   const hb = events?.summary?.harshBraking ?? 0;
   const ha = events?.summary?.harshAcceleration ?? 0;
   const hscCount = events?.summary?.hscCount ?? 0;
@@ -1338,7 +1468,8 @@ function GgDiagram({ events }: { events: EventsResponse | null | undefined }) {
 //   - stats.methodology.movingTime / idleTime (§4.6/§4.7).
 //   - stats.route.timeLostToTrafficSec (§6.8): потери от 2ГИС (если трафик получен).
 //   - stats.methodology.speedDistribution (§5.3): 6 бакетов [0-20,20-40,...].
-function TrafficBlock({ stats }: { stats: SessionStats | null | undefined }) {
+function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | null | undefined; aggregated?: boolean }) {
+  void aggregated; // пробки в период-режиме — суммы по всем поездкам
   if (!stats || !stats.methodology) {
     return (
       <section>
@@ -1479,7 +1610,8 @@ function TrafficBlock({ stats }: { stats: SessionStats | null | undefined }) {
 //   - stats.elevationGain/Loss (§8.4/§8.5): сумма подъёмов/спусков.
 //   - bbox (stats.bbox): для heuristic городской зоны.
 //   - speedProfile[].alt: для построения реального высотного профиля и расчёта AltitudeRange.
-function GeoBlock({ stats }: { stats: SessionStats | null | undefined }) {
+function GeoBlock({ stats, aggregated = false }: { stats: SessionStats | null | undefined; aggregated?: boolean }) {
+  void aggregated; // рельеф в период-режиме — суммы/взвешенные средние
   // v2.10.1: useMemo вызываются ВНАЧАЛЕ (rules-of-hooks). early return — после.
   const elevGain = stats?.elevationGain ?? 0;
   const elevLoss = stats?.elevationLoss ?? 0;
@@ -1989,7 +2121,8 @@ function RouteTrendSvg({ trend }: { trend: RouteTrendData }) {
 
 // === Блок 11: Качество данных (LIVE v2.10.1) ===
 // Источник: stats.methodology.* — все 4 метрики качества (§11.1–§11.6).
-function DataQualityBlock({ stats }: { stats: SessionStats | null | undefined }) {
+function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats | null | undefined; aggregated?: boolean }) {
+  void aggregated; // качество данных в период-режиме — средние по поездкам
   // v2.10.1: Все значения из live API; fallback только при отсутствии stats (загрузка).
   const completeness = stats?.methodology?.completenessScore ?? null;
   const reliability = stats?.methodology?.sessionReliability;

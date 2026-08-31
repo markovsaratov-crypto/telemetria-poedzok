@@ -382,6 +382,9 @@ html.dark .v4-app {
 .v4-app .trip-filter-item:last-child { border-bottom: none; }
 .v4-app .trip-filter-item:hover { background: var(--wash); }
 .v4-app .trip-filter-item.selected { background: var(--plum-dim); color: var(--plum); }
+/* v2.10.2: «Все поездки периода» — сброс к период-агрегату */
+.v4-app .trip-filter-item.period-reset { border-bottom: 1px solid var(--line); }
+.v4-app .trip-filter-item.period-reset b { font-size: 11px; }
 .v4-app .trip-filter-item .mono { font-family: var(--mono); font-size: 10px; color: var(--faint); }
 .v4-app .trip-filter-empty {
   padding: 16px 12px;

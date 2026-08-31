@@ -2286,7 +2286,7 @@ function isPlausiblePoint(points: GpsPoint[], i: number): boolean {
 
 ### 13.1. 2ГИС carrouting 6.0.0
 
-Primary провайдер. API endpoint: https://routing.api.2gis.ru/carrouting/6.0.0?key=API_KEY. Параметры: start (lat,lon), end (lat,lon). Возвращает: геометрию (polyline), distanceM, durationSec, segments[] с traffic-данными. Таймаут: 8 секунд. Требует TWO_GIS_API_KEY.
+Primary провайдер. API endpoint: https://catalog.api.2gis.ru/carrouting/6.0.0?key=API_KEY (актуальный хост с v2.9.x; устаревший `routing.api.2gis.ru` выведен из эксплуатации — код использует `catalog.api.2gis.ru`, см. `src/lib/routing/chain.ts`). Параметры: start (lat,lon), end (lat,lon). Возвращает: геометрию (polyline), distanceM, durationSec, segments[] с traffic-данными. Таймаут: 8 секунд. Требует TWO_GIS_API_KEY.
 
 ### 13.2. OSRM Demo Server
 

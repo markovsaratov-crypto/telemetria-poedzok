@@ -170,11 +170,11 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
               <Activity className="h-7 w-7" />
             </motion.div>
             <CardTitle className="text-2xl tracking-tight">
-              Телеметрия поездок
+              Телематика Маркова
             </CardTitle>
             <CardDescription className="flex items-center justify-center gap-1.5">
               <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-              {mode === "login" ? "Войдите для доступа · v2.9" : "Создайте аккаунт · v2.9"}
+              {mode === "login" ? "Войдите для доступа к телеметрии" : "Создайте аккаунт для доступа"}
             </CardDescription>
           </CardHeader>
           <form onSubmit={handleSubmit}>

@@ -10,7 +10,7 @@ import type { SessionListItem } from "@/lib/api-client";
 import { ecoCls, ecoLab } from "@/lib/v4-utils";
 import { bindTips } from "./use-v4-tipbox";
 
-export function TripsView() {
+export function TripsView({ onGoAdmin }: { onGoAdmin?: () => void }) {
   const ref = React.useRef<HTMLDivElement>(null);
   const [openId, setOpenId] = React.useState<string | null>(null);
   const sessions = useSessions({ limit: 50 });
@@ -21,6 +21,12 @@ export function TripsView() {
   const list: SessionListItem[] = sessions.data?.sessions ?? [];
   const isLoading = sessions.isLoading && !sessions.data;
   const isError = sessions.isError;
+  // Рефреш показателя «свежести» раз в минуту (чтобы часы без перезагрузки обновлялись)
+  const [, setTick] = React.useState(0);
+  React.useEffect(() => {
+    const id = window.setInterval(() => setTick((t) => t + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   return (
     <div ref={ref}>
@@ -56,6 +62,7 @@ export function TripsView() {
         </div>
       ) : (
         <>
+          <StaleDataBanner list={list} onGoAdmin={onGoAdmin} />
           <TripsSummary list={list} />
           {list.map((s) => (
             <TripCard
@@ -69,6 +76,59 @@ export function TripsView() {
           ))}
         </>
       )}
+    </div>
+  );
+}
+
+// Баннер «данные не обновлялись»: появляется, если последняя сессия старше 24 ч.
+// Отвечает на вопрос «почему не подтягиваются новые поездки» прямо в UI:
+// поездки попадают сюда только через ingest-канал (SensorLogger → /api/ingest/sensorlogger).
+function StaleDataBanner({
+  list,
+  onGoAdmin,
+}: {
+  list: SessionListItem[];
+  onGoAdmin?: () => void;
+}) {
+  if (list.length === 0) return null;
+  const latest = Math.max(
+    ...list.map((s) => new Date(s.endTime ?? s.startTime).getTime())
+  );
+  const hours = (Date.now() - latest) / 3_600_000;
+  if (hours < 24) return null;
+
+  const days = Math.floor(hours / 24);
+  const label =
+    days >= 1
+      ? `${days} ${days === 1 ? "день" : days < 5 ? "дня" : "дней"}`
+      : `${Math.floor(hours)} ч`;
+  const latestStr = new Date(latest).toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+  return (
+    <div className="stale-banner" role="status">
+      <div className="stale-banner-main">
+        <b>Новых загрузок нет уже {label}</b>
+        <span>
+          Последняя поездка — {latestStr}. Список обновляется только когда
+          SensorLogger на iPhone отправляет данные на сервер. Если вы
+          записывали поездки, но их здесь нет — канал загрузки нужно
+          проверить.
+        </span>
+      </div>
+      {onGoAdmin ? (
+        <button
+          type="button"
+          className="stale-banner-btn"
+          onClick={onGoAdmin}
+        >
+          Диагностика канала →
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -188,30 +248,34 @@ function SummaryAggregator({
   // Track all loaded stats in a ref map to accumulate without losing prior values.
   const loadedRef = React.useRef<Map<string, SessionStats>>(new Map());
 
+  // Стабильный колбэк: без useCallback inline-стрелка в render создаёт новую
+  // ссылку → useEffect в AggregatorRow срабатывает на каждый рендер →
+  // setState-цикл («Maximum update depth exceeded»).
+  const handleLoaded = React.useCallback(
+    (id: string, stats: SessionStats) => {
+      loadedRef.current.set(id, stats);
+      let totalDurMin = 0;
+      let totalDistKm = 0;
+      let ecoSum = 0;
+      let ecoCount = 0;
+      for (const v of loadedRef.current.values()) {
+        totalDurMin += (v.duration ?? 0) / 60;
+        totalDistKm += (v.distance ?? 0) / 1000;
+        const ecoVal = v.methodology?.ecoScore?.value;
+        if (ecoVal != null && Number.isFinite(ecoVal)) {
+          ecoSum += ecoVal;
+          ecoCount++;
+        }
+      }
+      onAgg({ totalDurMin, totalDistKm, ecoSum, ecoCount });
+    },
+    [onAgg]
+  );
+
   return (
     <div style={{ display: "none" }} aria-hidden="true">
       {list.map((s) => (
-        <AggregatorRow
-          key={s.id}
-          id={s.id}
-          onLoaded={(stats) => {
-            loadedRef.current.set(s.id, stats);
-            let totalDurMin = 0;
-            let totalDistKm = 0;
-            let ecoSum = 0;
-            let ecoCount = 0;
-            for (const v of loadedRef.current.values()) {
-              totalDurMin += (v.duration ?? 0) / 60;
-              totalDistKm += (v.distance ?? 0) / 1000;
-              const ecoVal = v.methodology?.ecoScore?.value;
-              if (ecoVal != null && Number.isFinite(ecoVal)) {
-                ecoSum += ecoVal;
-                ecoCount++;
-              }
-            }
-            onAgg({ totalDurMin, totalDistKm, ecoSum, ecoCount });
-          }}
-        />
+        <AggregatorRow key={s.id} id={s.id} onLoaded={handleLoaded} />
       ))}
     </div>
   );
@@ -222,14 +286,14 @@ function AggregatorRow({
   onLoaded,
 }: {
   id: string;
-  onLoaded: (stats: SessionStats) => void;
+  onLoaded: (id: string, stats: SessionStats) => void;
 }) {
   const stats = useSessionStats(id);
   React.useEffect(() => {
     if (stats.data) {
-      onLoaded(stats.data);
+      onLoaded(id, stats.data);
     }
-  }, [stats.data, onLoaded]);
+  }, [id, stats.data, onLoaded]);
   return null;
 }
 

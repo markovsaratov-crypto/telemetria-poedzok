@@ -2208,3 +2208,224 @@ html.dark .v4-app .v4-bottom-nav {
   .v4-app .v4-show-mobile { display: none; }
   .v4-app .v4-show-desktop { display: initial; }
 }
+
+/* === A6 / StaleDataBanner: диагностика канала загрузки === */
+
+/* Баннер «нет новых загрузок > 24 ч» на вкладке Поездки */
+.v4-app .stale-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--amber-dim);
+  border: 1px solid var(--line2);
+  border-left: 3px solid var(--amber);
+  border-radius: 5px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.v4-app .stale-banner-main { flex: 1 1 auto; min-width: 0; }
+.v4-app .stale-banner-main b {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--amber);
+  margin-bottom: 4px;
+}
+.v4-app .stale-banner-main span {
+  display: block;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.v4-app .stale-banner-btn {
+  flex: 0 0 auto;
+  font-family: var(--cond);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--amber);
+  background: var(--panel);
+  border: 1px solid var(--amber);
+  border-radius: 4px;
+  padding: 0 14px;
+  min-height: 44px; /* touch-friendly */
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.v4-app .stale-banner-btn:hover { background: var(--amber); color: #fff; }
+.v4-app .stale-banner-btn:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+/* A6: блок диагностики канала (Админ) */
+.v4-app .diag-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  color: var(--muted);
+}
+.v4-app .diag-row svg { color: var(--plum); }
+.v4-app .diag-last { font-size: 12px; line-height: 1.5; }
+.v4-app .diag-last b { font-weight: 700; }
+
+.v4-app .diag-url { margin-bottom: 14px; }
+.v4-app .diag-test { margin-bottom: 14px; }
+.v4-app .diag-url-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.v4-app .diag-url-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+.v4-app .diag-url-row code {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text);
+  word-break: break-all;
+  align-self: center;
+}
+.v4-app .diag-copy { flex: 0 0 auto; }
+.v4-app .diag-url-hint {
+  display: block;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--faint);
+  margin-top: 5px;
+}
+.v4-app .diag-test-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+.v4-app .diag-token { flex: 1 1 auto; min-width: 0; font-size: 12px; }
+.v4-app .diag-run { flex: 0 0 auto; min-height: 44px; }
+
+/* Результат теста: ok / err / warn */
+.v4-app .diag-result {
+  border-radius: 4px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  border: 1px solid var(--line2);
+}
+.v4-app .diag-ok {
+  background: var(--plum-dim);
+  border-left: 3px solid var(--plum);
+}
+.v4-app .diag-err {
+  background: var(--red-dim);
+  border-left: 3px solid var(--red);
+}
+.v4-app .diag-warn {
+  background: var(--amber-dim);
+  border-left: 3px solid var(--amber);
+}
+.v4-app .diag-result-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.v4-app .diag-result-head b {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.v4-app .diag-ok .diag-result-head b { color: var(--plum); }
+.v4-app .diag-err .diag-result-head b { color: var(--red); }
+.v4-app .diag-warn .diag-result-head b { color: var(--amber); }
+.v4-app .diag-result-head .mono {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.v4-app .diag-result p {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.v4-app .diag-raw { margin-top: 8px; }
+.v4-app .diag-raw summary {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  cursor: pointer;
+}
+.v4-app .diag-raw pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Чек-лист телефона */
+.v4-app .diag-checklist { margin-top: 4px; }
+.v4-app .diag-checklist > summary {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--plum);
+  cursor: pointer;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
+.v4-app .diag-checklist > summary::marker { color: var(--plum); }
+.v4-app .diag-checklist ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
+.v4-app .diag-checklist li {
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.v4-app .diag-checklist li b { color: var(--text); font-weight: 700; }
+
+/* Mobile: баннер и тест-строка стекуются, tap-targets ≥44px */
+@media (max-width: 767px) {
+  .v4-app .stale-banner {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .v4-app .stale-banner-btn { width: 100%; }
+  .v4-app .diag-url-row { flex-direction: column; }
+  .v4-app .diag-copy { align-self: flex-end; }
+  .v4-app .diag-test-row { flex-direction: column; }
+  .v4-app .diag-run { width: 100%; }
+}

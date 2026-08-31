@@ -8,6 +8,7 @@ import * as React from "react";
 import { useSessions, useSessionStats, type SessionStats } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
 import { ecoCls, ecoLab } from "@/lib/v4-utils";
+import { fmtSecFull } from "@/lib/format";
 import { bindTips } from "./use-v4-tipbox";
 
 export function TripsView({ onGoAdmin }: { onGoAdmin?: () => void }) {
@@ -463,8 +464,8 @@ function TripBody({
           label="Стоянки"
         />
         <Stat
-          value={`${Math.round(gapSec)} сек`}
-          tip="Разрывы записи (§4.6): интервалы между точками длиннее 30 сек"
+          value={fmtSecFull(gapSec)}
+          tip="Разрывы записи (§4.6): интервалы между точками длиннее 30 сек — время без данных GPS"
           label="Разрывы"
         />
       </div>

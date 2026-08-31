@@ -40,6 +40,29 @@ export function fmtDuration(ms?: number | null): string {
   return `${s} сек`;
 }
 
+// v2.10.3 (эргономика): длительность из СЕКУНД — как fmtDuration, но без ms-аргумента
+// и без тире для нуля (для легенд/тайлов, где 0 — валидное значение).
+// fmtSecShort — компактная подпись легенды: «45 сек» / «22 мин» / «2 ч 5 мин».
+export function fmtSecShort(sec?: number | null): string {
+  if (sec == null || !Number.isFinite(sec) || sec <= 0) return "0 сек";
+  const s = Math.round(sec);
+  if (s < 60) return `${s} сек`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} мин`;
+  return `${Math.floor(m / 60)} ч ${m % 60} мин`;
+}
+
+// fmtSecFull — с точностью до секунд (тултипы/значения тайлов): «11 мин 20 сек».
+export function fmtSecFull(sec?: number | null): string {
+  if (sec == null || !Number.isFinite(sec) || sec <= 0) return "0 сек";
+  const s = Math.round(sec);
+  if (s < 60) return `${s} сек`;
+  const m = Math.floor(s / 60);
+  const rs = s % 60;
+  if (m < 60) return rs ? `${m} мин ${rs} сек` : `${m} мин`;
+  return `${Math.floor(m / 60)} ч ${m % 60} мин`;
+}
+
 export function fmtBytes(bytes?: number | null): string {
   if (bytes == null || isNaN(bytes)) return "—";
   if (bytes < 1024) return `${bytes} Б`;

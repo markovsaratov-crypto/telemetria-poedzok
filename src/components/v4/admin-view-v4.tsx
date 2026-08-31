@@ -59,6 +59,13 @@ import { bindTips } from "./use-v4-tipbox";
 import { CsvImport } from "@/components/csv-import";
 import { ZipImport } from "@/components/zip-import";
 
+// Версии документов (v2.10.4): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
+// При следующем релизе доков обновить здесь + строки изменений ниже + шапки файлов в docs/.
+const DOCS = {
+  version: "v2.10.4 · 31.08",
+  prev: "v2.9 · 29.08",
+} as const;
+
 export function AdminViewV4() {
   const ref = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
@@ -169,6 +176,56 @@ function A1ParamsBlock() {
               <span>Мин. корпус калибровки</span>
               <b>30 сессий</b>
             </div>
+          </div>
+        </div>
+      </div>
+      {/* v2.10.4: версии документации + журнал изменений (новое — цветом, прежнее — зачёркнуто) */}
+      <div className="card" style={{ marginTop: 12 }}>
+        <div className="doc-grid">
+          <div>
+            <div className="param">
+              <span>
+                Методология
+                <small>
+                  docs/METHODOLOGY.md · <s>было {DOCS.prev}</s>
+                </small>
+              </span>
+              <b className="c-plum">{DOCS.version}</b>
+            </div>
+            <div className="param">
+              <span>
+                Спецификация администратора
+                <small>
+                  docs/ADMIN_SPEC.md · <s>было {DOCS.prev}</s>
+                </small>
+              </span>
+              <b className="c-plum">{DOCS.version}</b>
+            </div>
+          </div>
+          <div className="doc-log">
+            <div className="doc-log-cap">Изменения против v2.9 · новое — цветом, прежнее — зачёркнуто</div>
+            <ul>
+              <li>
+                <b className="c-plum">§4.2 / §4.3</b> дистанция и средняя скорость —{" "}
+                <b className="c-plum">по активной части (§4.11)</b>; <s>по всей записи</s> → rawDistanceM
+              </li>
+              <li>
+                <b className="c-plum">§6.2 / §6.3</b> факт план-факта ={" "}
+                <b className="c-plum">ActiveDuration</b>; <s>длительность всей записи</s>
+              </li>
+              <li>
+                <b className="c-plum">§6.5</b> share-страница —{" "}
+                <b className="c-plum">серверные KPI</b> по методологии (согласована с админкой)
+              </li>
+              <li>
+                <b className="c-plum">спека</b> hardening: CORS, маскирование секретов, лимиты импорта,
+                timing-safe токены, <s>точки accuracy без фильтра</s> → приём при ≤ 100 м
+              </li>
+              <li>
+                <b className="c-plum">UI</b> разрывы <s>1323 сек</s> → 22 мин; точность AvgSpeed в API{" "}
+                <b className="c-plum">0,001 м/с</b> (поверхности сходятся)
+              </li>
+            </ul>
           </div>
         </div>
       </div>

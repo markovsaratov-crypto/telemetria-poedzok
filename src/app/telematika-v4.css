@@ -1509,6 +1509,50 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
   font-family: var(--cond);
   margin-top: 1px;
 }
+
+/* === v2.10.4: карточка «Документация» в A1 — версии доков + журнал изменений === */
+/* Новое — акцентным цветом (--plum), прежнее — зачёркнуто (--faint), diff-стиль. */
+.v4-app .doc-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 340px) 1fr;
+  gap: 0 26px;
+}
+.v4-app .doc-log {
+  padding-top: 2px;
+  align-self: start;
+}
+.v4-app .doc-log-cap {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 7px;
+}
+.v4-app .doc-log ul {
+  list-style: none;
+  display: grid;
+  gap: 5px;
+}
+.v4-app .doc-log li {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+.v4-app .doc-log li b.c-plum {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.v4-app .doc-log s,
+.v4-app .param small s {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+.v4-app .param b.c-plum { color: var(--plum); }
+@media (max-width: 720px) {
+  .v4-app .doc-grid { grid-template-columns: 1fr; }
+  .v4-app .doc-log { padding-top: 8px; border-top: 1px dashed var(--line); }
+}
 .v4-app .pipe-bar {
   display: flex;
   height: 14px;

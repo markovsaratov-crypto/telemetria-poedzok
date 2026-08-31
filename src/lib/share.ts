@@ -4,6 +4,9 @@ import { createHmac } from "crypto";
 import { env } from "./env";
 import { db } from "./db";
 import { json } from "./http-utils";
+import { haversineM } from "./geo";
+import { computeMovingTime, computeActiveTrip, type MethodologyPoint } from "./active-trip";
+import { maxSpeedMs, normalizeSessionSpeeds } from "./kpi";
 
 export const SHARE_DEFAULT_TTL_HOURS = 168; // 7 дней
 export const SHARE_MAX_TTL_HOURS = 8760; // 1 год
@@ -46,6 +49,44 @@ export async function sharePayload(sessionId: string, expiresAt: number, request
     return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
   }
 
+  // FIX-C3: серверные KPI по методологии — раньше страница считала дистанцию
+  // по всей записи (включая дрейф «хвостов») и среднюю скорость как
+  // «вся дистанция / вся длительность», расходясь с админкой.
+  const rawPoints = session.gpsPoints.map((p) => ({
+    lat: p.lat,
+    lon: p.lon,
+    speed: p.speed,
+    altitude: p.altitude,
+    bearing: p.bearing,
+    accuracy: p.accuracy,
+    timestamp: Number(p.timestamp),
+  }));
+  // B-4: нормализация скоростей — публичная страница согласована с админкой
+  const points = normalizeSessionSpeeds(rawPoints);
+
+  let rawDistanceM = 0;
+  let distanceM = 0; // активная дистанция (§4.11)
+  let activeDurationSec = 0;
+  let preTripIdleSec = 0;
+  let postTripIdleSec = 0;
+  let hasActiveTrip = false;
+  if (points.length >= 2) {
+    const motion = computeMovingTime(points as MethodologyPoint[]);
+    const active = computeActiveTrip(points as MethodologyPoint[], motion);
+    hasActiveTrip = active.hasActiveTrip;
+    activeDurationSec = active.activeDuration;
+    preTripIdleSec = active.preTripIdle;
+    postTripIdleSec = active.postTripIdle;
+    for (let i = 1; i < points.length; i++) {
+      const d = haversineM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
+      rawDistanceM += d;
+      if (hasActiveTrip && points[i].timestamp >= active.activeStartTime && points[i - 1].timestamp <= active.activeEndTime) {
+        distanceM += d;
+      }
+    }
+  }
+  const maxSpeed = maxSpeedMs(points) ?? 0;
+
   return json(
     {
       sessionId: session.id,
@@ -54,13 +95,21 @@ export async function sharePayload(sessionId: string, expiresAt: number, request
       startTime: session.startTime,
       endTime: session.endTime,
       pointCount: session.pointCount,
-      points: session.gpsPoints.map((p) => ({
+      points: points.map((p) => ({
         lat: p.lat,
         lon: p.lon,
         speed: p.speed,
         altitude: p.altitude,
-        timestamp: Number(p.timestamp),
+        timestamp: p.timestamp,
       })),
+      // FIX-C3: серверные KPI (активная часть) — клиент только отображает
+      distanceM: Math.round(distanceM),
+      rawDistanceM: Math.round(rawDistanceM),
+      activeDurationSec: Math.round(activeDurationSec),
+      preTripIdleSec: Math.round(preTripIdleSec),
+      postTripIdleSec: Math.round(postTripIdleSec),
+      hasActiveTrip,
+      maxSpeedMs: Math.round(maxSpeed * 10) / 10,
       shared: true,
       expiresAt: new Date(expiresAt).toISOString(),
     },

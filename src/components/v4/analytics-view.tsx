@@ -184,8 +184,15 @@ const PERIOD_LABELS: Record<PeriodKey, string> = {
 // Шапка периода (период-режим, v2.10.2): N поездок + диапазон дат + сводный таймлайн.
 function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey }) {
   const totalMin = secToMin(agg.stats.duration);
-  const moveMin = secToMin(agg.stats.movingTime);
+  // FIX-C1: «в поездках» — Σ активных длительностей (§4.11), а не Σ MovingTime:
+  // светофоры и пробки внутри поездок — часть поездки, а не «не-поездка».
+  const activeMin = secToMin(
+    agg.stats.methodology?.activeTrip?.hasActiveTrip
+      ? agg.stats.methodology.activeTrip.activeDuration
+      : agg.stats.movingTime
+  );
   const idleMin = secToMin(agg.stats.idleTime);
+  const moveMin = secToMin(agg.stats.movingTime);
   const gapSec = agg.stats.gapTime ?? 0;
   const total = Math.max(1, agg.stats.duration || 1);
   const movePct = ((agg.stats.movingTime ?? 0) / total) * 100;
@@ -215,7 +222,7 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
           {agg.trips} {tripsWord}
         </span>
         <span className="muted">
-          · всего <b>{fmtInt(totalMin)} мин</b> · в движении <b>{fmtInt(moveMin)} мин</b> ·{" "}
+          · всего <b>{fmtInt(totalMin)} мин</b> · в поездках <b>{fmtInt(activeMin)} мин</b> ·{" "}
           {fmtInt(agg.stats.pointCount)} точек
         </span>
       </div>
@@ -294,6 +301,13 @@ function SessionHeader({
   }
   const totalMin = secToMin(stats.duration);
   const moveMin = secToMin(stats.movingTime);
+  // FIX-C1: «в поездке» — активная длительность (§4.11: включает светофоры/пробки
+  // внутри поездки), а не MovingTime. Fallback — для legacy-ответов без activeTrip.
+  const activeMin = secToMin(
+    stats.methodology?.activeTrip?.hasActiveTrip
+      ? stats.methodology.activeTrip.activeDuration
+      : stats.movingTime
+  );
   const idleMin = secToMin(stats.idleTime);
   const gapSec = stats.gapTime ?? 0;
   // Доли движения/стоянок/разрывов на таймлайне (0..100%)
@@ -323,7 +337,7 @@ function SessionHeader({
         <span>SensorLogger</span>
         <span className="muted">
           · запись <b>{fmtInt(totalMin)} мин</b> · в поездке{" "}
-          <b>{fmtInt(moveMin)} мин</b> · {fmtInt(stats.pointCount)} точек
+          <b>{fmtInt(activeMin)} мин</b> · {fmtInt(stats.pointCount)} точек
         </span>
       </div>
       <div className="mline">
@@ -350,7 +364,7 @@ function SessionHeader({
         </span>
         <span>
           <i style={{ background: "#DCC9D3" }} />
-          Время стоянок · {fmtInt(idleMin)} мин
+          стоянки · {fmtInt(idleMin)} мин
         </span>
         <span>
           <i style={{ background: "repeating-linear-gradient(90deg,#C99A2E 0 3px,#F3E3C9 3px 6px)" }} />
@@ -374,22 +388,26 @@ function KpiBlock({
   // Compute KPI values from live stats.
   const dur = stats ? secToMin(stats.duration) : 0;
   const dist = stats ? stats.distance / 1000 : 0;
-  const avgKmh = stats
-    ? stats.distance > 0 && stats.duration > 0
-      ? (stats.distance / stats.duration) * 3.6
-      : 0
-    : 0;
+  // FIX-C1: средняя — из API (активная дистанция / активное время, §4.3+§4.11).
+  // Раньше пересчитывалась локально как вся дистанция / вся длительность —
+  // расходилась с карточкой сессии и занижалась стоянками-хвостами.
+  const avgKmh = stats ? (stats.avgSpeed != null ? msToKmh(stats.avgSpeed) ?? 0 : 0) : 0;
   const maxKmh = stats ? msToKmh(stats.maxSpeed) ?? 0 : 0;
   const moveMin = stats ? secToMin(stats.movingTime) : 0;
   const idleMin = stats ? secToMin(stats.idleTime) : 0;
 
-  // Sparkline values from speedProfile.v[] (last 14 points, km/h).
+  // Спарклайн-значения из speedProfile.v[] (последние 14 точек, км/ч).
   const sparkData = React.useMemo(() => {
     if (!stats?.speedProfile) return [];
     return stats.speedProfile
       .slice(-14)
       .map((p) => (p.v != null && p.v >= 0 ? p.v : 0));
   }, [stats]);
+
+  // FIX-C1 (эргономика): хвосты записи — прямо в подзаголовке секции
+  const at = stats?.methodology?.activeTrip;
+  const tailsSec =
+    at?.hasActiveTrip ? Math.max(0, at.preTripIdle + at.postTripIdle) : 0;
 
   return (
     <section>
@@ -399,15 +417,15 @@ function KpiBlock({
         <span className="sec-sub">
           {stats
             ? aggregated
-              ? `${fmtInt(stats.pointCount)} точек · все поездки периода`
-              : `${fmtInt(stats.pointCount)} точек · запись ${fmtInt(dur)} мин`
+              ? `${fmtInt(stats.pointCount)} точек · все поездки периода${at?.hasActiveTrip ? ` · активных ${fmtInt(secToMin(at.activeDuration))} мин` : ""}`
+              : `${fmtInt(stats.pointCount)} точек · запись ${fmtInt(dur)} мин${tailsSec > 30 ? ` · хвосты ${fmtInt(secToMin(tailsSec))} мин вне аналитики` : ""}`
             : "загрузка статистики…"}
         </span>
       </div>
       <div className="kpi-grid">
         <KpiCard
           label="Длительность"
-          tip={`Длительность записи (§4.1 Duration): от первой до последней точки, включая стоянки-«хвосты» | Аналитика считается по активной части — см. «в поездке ${fmtInt(moveMin)} мин» в шапке`}
+          tip={`Длительность записи (§4.1 Duration): от первой до последней точки, включая стоянки-«хвосты» | Аналитические метрики ниже (дистанция, скорость, план-факт) считаются по активной поездке — см. «в поездке» в шапке`}
           value={stats ? fmtInt(dur) : "—"}
           unit="мин"
           trend={["—", "neu"]}
@@ -416,7 +434,7 @@ function KpiBlock({
         />
         <KpiCard
           label="Дистанция"
-          tip="Дистанция (§4.2 Distance): сумма гаверсинусов между соседними точками активной части | Точность ±1–3% от накопления погрешностей GPS"
+          tip={`Дистанция (§4.2 Distance): сумма гаверсинусов между соседними точками АКТИВНОЙ поездки (§4.11) — дрейф стоянок-«хвостов» до старта и после финиша исключён | Точность ±1–3% от накопления погрешностей GPS`}
           value={stats ? fmtNum(dist, 1) : "—"}
           unit="км"
           trend={["—", "neu"]}
@@ -612,7 +630,13 @@ function DrivingScoreBlock({
 
   // Efficiency (TimeSavingIndex) = (duration - planDurationSec) / 60 → min/trip.
   const planDurationSec = stats?.route?.planDurationSec;
-  const actualDuration = stats?.duration;
+  // FIX-C2: факт = ActiveDuration (§6.2) — подпись строки «активной поездки» теперь
+  // соответствует расчёту; стоянка-хвост до старта не занижает экономию к плану.
+  const activeTrip = stats?.methodology?.activeTrip;
+  const actualDuration =
+    activeTrip?.hasActiveTrip && activeTrip.activeDuration > 0
+      ? activeTrip.activeDuration
+      : stats?.duration;
   const eff = React.useMemo(() => {
     if (planDurationSec != null && actualDuration != null && planDurationSec > 0) {
       return (actualDuration - planDurationSec) / 60;
@@ -675,7 +699,7 @@ function DrivingScoreBlock({
         {/* === Виджет 2: Эффективность · экономия к плану === */}
         <GaugeArc
           title="Эффективность · экономия к плану"
-          helpTip="Метрика TimeSavingIndex (§6.3 DurationDeviation): среднее отклонение времени от плана маршрута в минутах на поездку. Отрицательное значение = экономия (слива), положительное = перерасход (алый). Источник: stats.route.planDurationSec vs stats.duration."
+          helpTip="Метрика TimeSavingIndex (§6.3 DurationDeviation): среднее отклонение времени от плана маршрута в минутах на поездку. Отрицательное значение = экономия (слива), положительное = перерасход (алый). Источник: stats.route.planDurationSec vs активная длительность поездки (§4.11 ActiveDuration)."
           bigValue={effBigValue}
           bigValueSuffix="мин/поездку"
           arcColor={ez.c}
@@ -685,7 +709,7 @@ function DrivingScoreBlock({
           note={
             <>
               Шкала: 0 в центре, левее — экономия (слива), правее — перерасход (алый). Отклонение =
-              (Duration − PlanDuration)/60 за поездку.
+              (ActiveDuration − PlanDuration)/60 за поездку — стоянки-«хвосты» записи не учитываются.
             </>
           }
           rows={[

@@ -6,7 +6,7 @@ import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { env } from "@/lib/env";
-import { readIngestTrace } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток инжеста
+import { readIngestTrace, readIngestRaw } from "@/lib/ingest-trace"; // DIAG-1: трассировка; v2.10.8: сырой дамп по ?ingestRaw=1
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -83,6 +83,13 @@ export async function GET(request: NextRequest) {
     // Не в /health: он публичный, а deviceId/размеры попыток — не для наружи.
     const ingestTrace = await readIngestTrace().catch(() => ({ last: null, recent: [], updatedAt: null }));
 
+    // v2.10.8: полный дамп последнего нераспознанного батча — ТОЛЬКО по
+    // ?ingestRaw=1: до 64 КБ в теле ответе, не таскаем его в каждом запросе.
+    const wantRaw = new URL(request.url).searchParams.get("ingestRaw") === "1";
+    const ingestRaw = wantRaw
+      ? await readIngestRaw().catch(() => null)
+      : null;
+
     return json(
       {
         totalSessions,
@@ -107,6 +114,8 @@ export async function GET(request: NextRequest) {
         version: env().APP_VERSION,
         // DIAG-1: {last, recent (≤20), updatedAt} — попытки инжеста всех исходов
         ingestTrace,
+        // v2.10.8: {at, deviceId, outcome, bytes, truncated, body} — только при ?ingestRaw=1
+        ...(wantRaw ? { ingestRaw } : {}),
       },
       200,
       { "X-Request-Id": requestId }

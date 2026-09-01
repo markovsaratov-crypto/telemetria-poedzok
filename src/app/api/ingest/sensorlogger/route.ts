@@ -11,7 +11,7 @@ import { env } from "@/lib/env";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
-import { recordIngestAttempt } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток
+import { recordIngestAttempt, recordIngestRaw } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток; v2.10.8: сырой дамп
 import { randomUUID } from "crypto";
 
 const SESSION_GAP_MS = 60_000; // 60с gap = новая сессия
@@ -106,11 +106,44 @@ function extractPoint(raw: RawPoint): NormalizedPoint | null {
 // v2.10.7: извлечение массива точек из тела запроса. Кроме корневого массива и
 // {points:[]}, некоторые сборки SensorLogger кладут батч под data/records/samples/
 // locations/entries/batches — или сенсоры по типам: {data:{location:[...]}}.
+// v2.10.8 (кейс 01.09 08:40): реальный формат приложения — корневой объект
+// {messageId, sessionId, deviceId, payload:[{name:"accelerometer", time, values}]},
+// где каждая запись = сенсор, координаты лежат в values location-записи.
+// «payload» теперь ищется первым; добавлены readings/sensors/measurements.
 // Возвращает null, если подходящего массива не найдено (→ sample-диагностика).
-const ARRAY_KEYS = ["points", "data", "records", "samples", "locations", "entries", "batches"] as const;
+const ARRAY_KEYS = [
+  "payload",
+  "points",
+  "data",
+  "records",
+  "readings",
+  "sensors",
+  "measurements",
+  "samples",
+  "locations",
+  "entries",
+  "batches",
+] as const;
+
+// v2.10.8: именованная запись Sensor Logger: {name:"location", time, values:{…}}.
+// values → контейнер location (extractPoint уже понимает latitude/lat/lon/lng
+// внутри location/coords/position/gps), остальные поля записи — плоский fallback.
+function normalizeItem(item: unknown): RawPoint {
+  if (item && typeof item === "object" && !Array.isArray(item)) {
+    const r = item as Record<string, unknown>;
+    if (typeof r.name === "string" && r.values && typeof r.values === "object" && !Array.isArray(r.values)) {
+      return {
+        ...(r as RawPoint),
+        time: (r.time ?? r.timestamp) as number | string | undefined,
+        location: r.values as RawLocation,
+      };
+    }
+  }
+  return item as RawPoint;
+}
 
 function extractItems(body: unknown): RawPoint[] | null {
-  if (Array.isArray(body)) return body as RawPoint[];
+  if (Array.isArray(body)) return body.map(normalizeItem);
   if (body && typeof body === "object") {
     const obj = body as Record<string, unknown>;
     for (const key of ARRAY_KEYS) {
@@ -120,9 +153,9 @@ function extractItems(body: unknown): RawPoint[] | null {
         if (v.length === 0) return [];
         // batches может быть массивом массивов — flatten один уровень
         if (Array.isArray(v[0])) {
-          return (v as unknown[][]).flat() as RawPoint[];
+          return (v as unknown[][]).flat().map(normalizeItem);
         }
-        return v as RawPoint[];
+        return v.map(normalizeItem);
       }
     }
     // {data:{location:[...], accelerometer:[...]}} — сенсоры по типам.
@@ -133,7 +166,7 @@ function extractItems(body: unknown): RawPoint[] | null {
       const nested = data as Record<string, unknown>;
       for (const key of [...ARRAY_KEYS, "location", "gps", "position", "coords"] as const) {
         const v = nested[key];
-        if (Array.isArray(v) && v.length > 0) return v as RawPoint[];
+        if (Array.isArray(v) && v.length > 0) return v.map(normalizeItem);
       }
     }
     return [body as RawPoint];
@@ -144,21 +177,67 @@ function extractItems(body: unknown): RawPoint[] | null {
 // v2.10.7: образец структуры payload для нераспознанных батчей — показывает,
 // под какими ключами лежат данные. Обрезаем до 300 символов, приватные данные
 // владельца в его же диагностике — приемлемо; полные координаты не светим.
+// v2.10.8: для формата {payload:[{name,time,values}]} показывает ГИСТОГРАММУ
+// сенсоров (accelerometer×200, location×1, …) — сразу видно, был ли в батче
+// location вообще (кейс 01.09: 10 батчей no_gps — а был ли включён GPS?).
+const LOCATION_NAMES = ["location", "gps", "position", "coords", "coordinates", "latitude"];
+
+function describeNamedRecords(items: unknown[], prefix: string): string {
+  const hist = new Map<string, number>();
+  for (const it of items) {
+    const name =
+      it && typeof it === "object" && typeof (it as Record<string, unknown>).name === "string"
+        ? ((it as Record<string, unknown>).name as string)
+        : "(без name)";
+    hist.set(name, (hist.get(name) ?? 0) + 1);
+  }
+  const histStr = [...hist.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([n, c]) => `${n}×${c}`)
+    .join(", ");
+  const locRecord = items.find((it) => {
+    if (!it || typeof it !== "object") return false;
+    const r = it as Record<string, unknown>;
+    const n = r.name;
+    return typeof n === "string" && LOCATION_NAMES.some((ln) => n.toLowerCase().includes(ln));
+  });
+  const locStr = locRecord
+    ? ` · ${JSON.stringify(locRecord).slice(0, 200)}`
+    : " · location-записей НЕТ (включите GPS/Location в списке сенсоров приложения)";
+  return `${prefix}[${items.length}] сенсоры: ${histStr}${locStr}`;
+}
+
 function describePayloadShape(body: unknown): string {
   try {
     const brief = (x: unknown, n: number): string => {
       const s = JSON.stringify(x);
       return s.length > n ? s.slice(0, n) + "…" : s;
     };
+    // v2.10.8: находим массив внутри тела (payload/points/…), описываем его
+    const findArray = (o: Record<string, unknown>): unknown[] | null => {
+      for (const key of ARRAY_KEYS) {
+        const v = o[key];
+        if (Array.isArray(v)) return v;
+      }
+      return null;
+    };
     if (Array.isArray(body)) {
+      if (body.length > 0 && body[0] && typeof body[0] === "object" && "name" in (body[0] as object) && "values" in (body[0] as object)) {
+        return describeNamedRecords(body, "массив");
+      }
       const first = body[0];
       const keys =
         first && typeof first === "object" ? Object.keys(first as object).join(",") : typeof first;
       return `массив[${body.length}], keys=[${keys}], first=${brief(first, 240)}`;
     }
     if (body && typeof body === "object") {
-      const keys = Object.keys(body as object).join(",");
-      return `объект, keys=[${keys}], ${brief(body, 240)}`;
+      const obj = body as Record<string, unknown>;
+      const arr = findArray(obj);
+      if (arr && arr.length > 0 && arr[0] && typeof arr[0] === "object" && "name" in (arr[0] as object) && "values" in (arr[0] as object)) {
+        return describeNamedRecords(arr, "объект, payload-массив");
+      }
+      const keys = Object.keys(obj).join(",");
+      return `объект, keys=[${keys}], ${brief(obj, 240)}`;
     }
     return `${typeof body}: ${brief(body, 120)}`;
   } catch {
@@ -243,13 +322,19 @@ export async function POST(request: NextRequest) {
     if (!items || items.length === 0) {
       // SensorLogger "Test Push" шлёт пустой/минимальный body — считаем тест успешным
       // DIAG-1: «тихий успех» для приложения — трассируем, чтобы отличить от реальной отправки
+      const bodyStr = JSON.stringify(body ?? null);
       recordIngestAttempt({
         at: new Date().toISOString(), route: "sensorlogger", deviceId,
         outcome: "empty", points: 0, dropped: 0,
-        bytes: Buffer.byteLength(JSON.stringify(body ?? null)),
+        bytes: Buffer.byteLength(bodyStr),
         // v2.10.7: образец структуры — в админке L1 видно, что именно прислало приложение
         sample: describePayloadShape(body),
       });
+      // v2.10.8: полный дамп для точечного расширения парсера (см. ingest-trace.ts)
+      recordIngestRaw(
+        { at: new Date().toISOString(), route: "sensorlogger", deviceId, outcome: "empty" },
+        bodyStr,
+      );
       return json({ ok: true, test: true, message: "SensorLogger push test passed. Ready to receive GPS data.", deviceId, deviceName }, 200, { "X-Request-Id": requestId });
     }
 
@@ -278,15 +363,24 @@ export async function POST(request: NextRequest) {
       // Нет GPS-данных в батче, но формат валидный — считаем тестом.
       // DIAG-1: главный источник «приложение отправляет успешно, а поездок нет» —
       // батч приходит без location (или все точки отфильтрованы по accuracy).
+      const bodyStr = JSON.stringify(body);
       recordIngestAttempt({
         at: new Date().toISOString(), route: "sensorlogger", deviceId,
         outcome: droppedInaccurate > 0 ? "dropped_all" : "no_gps",
         points: 0, dropped: droppedInaccurate,
-        bytes: Buffer.byteLength(JSON.stringify(body)),
+        bytes: Buffer.byteLength(bodyStr),
         // v2.10.7: образец структуры батча — видно, ПОД КАКИМИ ключами лежат данные,
-        // если парсер не угадал формат приложения (кейс 01.09: 5×28КБ no_gps)
+        // если парсер не угадал формат приложения (кейс 01.09: 10×28КБ no_gps)
         sample: describePayloadShape(body),
       });
+      // v2.10.8: полный дамп нераспознанного батча — для анализа парсером (см. ingest-trace.ts).
+      // Гистограмма в sample сразу покажет, есть ли location-записи вообще.
+      if (droppedInaccurate === 0) {
+        recordIngestRaw(
+          { at: new Date().toISOString(), route: "sensorlogger", deviceId, outcome: "no_gps" },
+          bodyStr,
+        );
+      }
       return json(
         {
           ok: true,

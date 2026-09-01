@@ -1,11 +1,13 @@
 # Спецификация администратора — «Телеметрия поездок»
 
-> **Сервис:** Телеметрия поездок v2.10.7 · **Версия документа:** 2.10.7 · **Дата:** 2026-09-01
+> **Сервис:** Телеметрия поездок v2.10.8 · **Версия документа:** 2.10.8 · **Дата:** 2026-09-01
 > **Объём:** 21 раздел · архитектура, деплой, токены, API, бэкапы, STRIDE, наблюдаемость
-> Формат: Markdown (релиз v2.10.7; только MD, без DOCX-издания — см. решение пользователя «4 только мд»)
+> Формат: Markdown (релиз v2.10.8; только MD, без DOCX-издания — см. решение пользователя «4 только мд»)
 > Источник истины по метрикам: `docs/METHODOLOGY.md` v2.10.4 (62 метрики в 8 группах + служебный идентификатор `routeId`).
 > **Изменения v2.9 → v2.10.4:** hardening аудита (регистрация закрыта по умолчанию, CORS same-origin, маскирование секретов в `GET /api/admin/settings`, лимиты zip-импорта 100 МБ/500 записей, timing-safe сверка токенов инжеста, отбрасывание точек accuracy > 100 м); `GET /api/share` — серверные KPI по методологии (активная часть, нормализация скоростей); точность AvgSpeed в API 0,001 м/с.
 > **Изменения v2.10.4 → v2.10.6 (DIAG-1):** диагностика канала приёма — каждая авторизованная попытка инжеста (оба роута: `/api/ingest`, `/api/ingest/sensorlogger`) фиксируется в Setting `diag.ingest.trace` с исходом (`accepted` / `empty` / `no_gps` / `dropped_all` / `invalid` / `duplicate`), выводится в `GET /api/stats` → `ingestTrace` и в АДМИН → L1 «Канал приёма (инжест)»; счётчики исходов в `/api/metrics`; 401-попытки в БД не пишутся (анти-абьюз). Причина: SensorLogger показывает «отправлено успешно» при любом HTTP-ответе, включая «тихие» 200 OK без GPS-точек — раньше такие отправки не оставляли следов. Подробности: `docs/OPERATIONS.md` §4.
+> **Изменения v2.10.7 → v2.10.8 (DIAG-3):** инжест SensorLogger — распознан нативный формат приложения: корневой объект `{messageId, sessionId, deviceId, payload:[{name, time, values}]}`, где каждая запись = сенсор, координаты — в `values` записи `name:"location"`, `time` — наносекунды с epoch. Массив ищется в `payload` (+`readings`/`sensors`/`measurements`), именованные записи нормализуются (`values` → контейнер `location`), не-гео-сенсоры отбрасываются естественно. При `no_gps` в `sample` теперь ГИСТОГРАММА сенсоров батча (`accelerometer×200, location×1, …`) — сразу видно, включён ли GPS/Location в приложении. Полный дамп последнего нераспознанного батча (до 64 КБ) — Setting `diag.ingest.raw`, отдаётся по `GET /api/stats?ingestRaw=1`, в L1 — кнопка «показать полный дамп батча» (ленивая загрузка).
+>
 > **Изменения v2.10.6 → v2.10.7 (DIAG-2 + RL-FIX):** (1) инжест SensorLogger — расширенный парсер: координаты распознаются не только в `location` (ещё `coords`/`position`/`gps`, ключи `lat`/`lon`/`lng` внутри контейнера), массив точек — не только в корне и `points` (ещё `data`/`records`/`samples`/`locations`/`entries`/`batches`, `{data:{location:[…]}}`), ISO-строки времени, маркеры Sensor Logger `lat=-1,lon=-1` фильтруются (§3.3); при нераспознанном батче в trace пишется `sample` — образец структуры (обрезан ~300 симв.), виден в АДМИН → L1. (2) Rate-limit: лимит 1/час на `admin:heavy` теперь только для POST (create/restore); GET-список бэкапов — 60/мин (раньше повторное открытие админки давало 429 «Слишком много запросов»); ключ бакета для cookie-клиентов — по IP, а не общий `no-token`.
 
 ## Содержание
@@ -960,7 +962,7 @@ GET /health?XTransformPort=3001
   "totalProcessed": 42,
   "totalFailed": 1,
   "uptimeSec": 3600,
-  "version": "2.10.7"
+  "version": "2.10.8"
 }
 ```
 
@@ -1017,7 +1019,7 @@ GET /health
   "worker": "ok",
   "circuits": { "2gis": "closed", "osrm": "closed" },
   "rateLimiter": { "buckets": 0, "backend": "memory" },
-  "version": "2.10.7",
+  "version": "2.10.8",
   "uptime": 3600,
   "targetLoadRpm": 100,
   "rateLimitMaxIngest": 120
@@ -1144,7 +1146,7 @@ curl https://your-domain/health | jq .
 #   "status": "ok",
 #   "db": "ok",
 #   "worker": "ok",
-#   "version": "2.10.7"
+#   "version": "2.10.8"
 # }
 ```
 
@@ -1446,7 +1448,7 @@ libsql dump.sql -u libsql://... -t token
 
 - AlertManager правила импортированы (включая новые v2.9: `hmm_mapmatching_fallback_rate`, `moving_time_control_sum_violations`, `eco_score_low_reliability_spike`).
 
-- Health-check endpoint отвечает 200 с `"version": "2.10.7"`.
+- Health-check endpoint отвечает 200 с `"version": "2.10.8"`.
 
 - Тестовый ingest прошёл успешно.
 

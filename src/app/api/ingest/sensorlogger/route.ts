@@ -12,9 +12,17 @@ import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import { recordIngestAttempt, recordIngestRaw } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток; v2.10.8: сырой дамп
+import pLimit from "p-limit";
 import { randomUUID } from "crypto";
 
 const SESSION_GAP_MS = 60_000; // 60с gap = новая сессия
+// v2.11.0 (АУДИТ C-14): сериализация корреляции+вставки — без неё параллельные
+// батчи одного девайса видят «нет активной сессии» одновременно → дубли recording-сессий.
+const ingestWriteLock = pLimit(1);
+// v2.11.0 (АУДИТ C-21): deviceId/deviceName из query валидируются (раньше — любая
+// длина/символы прямиком в БД и в диагностику)
+const DEVICE_ID_RE = /^[A-Za-z0-9_.:\- ]{1,64}$/;
+const DEVICE_NAME_RE = /^[^\n\r]{1,128}$/;
 
 interface RawLocation {
   latitude?: number;
@@ -257,26 +265,55 @@ async function createRecordingSession(deviceId: string, deviceName: string, firs
   return id;
 }
 
+// v2.11.0 (АУДИТ C-9): финализация + TrafficJob без «висячего» trafficJobId.
+// Раньше .catch(()=>{}) глотал ЛЮБЫЕ ошибки вставки джоба, а UPDATE всё равно
+// прописывал trafficJobId = jobId несуществующего джоба → сессия без маршрутизации.
+// Теперь: вставка с проверкой — при дубликате/ошибке находим существующий джоб сессии.
+async function ensureTrafficJob(sessionId: string): Promise<void> {
+  const now = new Date().toISOString();
+  const jobId = randomUUID();
+  let inserted = false;
+  try {
+    await libsql.execute({
+      sql: `INSERT INTO TrafficJob (id, sessionId, status, priority, attempts, createdAt, updatedAt)
+            VALUES (?, ?, 'pending', 0, 0, ?, ?)`,
+      args: [jobId, sessionId, now, now],
+    });
+    inserted = true;
+  } catch (err) {
+    logger.warn("TrafficJob insert failed — ищем существующий", {
+      sessionId, error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  if (inserted) {
+    await libsql.execute({
+      sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
+      args: [jobId, now, sessionId],
+    });
+  } else {
+    const existing = await libsql.execute({
+      sql: `SELECT id FROM TrafficJob WHERE sessionId = ? ORDER BY createdAt DESC LIMIT 1`,
+      args: [sessionId],
+    });
+    if (existing.rows.length > 0) {
+      const exId = String((existing.rows[0] as Record<string, unknown>).id);
+      await libsql.execute({
+        sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
+        args: [exId, now, sessionId],
+      });
+    }
+  }
+}
+
 async function finalizeSession(sessionId: string): Promise<void> {
   const now = new Date().toISOString();
   await libsql.execute({
     sql: `UPDATE Session SET status = 'completed', updatedAt = ? WHERE id = ? AND status = 'recording'`,
     args: [now, sessionId],
   });
-  // Создаём TrafficJob для Worker (2ГИС → OSRM → haversine)
-  const jobId = randomUUID();
-  await libsql.execute({
-    sql: `INSERT INTO TrafficJob (id, sessionId, status, priority, attempts, createdAt, updatedAt)
-          VALUES (?, ?, 'pending', 0, 0, ?, ?)`,
-    args: [jobId, sessionId, now, now],
-  }).catch(() => {
-    // TrafficJob уже мог быть создан — игнорируем дубль
-  });
-  await libsql.execute({
-    sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
-    args: [jobId, now, sessionId],
-  });
-  logger.info("Session finalized", { sessionId, trafficJobId: jobId });
+  // v2.11.0 (АУДИТ C-9): TrafficJob с защитой от дублей и висячих ссылок
+  await ensureTrafficJob(sessionId);
+  logger.info("Session finalized", { sessionId });
 }
 
 export async function POST(request: NextRequest) {
@@ -300,7 +337,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. deviceId из query (обязательный)
+    // 2. deviceId из query (обязательный) + валидация (C-21)
     const deviceId = url.searchParams.get("deviceId");
     if (!deviceId) {
       return json(
@@ -309,20 +346,56 @@ export async function POST(request: NextRequest) {
         { "X-Request-Id": requestId }
       );
     }
-    const deviceName = url.searchParams.get("deviceName") || "SensorLogger";
+    if (!DEVICE_ID_RE.test(deviceId)) {
+      return json(
+        { error: "Invalid deviceId: 1-64 chars, letters/digits/dots/dashes/colons/spaces only" },
+        400,
+        { "X-Request-Id": requestId }
+      );
+    }
+    const deviceNameRaw = url.searchParams.get("deviceName") || "SensorLogger";
+    const deviceName = DEVICE_NAME_RE.test(deviceNameRaw) ? deviceNameRaw.slice(0, 128) : "SensorLogger";
 
     // 3. Parse body — массив (SensorLogger) или объект с массивом точек в известном контейнере
     const body = await request.json().catch(() => null);
     if (!body) {
       return json({ error: "Invalid JSON body" }, 400, { "X-Request-Id": requestId });
     }
+    const bodyStr = JSON.stringify(body);
+    const payloadBytes = Buffer.byteLength(bodyStr);
+
+    // v2.11.0 (АУДИТ C-14): идемпотентность по messageId — HTTP-ретрай приложения
+    // больше не создаёт дубликаты точек. Sensor Logger шлёт уникальный messageId на батч.
+    const msgId =
+      body && typeof body === "object" && !Array.isArray(body)
+        ? (body as Record<string, unknown>).messageId
+        : undefined;
+    if (msgId != null && (typeof msgId === "number" || typeof msgId === "string")) {
+      try {
+        const dupe = await libsql.execute({
+          sql: `INSERT OR IGNORE INTO IngestMessage (deviceId, messageId, firstSeenAt) VALUES (?, ?, ?)`,
+          args: [deviceId, String(msgId), new Date().toISOString()],
+        });
+        if (dupe.rowsAffected === 0) {
+          inc("ingest_duplicate_total", "Duplicate ingest (messageId idempotency)", 1, "sensorlogger");
+          return json(
+            { ok: true, duplicate: true, message: "Batch already processed (messageId seen)", deviceId, deviceName },
+            200,
+            { "X-Request-Id": requestId }
+          );
+        }
+      } catch {
+        // Таблицы нет (старая БД) — идемпотентность недоступна, продолжаем без неё
+      }
+    }
+
     // v2.10.7: extractItems ищет массив точек в известных контейнерах (points/data/
     // records/samples/locations/entries/batches, {data:{location:[...]}})
     const items = extractItems(body);
     if (!items || items.length === 0) {
       // SensorLogger "Test Push" шлёт пустой/минимальный body — считаем тест успешным
       // DIAG-1: «тихий успех» для приложения — трассируем, чтобы отличить от реальной отправки
-      const bodyStr = JSON.stringify(body ?? null);
+
       recordIngestAttempt({
         at: new Date().toISOString(), route: "sensorlogger", deviceId,
         outcome: "empty", points: 0, dropped: 0,
@@ -363,7 +436,7 @@ export async function POST(request: NextRequest) {
       // Нет GPS-данных в батче, но формат валидный — считаем тестом.
       // DIAG-1: главный источник «приложение отправляет успешно, а поездок нет» —
       // батч приходит без location (или все точки отфильтрованы по accuracy).
-      const bodyStr = JSON.stringify(body);
+      
       recordIngestAttempt({
         at: new Date().toISOString(), route: "sensorlogger", deviceId,
         outcome: droppedInaccurate > 0 ? "dropped_all" : "no_gps",
@@ -396,58 +469,63 @@ export async function POST(request: NextRequest) {
     }
     points.sort((a, b) => a.timestampMs - b.timestampMs);
 
-    // 5. Корреляция сессий: ищем активную recording-сессию для этого deviceId.
-    // Gap-проверка по updatedAt (реальное время последнего батча), НЕ по endTime
-    // (endTime — это время последней точки из данных, может быть в прошлом при replay/тестах).
-    const now = Date.now();
-    const recent = await libsql.execute({
-      sql: `SELECT id, updatedAt FROM Session
-            WHERE deviceId = ? AND status = 'recording' AND deletedAt IS NULL
-            ORDER BY updatedAt DESC LIMIT 1`,
-      args: [deviceId],
-    });
+    // 5. Корреляция сессий + вставка — под writeLock (C-14): параллельные батчи
+    // одного девайса больше не создают дубли recording-сессий.
+    const outcome = await ingestWriteLock(async () => {
+      const now = Date.now();
+      const recent = await libsql.execute({
+        sql: `SELECT id, updatedAt FROM Session
+              WHERE deviceId = ? AND status = 'recording' AND deletedAt IS NULL
+              ORDER BY updatedAt DESC LIMIT 1`,
+        args: [deviceId],
+      });
 
-    let sessionId: string;
-    let isNewSession = false;
+      let sessionId: string;
+      let isNewSession = false;
 
-    if (recent.rows.length > 0) {
-      const row = recent.rows[0] as Record<string, unknown>;
-      const lastUpdatedAt = new Date(row.updatedAt as string).getTime();
-      if (now - lastUpdatedAt < SESSION_GAP_MS) {
-        // Продолжаем ту же сессию
-        sessionId = row.id as string;
+      if (recent.rows.length > 0) {
+        const row = recent.rows[0] as Record<string, unknown>;
+        const lastUpdatedAt = new Date(String(row.updatedAt)).getTime();
+        if (now - lastUpdatedAt < SESSION_GAP_MS) {
+          // Продолжаем ту же сессию
+          sessionId = String(row.id);
+        } else {
+          // Прошло > 60с — финализируем старую, создаём новую
+          await finalizeSession(String(row.id));
+          sessionId = await createRecordingSession(deviceId, deviceName, points[0].timestampMs);
+          isNewSession = true;
+        }
       } else {
-        // Прошло > 60с — финализируем старую, создаём новую
-        await finalizeSession(row.id as string);
         sessionId = await createRecordingSession(deviceId, deviceName, points[0].timestampMs);
         isNewSession = true;
       }
-    } else {
-      sessionId = await createRecordingSession(deviceId, deviceName, points[0].timestampMs);
-      isNewSession = true;
-    }
 
-    // 6. Вставка GPS-точек (batch по 50)
-    const payloadBytes = Buffer.byteLength(JSON.stringify(body));
-    for (let i = 0; i < points.length; i += 50) {
-      const batch = points.slice(i, i + 50);
-      for (const p of batch) {
+      // 6. Вставка GPS-точек — v2.11.0 (C-16): многорядный INSERT чанками по 50
+      // вместо построчных (было ~50-100 мс HTTPS-раундтрипа на КАЖДУЮ точку).
+      const CH = 50;
+      for (let i = 0; i < points.length; i += CH) {
+        const chunk = points.slice(i, i + CH);
+        const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+        const args = chunk.flatMap((p) => [
+          randomUUID(), sessionId, p.lat, p.lon, p.speed, p.altitude, p.accuracy, BigInt(p.timestampMs), p.bearing,
+        ]);
         await libsql.execute({
-          sql: `INSERT INTO GpsPoint (id, sessionId, lat, lon, speed, altitude, accuracy, timestamp, bearing)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          args: [randomUUID(), sessionId, p.lat, p.lon, p.speed, p.altitude, p.accuracy, BigInt(p.timestampMs), p.bearing],
+          sql: `INSERT INTO GpsPoint (id, sessionId, lat, lon, speed, altitude, accuracy, timestamp, bearing) VALUES ${placeholders}`,
+          args: args as never[],
         });
       }
-    }
 
-    // 7. Обновляем session: endTime, pointCount, payloadBytes, updatedAt
-    const lastTs = points[points.length - 1].timestampMs;
-    await libsql.execute({
-      sql: `UPDATE Session
-            SET endTime = ?, pointCount = pointCount + ?, payloadBytes = payloadBytes + ?, updatedAt = ?
-            WHERE id = ?`,
-      args: [new Date(lastTs).toISOString(), points.length, payloadBytes, new Date().toISOString(), sessionId],
+      // 7. Обновляем session: endTime, pointCount, payloadBytes, updatedAt
+      const lastTs = points[points.length - 1].timestampMs;
+      await libsql.execute({
+        sql: `UPDATE Session
+              SET endTime = ?, pointCount = pointCount + ?, payloadBytes = payloadBytes + ?, updatedAt = ?
+              WHERE id = ?`,
+        args: [new Date(lastTs).toISOString(), points.length, payloadBytes, new Date().toISOString(), sessionId],
+      });
+      return { sessionId, isNewSession };
     });
+    const { sessionId, isNewSession } = outcome;
 
     inc("ingest_total", "Total ingest requests", 1, "sensorlogger");
     recordIngestAttempt({
@@ -484,8 +562,9 @@ export async function POST(request: NextRequest) {
       error: err instanceof Error ? err.message : String(err),
       durationMs: Date.now() - start,
     });
+    // v2.11.0 (АУДИТ C-30): наружу — только requestId, детали (SQL/пути) — в логах
     return json(
-      { error: "Internal Server Error", message: err instanceof Error ? err.message : String(err) },
+      { error: "Internal Server Error", requestId },
       500,
       { "X-Request-Id": requestId }
     );

@@ -1,6 +1,7 @@
 // POST /api/import/csv — импорт GPS-сессий из CSV (auto-detect columns).
 // Ожидаемые колонки (case-insensitive, любым разделителем , или ;): lat, lon, speed, altitude, accuracy, timestamp, bearing, device_id, client_id, device_name.
 // timestamp может быть: epoch ms, epoch ns, ISO8601.
+import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.11.0: общий парсер времени (ISO/нс/мс/с)
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
@@ -32,17 +33,10 @@ function findCol(headers: string[], names: string[]): number {
   return -1;
 }
 
-function parseTimestamp(raw: string): number {
-  const num = Number(raw);
-  if (!isNaN(num)) {
-    // Если > 1e15 — наносекунды
-    if (num > 1e15) return Math.floor(num / 1e6);
-    if (num > 1e12) return num; // ms
-    if (num > 1e9) return num * 1000; // sec → ms
-    return Date.now();
-  }
-  const d = new Date(raw);
-  return isNaN(d.getTime()) ? Date.now() : d.getTime();
+// v2.11.0: парсер времени вынесен в lib/parse-timestamp (общий с ZIP-импортом)
+function finiteOrUndefined(raw: string): number | undefined {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 export async function POST(request: NextRequest) {
@@ -94,10 +88,12 @@ export async function POST(request: NextRequest) {
       groups.get(key)!.points.push({
         lat,
         lon,
-        speed: iSpeed >= 0 ? Number(row[iSpeed]) || undefined : undefined,
-        altitude: iAlt >= 0 ? Number(row[iAlt]) || undefined : undefined,
-        accuracy: iAcc >= 0 ? Number(row[iAcc]) || undefined : undefined,
-        timestamp: iTs >= 0 ? parseTimestamp(row[iTs]) : Date.now(),
+        // v2.11.0 (АУДИТ C-22): «Number(x) || undefined» превращал ЛЕГИТИМНЫЕ нули
+        // (speed=0 — стоим; altitude=0 — уровень моря) в NULL. Теперь честная проверка.
+        speed: iSpeed >= 0 ? finiteOrUndefined(row[iSpeed]) : undefined,
+        altitude: iAlt >= 0 ? finiteOrUndefined(row[iAlt]) : undefined,
+        accuracy: iAcc >= 0 ? finiteOrUndefined(row[iAcc]) : undefined,
+        timestamp: iTs >= 0 ? (parseTimestamp(row[iTs]) ?? Date.now()) : Date.now(),
         bearing: iBearing >= 0 ? Number(row[iBearing]) || undefined : undefined,
       });
     }

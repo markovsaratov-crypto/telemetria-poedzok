@@ -172,9 +172,16 @@ export function TelematikaLayout(props: LayoutProps) {
     }
   }
 
-  function handleRefresh() {
-    queryClient.invalidateQueries();
-    toast.success("Данные обновлены");
+  // v2.11.0 (U-14): тост об успехе — только ПОСЛЕ завершения invalidate/refetch
+  // (раньше «Данные обновлены» выскакивал до того, как данные реально пришли;
+  // при ошибке запроса тост ошибки уже показывает api-client).
+  async function handleRefresh() {
+    try {
+      await queryClient.invalidateQueries();
+      toast.success("Данные обновлены");
+    } catch {
+      /* ошибки отдельных запросов уже показаны тостами из api-client */
+    }
   }
 
   const selectedSession = React.useMemo(
@@ -195,6 +202,11 @@ export function TelematikaLayout(props: LayoutProps) {
 
   // Active-tab title indicator — word next to tabs.
   const activeTabLabel = TABS.find((t) => t.id === tab)?.label ?? "";
+
+  // v2.11.0 (U-22): sr-only заголовок текущего раздела + семантический <main> —
+  // у страницы единственный h1 (бренд в шапке), навигация по разделам скринридером.
+  const tabAriaTitle =
+    tab === "admin" ? "Администрирование" : tab === "trips" ? "Поездки" : "Аналитика";
 
   return (
     <div className="v4-app" ref={layoutRef}>
@@ -388,17 +400,22 @@ export function TelematikaLayout(props: LayoutProps) {
         )}
 
         {/* === Content === */}
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={tab + (selectedSessionId ?? "") + period}
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -4 }}
-            transition={{ duration: 0.18 }}
-          >
-            {children}
-          </motion.div>
-        </AnimatePresence>
+        {/* v2.11.0 (U-22): контент обёрнут в <main id="content"> + sr-only h2
+            с названием раздела (единый h1 остаётся в шапке) */}
+        <main id="content">
+          <h2 className="sr-only">{tabAriaTitle}</h2>
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={tab + (selectedSessionId ?? "") + period}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -4 }}
+              transition={{ duration: 0.18 }}
+            >
+              {children}
+            </motion.div>
+          </AnimatePresence>
+        </main>
       </div>
 
       {/* === Bottom navigation (mobile only, sticky) === */}

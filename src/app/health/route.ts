@@ -4,6 +4,9 @@ import { db } from "@/lib/db";
 import { env } from "@/lib/env";
 import { circuitStatus } from "@/lib/routing/circuit-breaker";
 import { getRateLimiterStats } from "@/lib/rate-limit";
+// v2.11.0 (АУДИТ C-20): worker — реальная живость in-process-ворчера,
+// раньше был захардкожен "ok" (спека §4.8 требовала честный статус)
+import { getWorkerRuntime } from "@/lib/worker-runtime";
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -16,11 +19,15 @@ export async function GET(request: NextRequest) {
     dbStatus = "degraded";
     dbError = e instanceof Error ? e.message.slice(0, 100) : String(e).slice(0, 100);
   }
+  // v2.11.0 (C-20): worker запущен и не в shutdown → ok; не запущен → degraded
+  const rt = getWorkerRuntime();
+  const workerStatus: "ok" | "degraded" = rt && !rt.shuttingDown ? "ok" : "degraded";
   const body = JSON.stringify({
-    status: dbStatus === "ok" ? "ok" : "degraded",
+    status: dbStatus === "ok" && workerStatus === "ok" ? "ok" : "degraded",
     db: dbStatus,
     dbError: dbError || undefined,
-    worker: "ok",
+    worker: workerStatus,
+    workerUptimeSec: rt ? Math.round((Date.now() - rt.startedAt) / 1000) : 0,
     circuits: circuitStatus(),
     rateLimiter: getRateLimiterStats(),
     version: env().APP_VERSION,

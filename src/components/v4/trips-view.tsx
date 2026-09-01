@@ -5,7 +5,7 @@
 "use client";
 
 import * as React from "react";
-import { useSessions, useSessionStats, type SessionStats } from "@/lib/hooks";
+import { useSessions, useSessionStats, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
 import { ecoCls, ecoLab } from "@/lib/v4-utils";
 import { fmtSecFull } from "@/lib/format";
@@ -57,8 +57,12 @@ export function TripsView({ onGoAdmin }: { onGoAdmin?: () => void }) {
             Поездок пока нет
           </div>
           <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-            Импортируйте CSV через вкладку АДМИН или подключите SensorLogger
-            к <code>/api/ingest</code> — поездки появятся здесь автоматически.
+            {/* v2.11.0 (U-28): точный эндпоинт и путь к импорту — раньше вёл
+                на общий /api/ingest и «вкладка АДМИН» без подсказки про Импорт */}
+            Импортируйте CSV через вкладку «Админ» → раздел «Импорт данных» или
+            подключите SensorLogger к{" "}
+            <code>/api/ingest/sensorlogger</code> — поездки появятся здесь
+            автоматически.
           </div>
         </div>
       ) : (
@@ -355,12 +359,13 @@ function TripCard({
         <div className="trip-info">
           <div className="t-route">
             {session.deviceName || session.deviceId}
+            {/* v2.11.0 (U-15): RU-подпись статуса вместо сырого enum */}
             <span
               className="chip chip-amber"
               style={{ marginLeft: 6, fontSize: 10 }}
-              data-tip={`Статус записи: ${session.status} | ${session.pointCount} точек GPS`}
+              data-tip={`Статус записи: ${SESSION_STATUS_RU[session.status] ?? session.status} | ${session.pointCount} точек GPS`}
             >
-              {session.status}
+              {SESSION_STATUS_RU[session.status] ?? session.status}
             </span>
           </div>
           <div className="t-sub">{sub}</div>

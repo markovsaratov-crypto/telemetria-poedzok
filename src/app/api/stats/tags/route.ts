@@ -18,6 +18,8 @@ export async function GET(request: NextRequest) {
         tags: { not: null },
       },
       select: { tags: true },
+      // v2.11.0 (АУДИТ C-7): явный лимит вместо тихого дефолта 20
+      take: 5000,
     });
 
     // Агрегируем теги

@@ -152,7 +152,7 @@ services:
         sync: false
 
   # v2.10.0: backup-cron (§13.2) — ежедневный бэкап в 03:30 UTC (после retention 03:00).
-  # Лимит /api/admin/backup = 1/час, но cron идёт вне rate limit (CRON_SECRET).
+  # v2.11.0 (АУДИТ C-3): крон шлёт CRON_SECRET — прокси и роут принимают его для POST бэкапов (раньше требовался ADMIN_TOKEN → ежедневные автобэкапы падали 401).
   - type: cron
     name: telemetria-backup-cron
     runtime: node

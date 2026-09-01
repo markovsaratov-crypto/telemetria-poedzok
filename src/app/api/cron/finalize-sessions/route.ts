@@ -18,17 +18,39 @@ async function finalizeOne(sessionId: string): Promise<string | null> {
     sql: `UPDATE Session SET status = 'completed', updatedAt = ? WHERE id = ? AND status = 'recording'`,
     args: [now, sessionId],
   });
+  // v2.11.0 (АУДИТ C-9): при сбое вставки джоба — находим существующий,
+  // чтобы trafficJobId не указывал на несуществующий джоб
   const jobId = randomUUID();
-  await libsql.execute({
-    sql: `INSERT INTO TrafficJob (id, sessionId, status, priority, attempts, createdAt, updatedAt)
-          VALUES (?, ?, 'pending', 0, 0, ?, ?)`,
-    args: [jobId, sessionId, now, now],
-  }).catch(() => null);
-  await libsql.execute({
-    sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
-    args: [jobId, now, sessionId],
-  }).catch(() => null);
-  return jobId;
+  let ok = true;
+  try {
+    await libsql.execute({
+      sql: `INSERT INTO TrafficJob (id, sessionId, status, priority, attempts, createdAt, updatedAt)
+            VALUES (?, ?, 'pending', 0, 0, ?, ?)`,
+      args: [jobId, sessionId, now, now],
+    });
+  } catch {
+    ok = false;
+  }
+  if (ok) {
+    await libsql.execute({
+      sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
+      args: [jobId, now, sessionId],
+    }).catch(() => null);
+    return jobId;
+  }
+  const existing = await libsql.execute({
+    sql: `SELECT id FROM TrafficJob WHERE sessionId = ? ORDER BY createdAt DESC LIMIT 1`,
+    args: [sessionId],
+  });
+  if (existing.rows.length > 0) {
+    const exId = String((existing.rows[0] as Record<string, unknown>).id);
+    await libsql.execute({
+      sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
+      args: [exId, now, sessionId],
+    }).catch(() => null);
+    return exId;
+  }
+  return null;
 }
 
 export async function POST(request: NextRequest) {

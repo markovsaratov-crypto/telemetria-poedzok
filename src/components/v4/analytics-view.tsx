@@ -34,6 +34,7 @@ import {
   useRouteGroups,
   useHeavySegments,
   useRouteTrend,
+  useSessions,
   type SessionStats,
   type RouteGroupInfo,
   type HeavySegmentsData,
@@ -83,6 +84,9 @@ export function AnalyticsView({ period, sessionId }: Props) {
   const comparison = useRouteComparison(sessionId); // v2.10.1: для блока 04
   const groups = useRouteGroups(); // v2.10.1: для блока 10
   const heavy = useHeavySegments(); // v2.10.1: для блока 09
+  // v2.11.0 (U-13): источник поездки (deviceName/deviceId) — из общего кэша
+  // сессий (limit 50 — тот же queryKey, что у layout/app-root, без лишнего запроса).
+  const sessions = useSessions({ limit: 50 });
 
   // v2.10.2: период-режим — метрики по ВСЕМ поездкам выбранного периода.
   // Активен, когда конкретная поездка не выбрана (клик по period-pill).
@@ -115,7 +119,7 @@ export function AnalyticsView({ period, sessionId }: Props) {
           <div className="card" style={{ padding: "28px 20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
             Не удалось загрузить метрики за период. Обновите страницу или нажмите ⟳ в панели сверху.
           </div>
-          <HeavySegmentsBlock data={heavy.data} />
+          <HeavySegmentsBlock data={heavy.data} isLoading={heavy.isLoading} />
           <RoutesBlock groups={groups.data} />
         </div>
       );
@@ -129,7 +133,7 @@ export function AnalyticsView({ period, sessionId }: Props) {
             <br />
             Выберите другой период или конкретную поездку в фильтре «Все поездки · период».
           </div>
-          <HeavySegmentsBlock data={heavy.data} />
+          <HeavySegmentsBlock data={heavy.data} isLoading={heavy.isLoading} />
           <RoutesBlock groups={groups.data} />
         </div>
       );
@@ -147,7 +151,7 @@ export function AnalyticsView({ period, sessionId }: Props) {
         <BehaviorBlock events={agg.events} stats={agg.stats} aggregated />
         <TrafficBlock stats={agg.stats} aggregated />
         <GeoBlock stats={agg.stats} aggregated />
-        <HeavySegmentsBlock data={heavy.data} />
+        <HeavySegmentsBlock data={heavy.data} isLoading={heavy.isLoading} />
         <RoutesBlock groups={groups.data} />
         <DataQualityBlock stats={agg.stats} aggregated />
       </div>
@@ -155,9 +159,31 @@ export function AnalyticsView({ period, sessionId }: Props) {
   }
 
   // === Режим конкретной поездки: данные только по ней ===
+  // v2.11.0 (U-6): ошибка загрузки статистики — раньше вечное «загрузка…»;
+  // теперь карточка ошибки, зеркальная период-режиму.
+  if (stats.isError) {
+    return (
+      <div ref={rootRef}>
+        <div className="card" style={{ padding: "28px 20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+          Не удалось загрузить статистику поездки. Обновите страницу или нажмите ⟳ в панели сверху.
+        </div>
+        <HeavySegmentsBlock data={heavy.data} isLoading={heavy.isLoading} />
+        <RoutesBlock groups={groups.data} />
+      </div>
+    );
+  }
+
+  // U-13: источник записи — deviceName || deviceId из кэша списка сессий.
+  const sessionMeta = sessionId
+    ? (sessions.data?.sessions.find((s) => s.id === sessionId) ?? null)
+    : null;
+  const sessionSource = sessionMeta
+    ? sessionMeta.deviceName || sessionMeta.deviceId || "сессия"
+    : "сессия";
+
   return (
     <div ref={rootRef}>
-      <SessionHeader stats={stats.data} period={period} />
+      <SessionHeader stats={stats.data} period={period} source={sessionSource} />
       <KpiBlock stats={stats.data} period={period} />
       <DrivingScoreBlock stats={stats.data} events={events.data} />
       <SpeedProfileBlock stats={stats.data} />
@@ -166,7 +192,7 @@ export function AnalyticsView({ period, sessionId }: Props) {
       <BehaviorBlock events={events.data} stats={stats.data} />
       <TrafficBlock stats={stats.data} />
       <GeoBlock stats={stats.data} />
-      <HeavySegmentsBlock data={heavy.data} />
+      <HeavySegmentsBlock data={heavy.data} isLoading={heavy.isLoading} />
       <RoutesBlock groups={groups.data} />
       <DataQualityBlock stats={stats.data} />
     </div>
@@ -284,9 +310,13 @@ function secToMin(sec: number | null | undefined): number {
 function SessionHeader({
   stats,
   period,
+  source,
 }: {
   stats: SessionStats | null | undefined;
   period: PeriodKey;
+  // v2.11.0 (U-13): источник записи — deviceName/deviceId из списка сессий
+  // (раньше был захардкожен «SensorLogger», что неверно для CSV/ZIP-импорта).
+  source?: string;
 }) {
   if (!stats) {
     return (
@@ -294,7 +324,7 @@ function SessionHeader({
         <div className="session-top">
           <span className="s-lab">поездка</span>
           <b>загрузка…</b>
-          <span>SensorLogger</span>
+          <span>{source ?? "сессия"}</span>
           <span className="muted">· ожидание данных статистики</span>
         </div>
       </div>
@@ -335,7 +365,7 @@ function SessionHeader({
         <b>
           {dateStr} · {timeStr}
         </b>
-        <span>SensorLogger</span>
+        <span>{source ?? "сессия"}</span>
         <span className="muted">
           · запись <b>{fmtInt(totalMin)} мин</b> · в поездке{" "}
           <b>{fmtInt(activeMin)} мин</b> · {fmtInt(stats.pointCount)} точек
@@ -1413,7 +1443,7 @@ function GgDiagram({ events }: { events: EventsResponse | null | undefined }) {
       for (const k in a) e.setAttribute(k, String(a[k]));
       return e;
     };
-    const txt = (x: number, y: number, s: string, fill: string, size = 8) => {
+    const txt = (x: number, y: number, s: string, fill: string, size = 9.5) => {
       const t = mk("text", { x, y, fill, "font-size": size, "font-family": "Arial Narrow,Arial,sans-serif", "letter-spacing": "1" });
       t.textContent = s;
       svg.appendChild(t);
@@ -1483,7 +1513,14 @@ function GgDiagram({ events }: { events: EventsResponse | null | undefined }) {
     }
   }, [points, rings, harshEvents]);
 
-  return <svg ref={ref} className="gg-svg" viewBox="0 0 240 240" aria-hidden="true" />;
+  // v2.11.0 (U-29): sr-only текстовая сводка перед aria-hidden SVG —
+  // скринридеры слышат состав диаграммы, а не «ничего».
+  return (
+    <div>
+      <span className="sr-only">{`Диаграмма Г-Г: ${points.length} точек, ${harshEvents.length} резких событий`}</span>
+      <svg ref={ref} className="gg-svg" viewBox="0 0 240 240" aria-hidden="true" />
+    </div>
+  );
 }
 
 // === Блок 07: Пробки и заторы (LIVE v2.10.1) ===
@@ -1789,7 +1826,15 @@ function GeoBlock({ stats, aggregated = false }: { stats: SessionStats | null | 
 // Источник: GET /api/routes/heavy-segments — агрегат P75-хотспотов по всем routeHash-группам.
 // Каждая группа: routeHash, sessionCount, totalSegments, hotspotCount, worstHotspots[].
 // Цвет точки = severity (P75): <0.25 — красный (тяжёлый), 0.25-0.4 — оранжевый, >0.4 — слива.
-function HeavySegmentsBlock({ data }: { data: HeavySegmentsData | null | undefined }) {
+function HeavySegmentsBlock({
+  data,
+  isLoading,
+}: {
+  data: HeavySegmentsData | null | undefined;
+  // v2.11.0 (U-26): true, пока /api/routes/heavy-segments в полёте —
+  // бейдж «загрузка…» вместо вводящего в заблуждение «нет данных».
+  isLoading?: boolean;
+}) {
   const groups = data?.groups ?? [];
   const totalHotspots = data?.totalHotspotSegments ?? 0;
   const worstP75 = data?.worstP75 ?? null;
@@ -1816,6 +1861,23 @@ function HeavySegmentsBlock({ data }: { data: HeavySegmentsData | null | undefin
     if (p75 < 0.4) return "средний";
     return "лёгкий";
   };
+
+  if (isLoading && data === undefined) {
+    return (
+      <details className="acc" open>
+        <summary>
+          <span className="sec-num">09</span>Тяжёлые участки
+          <span className="acc-badge">загрузка…</span>
+          <i className="chev">›</i>
+        </summary>
+        <div className="acc-body">
+          <p className="acc-note">
+            Загружаем агрегат P75-хотспотов (GET /api/routes/heavy-segments)…
+          </p>
+        </div>
+      </details>
+    );
+  }
 
   if (groupCount === 0) {
     return (

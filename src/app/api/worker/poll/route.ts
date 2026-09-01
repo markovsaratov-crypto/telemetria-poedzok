@@ -6,7 +6,6 @@ import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { env } from "@/lib/env";
-import { Prisma } from "@prisma/client";
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -20,7 +19,9 @@ export async function POST(request: NextRequest) {
 
     // Атомарный захват через UPDATE ... WHERE status='pending' RETURNING id
     // SQLite не поддерживает RETURNING через Prisma напрямую → используем raw SQL
-    const now = new Date();
+    // v2.11.0 (АУДИТ C-4): was new Date() → libsql сериализует в ЧИСЛО →
+    // lockedAt/updatedAt/scheduledFor-сравнения ломались. Теперь ISO-строка.
+    const now = new Date().toISOString();
     const ids = await db.$queryRaw<{ id: string }[]>`
       UPDATE TrafficJob
       SET status = 'running', "lockedBy" = ${workerId}, "lockedAt" = ${now}, "updatedAt" = ${now}

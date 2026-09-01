@@ -104,7 +104,9 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 mesh-bg bg-gradient-to-br from-emerald-50 via-background to-teal-50 dark:from-emerald-950/30 dark:via-background dark:to-teal-950/20">
+    // v2.11.0 (U-27): айдентика v4 — айвори-фон + слива (emerald/teal-градиент убран).
+    // Логика (состояния/обработчики) не тронута — только визуал.
+    <div className="min-h-screen flex items-center justify-center p-4 v4-login-bg">
       <motion.div
         initial={{ opacity: 0, y: 16, scale: 0.98 }}
         animate={{
@@ -119,21 +121,21 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
         }}
         className="w-full max-w-md"
       >
-        <Card className="shadow-xl glass">
+        <Card className="shadow-xl">
           <CardHeader className="text-center gap-3 pb-2">
             <motion.div
               initial={{ scale: 0, rotate: -45 }}
               animate={{ scale: 1, rotate: 0 }}
               transition={{ delay: 0.1, type: "spring", stiffness: 200, damping: 15 }}
-              className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/15 text-primary shadow-lg shadow-primary/20"
+              className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl v4-login-icon"
             >
               <Activity className="h-7 w-7" />
             </motion.div>
-            <CardTitle className="text-2xl tracking-tight">
+            <CardTitle className="text-2xl tracking-tight v4-login-title">
               Телематика Маркова
             </CardTitle>
             <CardDescription className="flex items-center justify-center gap-1.5">
-              <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+              <ShieldCheck className="h-3.5 w-3.5 v4-login-accent" />
               Войдите для доступа к телеметрии
             </CardDescription>
           </CardHeader>
@@ -219,7 +221,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
             <CardFooter className="flex-col gap-3 pt-2">
               <Button
                 type="submit"
-                className="w-full glow-primary transition-all"
+                className="w-full transition-all"
                 disabled={loading || !password}
               >
                 {loading ? (
@@ -239,7 +241,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
               </Button>
               <div className="text-[10px] text-muted-foreground text-center space-y-0.5">
                 <p className="flex items-center justify-center gap-1">
-                  <ShieldCheck className="h-3 w-3" />
+                  <ShieldCheck className="h-3 w-3 v4-login-accent" />
                   Multi-user + legacy LOGIN_PASSWORD · HMAC cookie · 24ч
                 </p>
                 <p className="opacity-70">

@@ -55,7 +55,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. Нормализация таймстемпов: нс → мс, фильтрация gap > 30 с
+    // 2. Нормализация таймстемпов: нс → мс → с, фильтрация gap > 30 с
     const normalized = points
       .map((p) => ({
         lat: p.lat,
@@ -64,16 +64,26 @@ export async function POST(request: NextRequest) {
         altitude: p.altitude ?? null,
         accuracy: p.accuracy ?? null,
         bearing: p.bearing ?? null,
-        // Если timestamp > 1e15 — считаем наносекундами, делим на 1e6
-        timestampMs: Number(p.timestamp) > 1e15 ? Math.floor(Number(p.timestamp) / 1e6) : Number(p.timestamp),
+        // v2.11.0 (АУДИТ C-29): три диапазона — нс (> 1e15 → /1e6), мс (> 1e12),
+        // СЕКУНДЫ (> 1e9 → ×1000; раньше секунды оставались как мс → даты 1970)
+        timestampMs:
+          Number(p.timestamp) > 1e15 ? Math.floor(Number(p.timestamp) / 1e6)
+          : Number(p.timestamp) > 1e12 ? Number(p.timestamp)
+          : Number(p.timestamp) > 1e9 ? Number(p.timestamp) * 1000
+          : Number(p.timestamp),
       }))
       .sort((a, b) => a.timestampMs - b.timestampMs);
 
+    // v2.11.0 (АУДИТ C-10): gap сравнивается между СОСЕДНИМИ исходными точками.
+    // Раньше lastTs обновлялся только у принятых → после первого gap > 30с весь
+    // хвост батча отбрасывался молча (прогулки с паузой обрезались).
     const filtered: typeof normalized = [];
     let lastTs: number | null = null;
+    let droppedByGap = 0;
     for (const p of normalized) {
       if (lastTs !== null && p.timestampMs - lastTs > 30000) {
-        // gap > 30 с — пропускаем (§3.1)
+        droppedByGap++; // gap > 30 с — пропускаем точку (§3.1), но lastTs идёт дальше
+        lastTs = p.timestampMs;
       } else {
         filtered.push(p);
         lastTs = p.timestampMs;
@@ -132,7 +142,7 @@ export async function POST(request: NextRequest) {
     inc("ingest_total", "Total ingest requests", 1);
     recordIngestAttempt({
       at: new Date().toISOString(), route: "ingest", deviceId,
-      outcome: "accepted", points: filtered.length, dropped: 0,
+      outcome: "accepted", points: filtered.length, dropped: droppedByGap,
       bytes: payloadBytes,
     }); // DIAG-1
     recordIngestOutcome(true); // P2-16

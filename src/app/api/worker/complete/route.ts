@@ -1,10 +1,20 @@
 // POST /api/worker/complete — Worker отдаёт результат обработки TrafficJob
 import { NextRequest } from "next/server";
+import { z } from "zod";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
+
+// v2.11.0 (АУДИТ C-27): статус валидируется zod-енамом — раньше любой мусор
+// ("banana") писался в БД и ломал семантику пайплайна.
+const zCompleteBody = z.object({
+  jobId: z.string().min(1),
+  status: z.enum(["completed", "failed", "dead"]),
+  result: z.unknown().optional(),
+  error: z.string().max(2000).optional(),
+});
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -13,16 +23,11 @@ export async function POST(request: NextRequest) {
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
     const body = await request.json().catch(() => null);
-    const { jobId, status, result, error } = (body || {}) as {
-      jobId: string;
-      status: "completed" | "failed" | "dead";
-      result?: unknown;
-      error?: string;
-    };
-
-    if (!jobId || !status) {
-      return json({ error: "jobId and status required" }, 400, { "X-Request-Id": requestId });
+    const parsed = zCompleteBody.safeParse(body);
+    if (!parsed.success) {
+      return json({ error: "Validation failed", details: parsed.error.flatten() }, 400, { "X-Request-Id": requestId });
     }
+    const { jobId, status, result, error } = parsed.data;
 
     const job = await db.trafficJob.findUnique({ where: { id: jobId } });
     if (!job) return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });

@@ -128,9 +128,14 @@ export async function POST(request: NextRequest) {
     }
 
     // 3) Read file (BACKUP_STORAGE_DIR is /tmp/backups per src/lib/backup.ts).
-    // Resolve relative paths against the canonical BACKUP_STORAGE_DIR.
+    // v2.11.0 (АУДИТ C-24a): path containment — путь строго внутри /tmp/backups.
+    // Раньше значение из BackupJob.filePath читалось с диска как есть —
+    // скомпрометированная строка в БД давала чтение произвольного файла.
     const BACKUP_STORAGE_DIR = "/tmp/backups";
-    const resolvedPath = path.isAbsolute(filePath) ? filePath : path.join(BACKUP_STORAGE_DIR, filePath);
+    const resolvedPath = path.resolve(BACKUP_STORAGE_DIR, path.isAbsolute(filePath) ? path.basename(filePath) : filePath);
+    if (!resolvedPath.startsWith(BACKUP_STORAGE_DIR + path.sep) && resolvedPath !== BACKUP_STORAGE_DIR) {
+      return json({ error: "Backup path escapes storage dir" }, 400, { "X-Request-Id": requestId });
+    }
     let content: string;
     try {
       content = await fs.readFile(resolvedPath, "utf8");
@@ -171,16 +176,19 @@ export async function POST(request: NextRequest) {
     const restoredAt = new Date().toISOString();
     const tablesCount: Record<string, number> = {};
 
-    // BEGIN transaction
-    await libsql.execute("BEGIN");
+    // v2.11.0 (АУДИТ C-24b): атомарность через libsql.batch — BEGIN/COMMIT
+    // отдельными execute() на hrana-HTTP НЕ гарантируют одну транзакцию:
+    // сбой посередине оставлял БД полурезанной.
+    const stmts: Array<{ sql: string; args: unknown[] }> = [];
     try {
+      // (собираем statements в массив; выполняем одним batch ниже)
       // Delete children first, parents last (FK-safe).
       for (const table of DELETE_ORDER) {
         // Preserve the current BackupJob row so the restore provenance is not lost.
         if (table === "BackupJob") {
-          await libsql.execute({ sql: `DELETE FROM BackupJob WHERE id != ?`, args: [backupId] });
+          stmts.push({ sql: `DELETE FROM BackupJob WHERE id != ?`, args: [backupId] });
         } else {
-          await libsql.execute(`DELETE FROM ${table}`);
+          stmts.push({ sql: `DELETE FROM ${table}`, args: [] });
         }
       }
 
@@ -199,17 +207,17 @@ export async function POST(request: NextRequest) {
           if (keys.length === 0) continue;
           const placeholders = keys.map(() => "?").join(", ");
           const values = keys.map((k) => row[k]);
-          await libsql.execute({
+          stmts.push({
             sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders})`,
-            args: values as never,
+            args: values as never[],
           });
         }
         tablesCount[table] = rows.length;
       }
 
-      await libsql.execute("COMMIT");
+      // Один атомарный batch: либо всё, либо ничего
+      await libsql.batch(stmts as never);
     } catch (err) {
-      try { await libsql.execute("ROLLBACK"); } catch {}
       logger.error("Restore: transaction failed, rolled back", { requestId, backupId, error: err instanceof Error ? err.message : String(err) });
       // Pre-restore audit (might be inside rolled-back tx → write again on the live DB)
       await writeAudit({

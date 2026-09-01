@@ -59,7 +59,18 @@ async function parseBody(res: Response, expect: FetchOpts["expect"]): Promise<un
   }
 }
 
-export async function apiFetch<T = unknown>(
+// v2.11.0 (U-16): человекочитаемый retryAfter для 429 — «через 1 ч» вместо «через 3600 сек.»
+export function humanizeRetryAfter(sec: number): string {
+  if (!Number.isFinite(sec) || sec <= 0) return "несколько секунд";
+  if (sec < 60) return `${Math.round(sec)} сек`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `${min} мин`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m > 0 ? `${h} ч ${m} мин` : `${h} ч`;
+}
+
+async function apiFetch<T = unknown>(
   path: string,
   opts: FetchOpts = {}
 ): Promise<T> {
@@ -99,7 +110,7 @@ export async function apiFetch<T = unknown>(
     const body = (await parseBody(res, expect)) as { error?: string; retryAfter?: number } | null;
     const retryAfter = body?.retryAfter || Number(res.headers.get("retry-after")) || 60;
     toast.error("Слишком много запросов", {
-      description: `Повторите через ${retryAfter} сек.`,
+      description: `Повторите через ${humanizeRetryAfter(retryAfter)}.`,
     });
     throw new ApiError(body?.error || "Rate limit exceeded", 429, requestId, body);
   }

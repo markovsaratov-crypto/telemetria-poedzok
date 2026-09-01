@@ -38,6 +38,8 @@ export async function GET(request: NextRequest) {
       where: { startTime: { gte: sevenDaysAgo }, deletedAt: null },
       select: { startTime: true, endTime: true, pointCount: true, payloadBytes: true },
       orderBy: { startTime: "asc" },
+      // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 резал спарклайн
+      take: 5000,
     });
 
     // Per-day buckets for last 7 days
@@ -77,6 +79,9 @@ export async function GET(request: NextRequest) {
       where: { startTime: { gte: thirtyDaysAgo }, deletedAt: null },
       select: { startTime: true, pointCount: true },
       orderBy: { startTime: "asc" },
+      // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 в обёртке резал
+      // 12-недельную тепловую карту до 20 сессий
+      take: 5000,
     });
 
     // DIAG-1: трассировка канала приёма — «тихие» исходы инжеста видны в админке L1.

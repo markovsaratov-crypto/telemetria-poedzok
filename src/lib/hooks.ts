@@ -93,6 +93,17 @@ export interface StatsResponse {
     }>;
     updatedAt: string | null;
   } | null;
+  // v2.10.8: полный дамп последнего нераспознанного батча — только при
+  // запросе с ?ingestRaw=1 (кнопка «полный дамп» в L1)
+  ingestRaw?: {
+    at: string;
+    deviceId: string | null;
+    route: string;
+    outcome: string;
+    bytes: number;
+    truncated: boolean;
+    body: string;
+  } | null;
 }
 
 export function useStats() {

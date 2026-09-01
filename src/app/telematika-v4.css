@@ -1612,6 +1612,22 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
   max-height: 132px;
   overflow-y: auto;
 }
+/* v2.10.8: кнопка «полный дамп» + раскрытый дамп (до 64 КБ, скролл) */
+.v4-app .ingest-raw-btn {
+  margin-top: 6px;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 5px 10px;
+  border: 1px solid var(--line2);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.v4-app .ingest-raw-btn:hover:not(:disabled) { border-color: var(--plum, #7c5c8e); color: var(--plum, #7c5c8e); }
+.v4-app .ingest-raw-btn:disabled { opacity: 0.55; cursor: default; }
+.v4-app .ingest-sample.ingest-raw { max-height: 320px; margin-top: 6px; }
 @media (max-width: 720px) {
   .v4-app .ingest-list li { grid-template-columns: 76px 1fr auto; }
   .v4-app .ingest-list li span:nth-child(2) { display: none; }

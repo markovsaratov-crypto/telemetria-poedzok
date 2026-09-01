@@ -60,14 +60,14 @@ import { bindTips } from "./use-v4-tipbox";
 import { CsvImport } from "@/components/csv-import";
 import { ZipImport } from "@/components/zip-import";
 
-// Версии документов (v2.10.7): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
+// Версии документов (v2.10.8): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
 // При следующем релизе доков обновить здесь + строки изменений ниже + шапки файлов в docs/
 // (методология не менялась с v2.10.4 — prev у неё остаётся v2.9).
 const DOCS = {
   methodology: "v2.10.4 · 31.08",
   methodologyPrev: "v2.9 · 29.08",
-  spec: "v2.10.7 · 01.09",
-  specPrev: "v2.10.6 · 31.08",
+  spec: "v2.10.8 · 01.09",
+  specPrev: "v2.10.7 · 01.09",
 } as const;
 
 export function AdminViewV4() {
@@ -237,6 +237,11 @@ function A1ParamsBlock() {
                 <b className="c-plum">спека v2.10.7</b> расширенный парсер инжеста (coords/position/gps,
                 ISO-время) + <b className="c-plum">образец структуры</b> нераспознанных батчей в L1;
                 rate-limit: <s>GET-список бэкапов 1/час</s> → 60/мин (429 «Слишком много запросов»)
+              </li>
+              <li>
+                <b className="c-plum">спека v2.10.8</b> нативный формат Sensor Logger
+                (payload: {"[{name, time, values}]"}, нс-таймстемпы) распознан; гистограмма сенсоров
+                в образце + <b className="c-plum">полный дамп</b> нераспознанного батча (кнопка в L1)
               </li>
             </ul>
           </div>
@@ -824,6 +829,33 @@ function IngestChannelDiag({
   const last = trace?.last ?? null;
   const recent = trace?.recent ?? [];
 
+  // v2.10.8: полный дамп последнего нераспознанного батча — ленивая загрузка
+  // по кнопке (/api/stats?ingestRaw=1): до 64 КБ, не тянем в каждом запросе.
+  const [raw, setRaw] = React.useState<StatsResponse["ingestRaw"] | null>(null);
+  const [rawLoading, setRawLoading] = React.useState(false);
+  const [rawOpen, setRawOpen] = React.useState(false);
+  const toggleRaw = React.useCallback(async () => {
+    if (rawOpen) {
+      setRawOpen(false);
+      return;
+    }
+    setRawOpen(true);
+    if (raw === null) {
+      setRawLoading(true);
+      try {
+        const res = await fetch("/api/stats?ingestRaw=1");
+        if (res.ok) {
+          const data = (await res.json()) as StatsResponse;
+          setRaw(data.ingestRaw ?? null);
+        }
+      } catch {
+        /* сеть/401 — кнопку можно нажать повторно */
+      } finally {
+        setRawLoading(false);
+      }
+    }
+  }, [rawOpen, raw]);
+
   const lastAt = last ? new Date(last.at) : null;
   const lastTime = lastAt
     ? lastAt.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
@@ -847,7 +879,7 @@ function IngestChannelDiag({
     : last.outcome === "accepted"
       ? "Канал работает: точки дошли до БД"
       : last.outcome === "no_gps"
-        ? "Запрос дошёл, но координаты не распознаны — смотрите образец структуры ниже (под какими ключами лежат данные)"
+        ? "Запрос дошёл, но координаты не извлечены — ниже гистограмма сенсоров батча: если строки «location» в ней нет, GPS/Location не включён в списке сенсоров приложения"
         : last.outcome === "dropped_all"
           ? "Запрос дошёл, но все точки отброшены фильтром точности > 100 м (слабый GPS-сигнал)"
           : last.outcome === "empty"
@@ -876,6 +908,21 @@ function IngestChannelDiag({
         <div className="ingest-sample-wrap">
           <div className="doc-log-cap">образец структуры последнего нераспознанного батча</div>
           <pre className="ingest-sample">{lastSample}</pre>
+          {/* v2.10.8: полный дамп того же батча (до 64 КБ) — для точечного расширения парсера */}
+          <button type="button" className="ingest-raw-btn" onClick={toggleRaw} disabled={rawLoading}>
+            {rawLoading ? "загрузка…" : rawOpen ? "скрыть полный дамп" : "показать полный дамп батча"}
+          </button>
+          {rawOpen && !rawLoading && (
+            raw ? (
+              <pre className="ingest-sample ingest-raw">
+                {`${new Date(raw.at).toLocaleString("ru-RU")} · ${raw.deviceId ?? "—"} · ${raw.outcome} · ${fmtNumber(raw.bytes)} Б${raw.truncated ? " · дамп обрезан до 64 КБ" : ""}\n\n${raw.body}`}
+              </pre>
+            ) : (
+              <div className="ingest-hint">
+                нераспознанных батчей не сохранилось — последний батч был распознан парсером
+              </div>
+            )
+          )}
         </div>
       )}
       {recent.length > 1 && (

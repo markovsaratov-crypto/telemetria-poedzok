@@ -24,6 +24,14 @@ import { logger } from "./logger";
 const TRACE_KEY = "diag.ingest.trace";
 const MAX_RECENT = 20;
 
+// v2.10.8: полный дамп последнего нераспознанного батча (no_gps/empty/invalid).
+// sample в трейсе обрезан до ~300 символов — его хватает для формы, но не для
+// точечного расширения парсера (кейс 01.09: sample показал accelerometer,
+// а как выглядит location-запись — не видно). Дамп хранит тело целиком
+// (до 64 КБ), только последнее, перезаписывается при каждом новом no_gps.
+const RAW_KEY = "diag.ingest.raw";
+const MAX_RAW_CHARS = 64_000;
+
 export type IngestRoute = "sensorlogger" | "ingest";
 
 export type IngestOutcome =
@@ -126,3 +134,70 @@ export const INGEST_OUTCOME_RU: Record<IngestOutcome, string> = {
   invalid: "невалидный формат (400)",
   duplicate: "дубль (идемпотентность)",
 };
+
+// ===== v2.10.8: полный дамп последнего нераспознанного батча =====
+export interface IngestRawDump {
+  at: string; // ISO-время попытки
+  deviceId: string | null;
+  route: IngestRoute;
+  outcome: IngestOutcome;
+  bytes: number; // полный размер тела
+  truncated: boolean; // дамп обрезан по MAX_RAW_CHARS
+  body: string; // сырое тело (JSON как прислало приложение)
+}
+
+/**
+ * Сохранить полное тело последнего нераспознанного батча (fire-and-forget).
+ * Вызывается ТОЛЬКО для no_gps/empty/invalid — распознанные батчи парсер
+ * уже понял, дамп не нужен. Перезаписывает предыдущий дамп.
+ */
+export function recordIngestRaw(
+  a: { at: string; route: IngestRoute; deviceId: string | null; outcome: IngestOutcome },
+  bodyStr: string,
+): void {
+  void (async () => {
+    try {
+      const bytes = Buffer.byteLength(bodyStr);
+      const truncated = bodyStr.length > MAX_RAW_CHARS;
+      const dump: IngestRawDump = {
+        at: a.at,
+        deviceId: a.deviceId,
+        route: a.route,
+        outcome: a.outcome,
+        bytes,
+        truncated,
+        body: truncated ? bodyStr.slice(0, MAX_RAW_CHARS) : bodyStr,
+      };
+      await libsql.execute({
+        sql: `INSERT INTO Setting (key, value, updatedAt, updatedBy)
+              VALUES (?, ?, ?, 'ingest-trace')
+              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt, updatedBy = excluded.updatedBy`,
+        args: [RAW_KEY, JSON.stringify(dump), new Date().toISOString()],
+      });
+    } catch (err) {
+      logger.warn("ingest raw dump write failed (non-fatal)", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  })();
+}
+
+/**
+ * Прочитать дамп — напрямую из БД. Возвращается только по требованию
+ * (?ingestRaw=1 в /api/stats), чтобы не таскать 64 КБ в каждом ответе.
+ */
+export async function readIngestRaw(): Promise<IngestRawDump | null> {
+  try {
+    const res = await libsql.execute({
+      sql: `SELECT value FROM Setting WHERE key = ?`,
+      args: [RAW_KEY],
+    });
+    if (res.rows.length === 0) return null;
+    const row = res.rows[0] as Record<string, unknown>;
+    const parsed = JSON.parse(String(row.value)) as Partial<IngestRawDump>;
+    if (!parsed || typeof parsed.body !== "string" || typeof parsed.at !== "string") return null;
+    return parsed as IngestRawDump;
+  } catch {
+    return null;
+  }
+}

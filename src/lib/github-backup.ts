@@ -25,10 +25,13 @@ export async function backupToGitHub(actorId?: string) {
   const now = new Date();
   const tag = `backup-${now.toISOString().slice(0,10)}-${now.toISOString().slice(11,19).replace(/:/g,"")}`;
   
+  // C-1 (security): дамп БД содержит пользователей/поездки — релиз создаётся
+  // как DRAFT (приватный): ассеты видны и скачиваются только владельцу репо
+  // с write-доступом. Публичные релизы для бэкапов запрещены.
   const releaseRes = await fetch(`${GITHUB_API}/repos/${cfg.owner}/${cfg.repo}/releases`, {
     method: "POST",
     headers: { Authorization: `Bearer ${cfg.token}`, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
-    body: JSON.stringify({ tag_name: tag, name: `DB Backup ${now.toISOString().slice(0,19)}`, body: `Checksum: ${local.checksum}`, draft: false, prerelease: false, make_latest: "false" }),
+    body: JSON.stringify({ tag_name: tag, name: `DB Backup ${now.toISOString().slice(0,19)}`, body: `Checksum: ${local.checksum}`, draft: true, prerelease: false, make_latest: "false" }),
   });
   if (!releaseRes.ok) throw new Error(`GitHub release failed: ${releaseRes.status}`);
   const release = await releaseRes.json() as any;
@@ -43,9 +46,9 @@ export async function backupToGitHub(actorId?: string) {
   if (!uploadRes.ok) throw new Error(`GitHub upload failed: ${uploadRes.status}`);
   const asset = await uploadRes.json() as any;
   
-  await writeAudit({ action: "backup.github.upload", targetId: local.backupId, targetType: "BackupJob", actorType: actorId ? "user" : "backup-cron", actorId, metadata: { releaseId: release.id, assetUrl: asset.browser_download_url, assetSize: asset.size, checksum: local.checksum } as any });
+  await writeAudit({ action: "backup.github.upload", targetId: local.backupId, targetType: "BackupJob", actorType: actorId ? "user" : "backup-cron", actorId, metadata: { releaseId: release.id, draft: true, assetUrl: asset.url, assetSize: asset.size, checksum: local.checksum } as any });
   
-  return { backupId: local.backupId, releaseId: release.id, releaseUrl: release.html_url, assetUrl: asset.browser_download_url, assetSize: asset.size, checksum: local.checksum };
+  return { backupId: local.backupId, releaseId: release.id, releaseUrl: release.html_url, assetUrl: asset.url, assetSize: asset.size, checksum: local.checksum, draft: true as const };
 }
 
 export async function listGitHubBackups() {
@@ -55,7 +58,13 @@ export async function listGitHubBackups() {
   if (!res.ok) throw new Error(`GitHub list failed: ${res.status}`);
   const releases = await res.json() as any[];
   return releases.filter(r => r.tag_name.startsWith("backup-")).slice(0, 50).map(r => ({
-    backupId: r.tag_name, releaseId: r.id, tagName: r.tag_name, name: r.name || r.tag_name, createdAt: r.created_at, assetUrl: r.assets[0]?.browser_download_url || "", assetSize: r.assets[0]?.size || 0, checksum: r.body?.match(/Checksum.*?:\s*([a-f0-9]{64})/i)?.[1],
+    backupId: r.tag_name, releaseId: r.id, tagName: r.tag_name, name: r.name || r.tag_name, createdAt: r.created_at,
+    // draft-релизы приватны: browser_download_url анонимно не работает —
+    // отдаём API-URL ассета (владелец качает с токеном/через UI GitHub)
+    assetUrl: r.draft ? (r.assets[0]?.url || "") : (r.assets[0]?.browser_download_url || ""),
+    releaseUrl: r.html_url,
+    isDraft: !!r.draft,
+    assetSize: r.assets[0]?.size || 0, checksum: r.body?.match(/Checksum.*?:\s*([a-f0-9]{64})/i)?.[1],
   }));
 }
 

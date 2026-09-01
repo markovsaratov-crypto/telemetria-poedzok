@@ -794,6 +794,8 @@ export interface GitHubBackupItem {
   name: string;
   createdAt: string;
   assetUrl: string;
+  releaseUrl: string;
+  isDraft: boolean;
   assetSize: number;
   checksum: string | null;
 }
@@ -821,6 +823,7 @@ export function useCreateGitHubBackup() {
         assetUrl: string;
         assetSize: number;
         checksum: string;
+        draft: boolean;
       }>("/api/admin/backup/github"),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["github-backups"] }),
   });

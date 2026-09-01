@@ -1417,7 +1417,7 @@ function GitHubBackupLegacyCard() {
         <Github className="h-4 w-4" style={{ color: "var(--plum)" }} />
         GitHub Backup
       </h3>
-      <div className="desc">Резервные копии в GitHub Releases. Требуется GITHUB_TOKEN.</div>
+      <div className="desc">Резервные копии в GitHub Releases (приватные draft-релизы — только владелец репо).</div>
       {!configured ? (
         <div
           className="rounded-lg p-3 text-xs flex items-start gap-2"
@@ -1479,12 +1479,15 @@ function GitHubBackupLegacyCard() {
                         {b.tagName || b.backupId.slice(0, 12)}
                       </span>
                       <span
-                        className="text-[10px] px-2 py-0.5 rounded c-plum"
-                        style={{ background: "var(--plum-dim)" }}
+                        className="text-[10px] px-2 py-0.5 rounded"
+                        style={{
+                          background: b.isDraft ? "var(--amber-dim)" : "var(--plum-dim)",
+                          color: "var(--amber-text, var(--amber))",
+                        }}
                       >
                         <CheckCircle2 className="h-2.5 w-2.5 inline mr-1" />
-                        {/* v2.11.0 (U-15): RU-подпись вместо сырого «release» */}
-                        релиз
+                        {/* v2.11.0 (C-1): draft-бэкапы приватные, честная подпись */}
+                        {b.isDraft ? "приватный" : "релиз"}
                       </span>
                     </div>
                     <div className="flex items-center gap-3 text-[11px] flex-wrap" style={{ color: "var(--muted)" }}>

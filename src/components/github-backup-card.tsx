@@ -58,7 +58,7 @@ export function GitHubBackupCard() {
               GitHub Backup
             </CardTitle>
             <CardDescription className="text-xs mt-1">
-              Резервные копии в GitHub Releases. Требуется GITHUB_TOKEN.
+              Резервные копии в GitHub Releases (приватные draft-релизы — доступны только владельцу репо).
             </CardDescription>
           </div>
           <Button
@@ -137,9 +137,9 @@ export function GitHubBackupCard() {
                       <span className="font-mono text-[10px] text-muted-foreground truncate">
                         {b.tagName}
                       </span>
-                      <Badge variant="outline" className="text-[10px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400">
+                      <Badge variant="outline" className={cn("text-[10px]", b.isDraft ? "bg-amber-500/10 text-amber-700 dark:text-amber-400" : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400")}>
                         <CheckCircle2 className="h-2.5 w-2.5 mr-1" />
-                        release
+                        {b.isDraft ? "приватный" : "release"}
                       </Badge>
                     </div>
                     <div className="flex items-center gap-3 text-[11px] text-muted-foreground flex-wrap">
@@ -153,14 +153,14 @@ export function GitHubBackupCard() {
                       </span>
                       <span>{fmtDate(b.createdAt)}</span>
                     </div>
-                    {b.assetUrl && (
+                    {(b.isDraft ? b.releaseUrl : b.assetUrl) && (
                       <a
-                        href={b.assetUrl}
+                        href={b.isDraft ? b.releaseUrl : b.assetUrl}
                         target="_blank"
                         rel="noreferrer"
                         className="inline-flex items-center gap-1 text-primary hover:underline text-[10px]"
                       >
-                        <ExternalLink className="h-3 w-3" /> download
+                        <ExternalLink className="h-3 w-3" /> {b.isDraft ? "открыть приватный релиз" : "download"}
                       </a>
                     )}
                   </motion.li>

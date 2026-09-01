@@ -36,12 +36,21 @@ const SHARE_GET_RE = /^\/api\/sessions\/[^/]+\/share$/;
 const ADMIN_PATHS = ["/api/admin/"];
 const WORKER_PATHS = ["/api/worker/"];
 
-function rateLimitForPath(pathname: string): { limit: number; windowSec: number; scope: string } {
+function rateLimitForPath(pathname: string, method: string): { limit: number; windowSec: number; scope: string } {
   const e = env();
   if (pathname === "/api/ingest" || pathname.startsWith("/api/ingest/")) return { limit: e.RATE_LIMIT_MAX_INGEST, windowSec: 60, scope: "ingest" };
   if (pathname === "/api/auth/login") return { limit: e.RATE_LIMIT_MAX_AUTH, windowSec: 60, scope: "auth:login" };
   if (pathname === "/api/plan") return { limit: e.RATE_LIMIT_MAX_PLAN, windowSec: 60, scope: "plan" };
-  if (pathname === "/api/admin/backup" || pathname === "/api/admin/restore") return { limit: e.RATE_LIMIT_MAX_ADMIN, windowSec: 3600, scope: "admin:heavy" };
+  // v2.10.7: «тяжёлый» лимит 1/час — только для ДОРОГИХ мутаций (POST create/restore).
+  // GET /api/admin/backup — лёгкий список (SELECT), раньше попадал в тот же бакет 1/час:
+  // повторное открытие вкладки админки в течение часа → 429 «Слишком много запросов»
+  // (10 отказов в метриках 01.09). GET уходит в default-скоп 60/мин per-IP.
+  if (
+    (pathname === "/api/admin/backup" || pathname === "/api/admin/restore") &&
+    method !== "GET"
+  ) {
+    return { limit: e.RATE_LIMIT_MAX_ADMIN, windowSec: 3600, scope: "admin:heavy" };
+  }
   if (pathname === "/api/admin/requeue") return { limit: e.RATE_LIMIT_MAX_REQUEUE, windowSec: 60, scope: "admin:requeue" }; // P1-11: спека §7.3 — 10/мин
   if (pathname === "/api/audit") return { limit: e.RATE_LIMIT_MAX_AUDIT, windowSec: 60, scope: "audit" };
   if (pathname.startsWith("/api/")) return { limit: e.RATE_LIMIT_MAX_DEFAULT, windowSec: 60, scope: "default" };
@@ -59,9 +68,16 @@ function rateLimitKey(scope: string, request: NextRequest): string {
     return rlKey(scope, ip);
   }
   if (scope === "plan" || scope === "audit" || scope === "admin:heavy" || scope === "admin:requeue") {
-    const auth = request.headers.get("authorization") || "no-token";
-    const tokenPart = auth.replace(/^Bearer\s+/i, "").slice(0, 16);
-    return rlKey(scope, tokenPart);
+    const auth = request.headers.get("authorization") || "";
+    const bearer = bearerToken(auth);
+    if (bearer) {
+      // Bearer-клиенты (админ-скрипты) — ключ по префиксу токена
+      return rlKey(scope, bearer.slice(0, 16));
+    }
+    // v2.10.7: cookie-браузер без Authorization раньше давал общий бакет "no-token"
+    // для ВСЕХ пользователей — лимит 1/час на admin:heavy исчерпывался чужими GET.
+    // Теперь ключ по IP клиента (audited B-9: последняя запись XFF).
+    return rlKey(scope, "ip", getClientIP(request));
   }
   return rlKey(scope, ip);
 }
@@ -94,7 +110,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     }
 
     // 2. Rate limit (sliding window, in-memory в sandbox)
-    const rl = rateLimitForPath(pathname);
+    const rl = rateLimitForPath(pathname, request.method);
     if (rl.limit > 0) {
       const limiter = createRateLimiter();
       const key = rateLimitKey(rl.scope, request);

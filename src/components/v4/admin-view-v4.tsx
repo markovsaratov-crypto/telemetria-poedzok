@@ -60,14 +60,14 @@ import { bindTips } from "./use-v4-tipbox";
 import { CsvImport } from "@/components/csv-import";
 import { ZipImport } from "@/components/zip-import";
 
-// Версии документов (v2.10.6): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
+// Версии документов (v2.10.7): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
 // При следующем релизе доков обновить здесь + строки изменений ниже + шапки файлов в docs/
 // (методология не менялась с v2.10.4 — prev у неё остаётся v2.9).
 const DOCS = {
   methodology: "v2.10.4 · 31.08",
   methodologyPrev: "v2.9 · 29.08",
-  spec: "v2.10.6 · 31.08",
-  specPrev: "v2.10.4 · 31.08",
+  spec: "v2.10.7 · 01.09",
+  specPrev: "v2.10.6 · 31.08",
 } as const;
 
 export function AdminViewV4() {
@@ -232,6 +232,11 @@ function A1ParamsBlock() {
               <li>
                 <b className="c-plum">спека v2.10.6</b> диагностика канала приёма: каждая попытка инжеста
                 (включая <s>«тихие» 200 OK без GPS-точек</s>) фиксируется и видна в АДМИН → L1
+              </li>
+              <li>
+                <b className="c-plum">спека v2.10.7</b> расширенный парсер инжеста (coords/position/gps,
+                ISO-время) + <b className="c-plum">образец структуры</b> нераспознанных батчей в L1;
+                rate-limit: <s>GET-список бэкапов 1/час</s> → 60/мин (429 «Слишком много запросов»)
               </li>
             </ul>
           </div>
@@ -842,7 +847,7 @@ function IngestChannelDiag({
     : last.outcome === "accepted"
       ? "Канал работает: точки дошли до БД"
       : last.outcome === "no_gps"
-        ? "Запрос дошёл, но в батче нет location — приложение шлёт сенсоры без GPS (проверьте разрешение геолокации в приложении)"
+        ? "Запрос дошёл, но координаты не распознаны — смотрите образец структуры ниже (под какими ключами лежат данные)"
         : last.outcome === "dropped_all"
           ? "Запрос дошёл, но все точки отброшены фильтром точности > 100 м (слабый GPS-сигнал)"
           : last.outcome === "empty"
@@ -850,6 +855,12 @@ function IngestChannelDiag({
             : last.outcome === "invalid"
               ? "Формат тела запроса не прошёл валидацию (400)"
               : "Повторная отправка уже известной сессии";
+
+  // v2.10.7: образец структуры последнего нераспознанного батча — показывает,
+  // под какими ключами приложение кладёт данные (кейс 01.09: 5 батчей × 28 КБ no_gps)
+  const lastSample =
+    recent.find((r) => r.sample && r.outcome !== "accepted")?.sample ??
+    (last?.outcome !== "accepted" ? (last?.sample ?? null) : null);
 
   return (
     <div className="ingest-diag">
@@ -861,6 +872,12 @@ function IngestChannelDiag({
         <b style={{ color: statusColor }}>{statusText}</b>
       </div>
       <div className="ingest-hint">{hint}</div>
+      {lastSample && (
+        <div className="ingest-sample-wrap">
+          <div className="doc-log-cap">образец структуры последнего нераспознанного батча</div>
+          <pre className="ingest-sample">{lastSample}</pre>
+        </div>
+      )}
       {recent.length > 1 && (
         <div className="ingest-list-wrap">
           <div className="doc-log-cap">последние попытки · всего зафиксировано {recent.length}</div>

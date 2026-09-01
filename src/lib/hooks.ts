@@ -78,6 +78,8 @@ export interface StatsResponse {
       points: number;
       dropped: number;
       bytes: number | null;
+      // v2.10.7: образец структуры payload для нераспознанных батчей
+      sample?: string | null;
     } | null;
     recent: Array<{
       at: string;
@@ -87,6 +89,7 @@ export interface StatsResponse {
       points: number;
       dropped: number;
       bytes: number | null;
+      sample?: string | null;
     }>;
     updatedAt: string | null;
   } | null;

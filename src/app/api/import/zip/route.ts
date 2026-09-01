@@ -7,6 +7,7 @@ import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import { writeAudit } from "@/lib/audit";
 import { randomUUID } from "crypto";
+import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.11.0 (C-12): ISO-время в CSV
 import AdmZip from "adm-zip";
 
 function parseCSV(text: string): { headers: string[]; rows: string[][] } {
@@ -110,8 +111,11 @@ export async function POST(request: NextRequest) {
       const lat = Number(row[iLat]);
       const lon = Number(row[iLon]);
       if (isNaN(lat) || isNaN(lon)) continue;
-      const ts = iTime >= 0 ? Number(row[iTime]) : Date.now();
-      const timestampMs = ts > 1e15 ? Math.floor(ts / 1e6) : ts > 1e12 ? ts : ts * 1000;
+      // v2.11.0 (АУДИТ C-12): parseTimestamp понимает и ISO-строки, и числа
+      // (SensorLogger Location.csv шлёт ISO). NaN больше не роняет импорт 500-й.
+      const ts = iTime >= 0 ? parseTimestamp(row[iTime]) : Date.now();
+      if (ts == null) continue; // непарсящееся время — пропускаем точку
+      const timestampMs = ts;
       const speed = iSpeed >= 0 ? Number(row[iSpeed]) : null;
       const altitude = iAlt >= 0 ? Number(row[iAlt]) : null;
       const accuracy = iAcc >= 0 ? Number(row[iAcc]) : null;
@@ -146,15 +150,18 @@ export async function POST(request: NextRequest) {
       data: { deviceId, clientId, deviceName, startTime, endTime, pointCount: filtered.length, payloadBytes: fileBuffer.length, status: "completed" },
     });
 
-    // Insert GPS points
-    for (let i = 0; i < filtered.length; i += 100) {
-      const batch = filtered.slice(i, i + 100);
-      for (const p of batch) {
-        await libsql.execute({
-          sql: "INSERT INTO GpsPoint (id, sessionId, lat, lon, speed, altitude, accuracy, timestamp, bearing) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          args: [randomUUID(), session.id, p.lat, p.lon, p.speed, p.altitude, p.accuracy, BigInt(p.timestamp), p.bearing],
-        });
-      }
+    // Insert GPS points — v2.11.0 (АУДИТ C-16): многорядный INSERT чанками по 50
+    // (было по одному INSERT на точку — последовательные раундтрипы к Turso).
+    for (let i = 0; i < filtered.length; i += 50) {
+      const chunk = filtered.slice(i, i + 50);
+      const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+      const args = chunk.flatMap((p) => [
+        randomUUID(), session.id, p.lat, p.lon, p.speed, p.altitude, p.accuracy, BigInt(p.timestamp), p.bearing,
+      ]);
+      await libsql.execute({
+        sql: `INSERT INTO GpsPoint (id, sessionId, lat, lon, speed, altitude, accuracy, timestamp, bearing) VALUES ${placeholders}`,
+        args: args as never[],
+      });
     }
 
     await db.trafficJob.create({ data: { sessionId: session.id, status: "pending" } });
@@ -165,6 +172,7 @@ export async function POST(request: NextRequest) {
     return json({ imported: 1, sessionId: session.id, deviceId, deviceName, pointCount: filtered.length, startTime: startTime.toISOString(), endTime: endTime.toISOString() }, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("ZIP import error", { requestId, error: err instanceof Error ? err.message : String(err) });
-    return json({ error: "Import failed", message: err instanceof Error ? err.message : String(err) }, 500, { "X-Request-Id": requestId });
+    // v2.11.0 (АУДИТ C-30): наружу — requestId, детали — в логах
+    return json({ error: "Import failed", requestId }, 500, { "X-Request-Id": requestId });
   }
 }

@@ -59,6 +59,7 @@ export function AppRoot() {
   }, [queryClient]);
 
   async function handleLogout() {
+    // NB (U-30): не дубликат layout-версии — эта привязана к CommandPalette (⌘K).
     try {
       await api.post("/api/auth/logout", undefined, { expect: "none" });
       toast.success("Вы вышли из системы");
@@ -68,9 +69,15 @@ export function AppRoot() {
     }
   }
 
-  function handleRefresh() {
-    queryClient.invalidateQueries();
-    toast.success("Данные обновлены");
+  // NB (U-30): эта версия — для CommandPalette (⌘K); layout-версия привязана к
+  // кнопке «Обновить» в шапке. Тост успеха — после завершения refetch (U-14).
+  async function handleRefresh() {
+    try {
+      await queryClient.invalidateQueries();
+      toast.success("Данные обновлены");
+    } catch {
+      /* ошибки отдельных запросов уже показаны тостами из api-client */
+    }
   }
 
   // Маппинг legacy tab names (от CommandPalette) → v4 tabs
@@ -78,6 +85,13 @@ export function AppRoot() {
     if (name === "analytics" || name === "overview") return "analytics";
     if (name === "trips" || name === "sessions") return "trips";
     return "admin";
+  }
+
+  // v2.11.0 (U-11): пока /api/auth/me в полёте — минимальный сплэш вместо
+  // мгновенного LoginForm: у залогиненного пользователя не должен мигать
+  // экран входа при каждой перезагрузке страницы.
+  if (auth.isLoading) {
+    return <AuthSplash />;
   }
 
   const isAuthenticated = auth.data?.authenticated === true;
@@ -123,5 +137,17 @@ export function AppRoot() {
         }}
       />
     </>
+  );
+}
+
+// v2.11.0 (U-11): сплэш на время проверки auth-куки — айдентика v4
+// (айвори + слива + Arial Narrow), без «мигания» логин-экрана.
+function AuthSplash() {
+  return (
+    <div className="auth-splash" role="status" aria-live="polite">
+      <div className="auth-splash-title">Телематика Маркова</div>
+      <div className="auth-splash-bar" aria-hidden="true" />
+      <div className="auth-splash-note">проверяем сессию…</div>
+    </div>
   );
 }

@@ -46,7 +46,10 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
   // повторное открытие вкладки админки в течение часа → 429 «Слишком много запросов»
   // (10 отказов в метриках 01.09). GET уходит в default-скоп 60/мин per-IP.
   if (
-    (pathname === "/api/admin/backup" || pathname === "/api/admin/restore") &&
+    // v2.11.0 (АУДИТ C-18): тяжёлый лимит 1/час — для ВСЕХ дорогих мутаций бэкапов:
+    // POST /api/admin/backup (полный дамп) И POST /api/admin/backup/github
+    // (дамп + релиз + аплоад 6 МБ) — второй раньше попадал в 60/мин default.
+    (pathname === "/api/admin/backup" || pathname.startsWith("/api/admin/backup/") || pathname === "/api/admin/restore") &&
     method !== "GET"
   ) {
     return { limit: e.RATE_LIMIT_MAX_ADMIN, windowSec: 3600, scope: "admin:heavy" };
@@ -96,9 +99,14 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     // 0. payload-size guard (до чтения body, §2.4)
     // Skip for ZIP imports (large files expected)
     const isZipImport = pathname === "/api/import/zip";
-    const cl = Number(request.headers.get("content-length") ?? 0);
+    // v2.11.0 (АУДИТ C-15): Number("") = 0, Number("abc") = NaN — старая проверка
+    // `cl > maxBytes` пропускала NaN и «0» (chunked-encoding без content-length).
+    // Теперь: нечисловой/отсутствующий header не считается «малым» — пропускаем
+    // валидацию здесь (роуты-получатели с JSON-body имеют собственные лимиты чтения).
+    const clRaw = request.headers.get("content-length");
+    const cl = clRaw != null && clRaw.trim() !== "" && Number.isFinite(Number(clRaw)) ? Number(clRaw) : null;
     const maxBytes = isZipImport ? 100 * 1024 * 1024 : env().MAX_PAYLOAD_BYTES; // 100MB for ZIP, 256KB default
-    if (cl > maxBytes) {
+    if (cl != null && cl > maxBytes) {
       return json({ error: "Payload too large", limit: maxBytes }, 413, { "X-Request-Id": requestId });
     }
 
@@ -165,8 +173,16 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       } else if (ADMIN_PATHS.some((p) => pathname.startsWith(p))) {
         // Bearer — строго значение ADMIN_TOKEN; cookie — наличие здесь,
         // полная HMAC-проверка и роль на уровне роута (authorizeRequest).
+        // v2.11.0 (АУДИТ C-3): backup-кроны Render шлют CRON_SECRET — принимаем его
+        // ТОЛЬКО для POST бэкапных путей (гейт; сам роут дополнительно проверяет
+        // cron-токен). Раньше кроны получали 401 — автобэкапы не создавались ВООБЩЕ.
+        const isCronBackupPost =
+          request.method === "POST" &&
+          (pathname === "/api/admin/backup" || pathname === "/api/admin/backup/github");
         if (bearer) {
-          if (!(await tokenMatches(bearer, e.ADMIN_TOKEN))) {
+          const isAdmin = await tokenMatches(bearer, e.ADMIN_TOKEN);
+          const isCronBackup = isCronBackupPost && (await tokenMatches(bearer, e.CRON_SECRET));
+          if (!isAdmin && !isCronBackup) {
             return json({ error: "Unauthorized", reason: "Invalid ADMIN_TOKEN" }, 401, { "X-Request-Id": requestId });
           }
         } else if (!hasCookie) {

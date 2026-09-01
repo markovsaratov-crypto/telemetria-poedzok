@@ -40,6 +40,8 @@ import {
   useGitHubBackups,
   useCreateGitHubBackup,
   useSessions,
+  INGEST_OUTCOME_RU,
+  BACKUP_STATUS_RU,
   type StatsResponse,
 } from "@/lib/hooks";
 import {
@@ -60,14 +62,14 @@ import { bindTips } from "./use-v4-tipbox";
 import { CsvImport } from "@/components/csv-import";
 import { ZipImport } from "@/components/zip-import";
 
-// Версии документов (v2.10.8): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
+// Версии документов (v2.11.0): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
 // При следующем релизе доков обновить здесь + строки изменений ниже + шапки файлов в docs/
 // (методология не менялась с v2.10.4 — prev у неё остаётся v2.9).
 const DOCS = {
   methodology: "v2.10.4 · 31.08",
   methodologyPrev: "v2.9 · 29.08",
-  spec: "v2.10.8 · 01.09",
-  specPrev: "v2.10.7 · 01.09",
+  spec: "v2.11.0 · 01.09",
+  specPrev: "v2.10.8 · 01.09",
 } as const;
 
 export function AdminViewV4() {
@@ -243,6 +245,11 @@ function A1ParamsBlock() {
                 (payload: {"[{name, time, values}]"}, нс-таймстемпы) распознан; гистограмма сенсоров
                 в образце + <b className="c-plum">полный дамп</b> нераспознанного батча (кнопка в L1)
               </li>
+              <li>
+                <b className="c-plum">спека v2.11.0</b> аудит кода+UX: системный фикс дат
+                (<s>числа epoch</s> → ISO), пагинация, идемпотентность инжеста, автобэкап-кроны
+                (<s>401</s> → работают), честные состояния загрузки/ошибок в интерфейсе
+              </li>
             </ul>
           </div>
         </div>
@@ -258,6 +265,8 @@ function A2SessionsBlock() {
       <div className="sec-head">
         <span className="sec-num">A2</span>
         <span className="sec-title">Сессии · качество и привязка</span>
+        {/* v2.11.0 (U-5): постоянная метка — числа ниже ПРИМЕРЫ, не из БД */}
+        <span className="demo-chip">демо-данные</span>
         <span className="sec-sub">справочные примеры · не из БД</span>
       </div>
       <div className="card adm-tbl-wrap">
@@ -352,6 +361,8 @@ function A3QualitySummaryBlock() {
       <div className="sec-head">
         <span className="sec-num">A3</span>
         <span className="sec-title">Сводка качества данных</span>
+        {/* v2.11.0 (U-5): постоянная метка — числа ниже ПРИМЕРЫ, не из БД */}
+        <span className="demo-chip">демо-данные</span>
         <span className="sec-sub">справочные примеры · не из БД</span>
       </div>
       <div className="card">
@@ -390,6 +401,8 @@ function A4PipelineBlock() {
       <div className="sec-head">
         <span className="sec-num">A4</span>
         <span className="sec-title">Пайплайн маршрутизации</span>
+        {/* v2.11.0 (U-5): постоянная метка — числа ниже ПРИМЕРЫ, не из БД */}
+        <span className="demo-chip">демо-данные</span>
         <span className="sec-sub">источники плана · справочные примеры, не из БД</span>
       </div>
       <div className="card">
@@ -472,13 +485,19 @@ function A5ImportBlock() {
 // и позволяет прямо из браузера проверить доступность сервера и валидность
 // INGEST_TOKEN (тест-push с пустым батчем — данных не создаёт).
 function A6IngestDiagBlock() {
-  const sessions = useSessions({ limit: 5 });
+  // v2.11.0 (U-2): limit 50 — общий кэш-ключ с layout/app-root/trips (ответ
+  // из кэша при заходе на вкладку Админ); gate на isLoading: пока список
+  // грузится, НЕ показываем красное «данных не приходили никогда».
+  const sessions = useSessions({ limit: 50 });
   const list = sessions.data?.sessions ?? [];
   const latest = list.length
     ? Math.max(...list.map((s) => new Date(s.endTime ?? s.startTime).getTime()))
     : null;
   const hoursAgo = latest != null ? (Date.now() - latest) / 3_600_000 : null;
 
+  // v2.11.0 (U-24): токен для сборки URL — живёт только в локальном стейте
+  // (в БД/на сервер не отправляется), поле password-типа.
+  const [urlToken, setUrlToken] = React.useState("");
   const [token, setToken] = React.useState("");
   const [testing, setTesting] = React.useState(false);
   const [result, setResult] = React.useState<{
@@ -524,14 +543,32 @@ function A6IngestDiagBlock() {
   }
 
   const origin = typeof window !== "undefined" ? window.location.origin : "";
-  const endpointUrl = `${origin}/api/ingest/sensorlogger?token=<INGEST_TOKEN>&deviceId=<ID>`;
+  // U-24: с введённым токеном URL собирается «боевым» (токен подставляется),
+  // без токена — шаблон с плейсхолдером <INGEST_TOKEN>.
+  const urlTokenTrim = urlToken.trim();
+  const endpointUrl = `${origin}/api/ingest/sensorlogger?token=${
+    urlTokenTrim ? encodeURIComponent(urlTokenTrim) : "<INGEST_TOKEN>"
+  }&deviceId=<ID>`;
 
   function copyUrl() {
     if (navigator.clipboard) {
       navigator.clipboard.writeText(endpointUrl).then(
-        () => toast.success("URL для SensorLogger скопирован"),
+        () =>
+          toast.success(
+            urlTokenTrim ? "URL с токеном скопирован" : "URL для SensorLogger скопирован"
+          ),
         () => toast.error("Не удалось скопировать")
       );
+    }
+  }
+
+  // v2.11.0 (U-19): перекрёстная ссылка A6 → L1 — прокрутка к журналу попыток.
+  function scrollToIngestDiag() {
+    const el = document.getElementById("ingest-diag-l1");
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "start" });
+    } else {
+      toast.info("Блок L1 «Состояние системы» ниже на странице");
     }
   }
 
@@ -590,7 +627,17 @@ function A6IngestDiagBlock() {
         {/* Свежесть данных */}
         <div className="diag-row">
           <Radio className="h-3.5 w-3.5" style={{ flexShrink: 0 }} />
-          {latest == null ? (
+          {/* v2.11.0 (U-2): серый «проверяем…» вместо красного «нет ни одной
+              сессии» — пока запрос в полёте это не ошибка, а стейт загрузки. */}
+          {sessions.isLoading ? (
+            <span className="diag-last" style={{ color: "var(--faint)" }}>
+              проверяем свежесть данных…
+            </span>
+          ) : sessions.isError ? (
+            <span className="diag-last" style={{ color: "var(--amber)" }}>
+              не удалось загрузить список сессий (сеть/401) — обновите страницу
+            </span>
+          ) : latest == null ? (
             <span className="diag-last" style={{ color: "var(--red)" }}>
               В базе нет ни одной сессии — данные не приходили никогда.
             </span>
@@ -616,6 +663,11 @@ function A6IngestDiagBlock() {
           )}
         </div>
 
+        {/* v2.11.0 (U-19): переход к журналу попыток приёма в L1 */}
+        <button type="button" className="ingest-jump" onClick={scrollToIngestDiag}>
+          журнал попыток приёма → L1
+        </button>
+
         {/* URL для SensorLogger */}
         <div className="diag-url">
           <span className="diag-url-label">URL для SensorLogger (HTTP Push):</span>
@@ -626,15 +678,31 @@ function A6IngestDiagBlock() {
               size="sm"
               onClick={copyUrl}
               className="diag-copy"
-              aria-label="Скопировать URL"
+              aria-label="Собрать URL с токеном и скопировать"
             >
               <Copy className="h-3.5 w-3.5" />
+              {urlTokenTrim ? "Собрать URL" : ""}
             </Button>
           </div>
+          {/* v2.11.0 (U-24): поле для токена — password-тип, значение не
+              отправляется на сервер, живёт только в этом браузере. */}
+          <div className="diag-test-row" style={{ marginTop: 8 }}>
+            <Input
+              type="password"
+              value={urlToken}
+              onChange={(e) => setUrlToken(e.target.value)}
+              placeholder="INGEST_TOKEN — подставить в URL вместо <INGEST_TOKEN>"
+              className="mono diag-token"
+              autoComplete="off"
+              spellCheck={false}
+              aria-label="INGEST_TOKEN для сборки URL"
+            />
+          </div>
           <span className="diag-url-hint">
-            Подставьте вместо &lt;INGEST_TOKEN&gt; значение переменной INGEST_TOKEN
-            (окружение сервера), вместо &lt;ID&gt; — любой идентификатор устройства,
-            например iphone15pro.
+            Токен задаётся в env сервера (см. OPERATIONS.md). Введите его в поле
+            выше — URL и кнопка копирования автоматически соберут ссылку с
+            токеном (значение остаётся только в этом браузере). Вместо &lt;ID&gt;
+            подставьте любой идентификатор устройства, например iphone15pro.
           </span>
         </div>
 
@@ -722,58 +790,60 @@ function formatAge(hours: number): string {
 
 // === Legacy: Состояние системы ===
 function SystemInfoLegacyCard() {
-  const { data: health } = useHealth();
-  const { data: stats } = useStats();
+  const health = useHealth();
+  // v2.11.0 (U-1): isLoading пробрасываем в диагностику канала приёма —
+  // пока /api/stats в полёте, НЕ показываем красное «попыток не зафиксировано».
+  const stats = useStats();
 
   const items = [
     {
       icon: <Activity className="h-3.5 w-3.5" />,
       label: "Статус системы",
-      value: health?.status === "ok" ? "OK" : health?.status || "—",
-      color: health?.status === "ok" ? "var(--plum)" : "var(--amber)",
+      value: health.data?.status === "ok" ? "OK" : health.data?.status || "—",
+      color: health.data?.status === "ok" ? "var(--plum)" : "var(--amber)",
     },
     {
       icon: <Cpu className="h-3.5 w-3.5" />,
       label: "БД",
-      value: health?.db === "ok" ? "OK" : health?.db || "—",
-      color: health?.db === "ok" ? "var(--plum)" : "var(--amber)",
+      value: health.data?.db === "ok" ? "OK" : health.data?.db || "—",
+      color: health.data?.db === "ok" ? "var(--plum)" : "var(--amber)",
     },
     {
       icon: <Server className="h-3.5 w-3.5" />,
       label: "Worker",
-      value: health?.worker === "ok" ? "OK" : health?.worker || "—",
-      color: health?.worker === "ok" ? "var(--plum)" : "var(--amber)",
+      value: health.data?.worker === "ok" ? "OK" : health.data?.worker || "—",
+      color: health.data?.worker === "ok" ? "var(--plum)" : "var(--amber)",
     },
     {
       icon: <Activity className="h-3.5 w-3.5" />,
       label: "Uptime",
-      value: health ? `${Math.round(health.uptime / 60)} мин` : "—",
+      value: health.data ? `${Math.round(health.data.uptime / 60)} мин` : "—",
     },
     {
       icon: <Database className="h-3.5 w-3.5" />,
       label: "Сессий (всего)",
-      value: stats ? fmtNumber(stats.totalSessions) : "—",
+      value: stats.data ? fmtNumber(stats.data.totalSessions) : "—",
     },
     {
       icon: <HardDrive className="h-3.5 w-3.5" />,
       label: "GPS-точек (всего)",
-      value: stats ? fmtNumber(stats.totalPoints) : "—",
+      value: stats.data ? fmtNumber(stats.data.totalPoints) : "—",
     },
     {
       icon: <Hash className="h-3.5 w-3.5" />,
       label: "TrafficJob dead",
-      value: stats ? String(stats.deadJobs) : "—",
-      color: (stats?.deadJobs ?? 0) > 0 ? "var(--red)" : undefined,
+      value: stats.data ? String(stats.data.deadJobs) : "—",
+      color: (stats.data?.deadJobs ?? 0) > 0 ? "var(--red)" : undefined,
     },
     {
       icon: <Zap className="h-3.5 w-3.5" />,
       label: "Rate limit (ingest)",
-      value: stats ? `${stats.capacity.rateLimitMaxIngest}/мин` : "—",
+      value: stats.data ? `${stats.data.capacity.rateLimitMaxIngest}/мин` : "—",
     },
     {
       icon: <Zap className="h-3.5 w-3.5" />,
       label: "Target load",
-      value: stats ? `${stats.capacity.targetLoadRpm} сесс/мин` : "—",
+      value: stats.data ? `${stats.data.capacity.targetLoadRpm} сесс/мин` : "—",
     },
   ];
 
@@ -785,6 +855,23 @@ function SystemInfoLegacyCard() {
         Состояние системы
       </h3>
       <div className="desc">Live-данные с /api/health и /api/stats. Обновляется автоматически.</div>
+      {/* v2.11.0 (U-7): честный баннер при недоступности live-данных (сеть/401),
+          пока «—»-плейсхолдеры в сетке ниже */}
+      {(health.isError || stats.isError) && (
+        <div
+          className="ingest-hint"
+          role="alert"
+          style={{
+            background: "var(--amber-dim)",
+            borderLeft: "3px solid var(--amber)",
+            borderRadius: 4,
+            padding: "8px 10px",
+            color: "var(--amber-text)",
+          }}
+        >
+          live-данные недоступны (сеть/401) — обновите страницу
+        </div>
+      )}
       <div className="stats-grid" style={{ marginTop: 0 }}>
         {items.map((it, i) => (
           <div className="stat" key={i}>
@@ -806,55 +893,73 @@ function SystemInfoLegacyCard() {
           раньше не оставляли следов в БД — приложение показывало «отправлено
           успешно», а поездок не было. Теперь каждая авторизованная попытка
           фиксируется в Setting «diag.ingest.trace» и видна здесь. */}
-      <IngestChannelDiag trace={stats?.ingestTrace ?? null} />
+      <IngestChannelDiag
+        trace={stats.data?.ingestTrace ?? null}
+        isLoading={stats.isLoading}
+        isError={stats.isError}
+      />
     </div>
   );
 }
 
 // === DIAG-1: диагностика канала приёма данных (ингест) ===
-const INGEST_OUTCOME_LABEL: Record<string, string> = {
-  accepted: "точки приняты",
-  empty: "пустой батч (test push)",
-  no_gps: "нет GPS-точек в батче",
-  dropped_all: "все точки отброшены (точность > 100 м)",
-  invalid: "невалидный формат (400)",
-  duplicate: "дубль по идемпотентности",
-};
-
 function IngestChannelDiag({
   trace,
+  isLoading,
+  isError,
 }: {
   trace: NonNullable<StatsResponse["ingestTrace"]> | null;
+  // v2.11.0 (U-1): true, пока /api/stats ещё в полёте — нейтральный серый статус
+  // вместо ложного красного «попыток не зафиксировано».
+  isLoading?: boolean;
+  // v2.11.0 (U-7): true при ошибке /api/stats — янтарный статус вместо красного.
+  isError?: boolean;
 }) {
   const last = trace?.last ?? null;
   const recent = trace?.recent ?? [];
 
   // v2.10.8: полный дамп последнего нераспознанного батча — ленивая загрузка
   // по кнопке (/api/stats?ingestRaw=1): до 64 КБ, не тянем в каждом запросе.
+  // v2.11.0 (U-3): ошибки загрузки больше не маскируются под «нераспознанных
+  // батчей не сохранилось» — различаем ошибку и честное «дампа нет».
   const [raw, setRaw] = React.useState<StatsResponse["ingestRaw"] | null>(null);
   const [rawLoading, setRawLoading] = React.useState(false);
   const [rawOpen, setRawOpen] = React.useState(false);
+  const [rawError, setRawError] = React.useState<string | null>(null);
+  const loadRaw = React.useCallback(async () => {
+    setRawLoading(true);
+    setRawError(null);
+    try {
+      const res = await fetch("/api/stats?ingestRaw=1");
+      if (res.ok) {
+        const data = (await res.json()) as StatsResponse;
+        setRaw(data.ingestRaw ?? null);
+      } else {
+        // 401 — сессия истекла; прочие коды — сервер/сеть
+        setRawError(
+          res.status === 401
+            ? "не удалось загрузить дамп (HTTP 401) — повторите вход"
+            : `не удалось загрузить дамп (HTTP ${res.status}) — повторите позже`
+        );
+      }
+    } catch (e) {
+      setRawError(
+        `не удалось загрузить дамп (${e instanceof Error ? e.message : "сеть"}) — проверьте соединение`
+      );
+    } finally {
+      setRawLoading(false);
+    }
+  }, []);
   const toggleRaw = React.useCallback(async () => {
     if (rawOpen) {
       setRawOpen(false);
       return;
     }
     setRawOpen(true);
-    if (raw === null) {
-      setRawLoading(true);
-      try {
-        const res = await fetch("/api/stats?ingestRaw=1");
-        if (res.ok) {
-          const data = (await res.json()) as StatsResponse;
-          setRaw(data.ingestRaw ?? null);
-        }
-      } catch {
-        /* сеть/401 — кнопку можно нажать повторно */
-      } finally {
-        setRawLoading(false);
-      }
+    if (raw === null && !rawLoading) {
+      await loadRaw();
     }
-  }, [rawOpen, raw]);
+  }, [rawOpen, raw, rawLoading, loadRaw]);
 
   const lastAt = last ? new Date(last.at) : null;
   const lastTime = lastAt
@@ -863,30 +968,44 @@ function IngestChannelDiag({
   const lastDay = lastAt ? lastAt.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" }) : "";
 
   const statusColor =
-    !last
-      ? "var(--red)" // попыток не было вовсе — канал молчит
-      : last.outcome === "accepted"
-        ? "var(--plum)"
-        : "var(--amber)";
-  const statusText = !last
-    ? "попыток приёма не зафиксировано"
-    : last.outcome === "accepted"
-      ? `${lastDay} ${lastTime} · ${last.deviceId ?? "?"} · принято ${fmtNumber(last.points)} т.`
-      : `${lastDay} ${lastTime} · ${last.deviceId ?? "?"} · ${INGEST_OUTCOME_LABEL[last.outcome] ?? last.outcome}`;
+    isLoading && !trace
+      ? "var(--faint)" // U-1: стейт загрузки — нейтральный серый
+      : isError && !trace
+        ? "var(--amber)" // U-7: нет ответа /api/stats — статус неизвестен
+        : !last
+          ? "var(--red)" // попыток не было вовсе — канал молчит (данные уже пришли)
+          : last.outcome === "accepted"
+            ? "var(--plum)"
+            : "var(--amber)";
+  const statusText =
+    isLoading && !trace
+      ? "проверяем последние попытки приёма…"
+      : isError && !trace
+        ? "журнал попыток недоступен (сеть/401)"
+        : !last
+          ? "попыток приёма не зафиксировано"
+          : last.outcome === "accepted"
+            ? `${lastDay} ${lastTime} · ${last.deviceId ?? "?"} · принято ${fmtNumber(last.points)} т.`
+            : `${lastDay} ${lastTime} · ${last.deviceId ?? "?"} · ${INGEST_OUTCOME_RU[last.outcome] ?? last.outcome}`;
 
-  const hint = !last
-    ? "Ни один запрос инжеста не дошёл до сервера с момента включения диагностики: проверьте URL и токен в приложении"
-    : last.outcome === "accepted"
-      ? "Канал работает: точки дошли до БД"
-      : last.outcome === "no_gps"
-        ? "Запрос дошёл, но координаты не извлечены — ниже гистограмма сенсоров батча: если строки «location» в ней нет, GPS/Location не включён в списке сенсоров приложения"
-        : last.outcome === "dropped_all"
-          ? "Запрос дошёл, но все точки отброшены фильтром точности > 100 м (слабый GPS-сигнал)"
-          : last.outcome === "empty"
-            ? "Пришёл пустой батч — это «Test Push», данных нет"
-            : last.outcome === "invalid"
-              ? "Формат тела запроса не прошёл валидацию (400)"
-              : "Повторная отправка уже известной сессии";
+  const hint =
+    isLoading && !trace
+      ? "Загружаем журнал попыток приёма из /api/stats…"
+      : isError && !trace
+        ? "Не удалось прочитать журнал попыток (сеть/401) — обновите страницу"
+        : !last
+          ? "Ни один запрос инжеста не дошёл до сервера с момента включения диагностики: проверьте URL и токен в приложении"
+          : last.outcome === "accepted"
+            ? "Канал работает: точки дошли до БД"
+            : last.outcome === "no_gps"
+              ? "Запрос дошёл, но координаты не извлечены — ниже гистограмма сенсоров батча: если строки «location» в ней нет, GPS/Location не включён в списке сенсоров приложения"
+              : last.outcome === "dropped_all"
+                ? "Запрос дошёл, но все точки отброшены фильтром точности > 100 м (слабый GPS-сигнал)"
+                : last.outcome === "empty"
+                  ? "Пришёл пустой батч — это «Test Push», данных нет"
+                  : last.outcome === "invalid"
+                    ? "Формат тела запроса не прошёл валидацию (400)"
+                    : "Повторная отправка уже известной сессии";
 
   // v2.10.7: образец структуры последнего нераспознанного батча — показывает,
   // под какими ключами приложение кладёт данные (кейс 01.09: 5 батчей × 28 КБ no_gps)
@@ -895,7 +1014,7 @@ function IngestChannelDiag({
     (last?.outcome !== "accepted" ? (last?.sample ?? null) : null);
 
   return (
-    <div className="ingest-diag">
+    <div className="ingest-diag" id="ingest-diag-l1">
       <div className="param" style={{ borderBottom: "none" }}>
         <span>
           Канал приёма (инжест)
@@ -913,7 +1032,34 @@ function IngestChannelDiag({
             {rawLoading ? "загрузка…" : rawOpen ? "скрыть полный дамп" : "показать полный дамп батча"}
           </button>
           {rawOpen && !rawLoading && (
-            raw ? (
+            rawError ? (
+              <div
+                className="ingest-hint"
+                role="alert"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  flexWrap: "wrap",
+                  background: "var(--amber-dim)",
+                  borderLeft: "3px solid var(--amber)",
+                  borderRadius: 4,
+                  padding: "7px 10px",
+                  color: "var(--amber-text)",
+                }}
+              >
+                <span>{rawError}</span>
+                <button
+                  type="button"
+                  className="ingest-raw-btn"
+                  style={{ marginTop: 0 }}
+                  onClick={loadRaw}
+                  disabled={rawLoading}
+                >
+                  повторить
+                </button>
+              </div>
+            ) : raw ? (
               <pre className="ingest-sample ingest-raw">
                 {`${new Date(raw.at).toLocaleString("ru-RU")} · ${raw.deviceId ?? "—"} · ${raw.outcome} · ${fmtNumber(raw.bytes)} Б${raw.truncated ? " · дамп обрезан до 64 КБ" : ""}\n\n${raw.body}`}
               </pre>
@@ -927,7 +1073,9 @@ function IngestChannelDiag({
       )}
       {recent.length > 1 && (
         <div className="ingest-list-wrap">
-          <div className="doc-log-cap">последние попытки · всего зафиксировано {recent.length}</div>
+          {/* v2.11.0 (U-4): буфер — кольцо на 20 записей (MAX_RECENT), счётчик
+              recent.length вводил в заблуждение «всего зафиксировано N». */}
+          <div className="doc-log-cap">последние попытки · журнал хранит 20</div>
           <ul className="ingest-list">
             {recent.slice(0, 8).map((r, i) => {
               const t = new Date(r.at);
@@ -940,7 +1088,7 @@ function IngestChannelDiag({
                   </span>
                   <span>{r.route === "sensorlogger" ? "SensorLogger" : "API"}</span>
                   <span>{r.deviceId ?? "—"}</span>
-                  <span style={{ color }}>{INGEST_OUTCOME_LABEL[r.outcome] ?? r.outcome}</span>
+                  <span style={{ color }}>{INGEST_OUTCOME_RU[r.outcome] ?? r.outcome}</span>
                   <span className="mono">
                     {r.outcome === "accepted" ? `${fmtNumber(r.points)} т.` : r.dropped > 0 ? `−${fmtNumber(r.dropped)} т.` : ""}
                   </span>
@@ -1042,20 +1190,24 @@ function RoutingSettingsLegacyCard() {
                     variant="ghost"
                     onClick={() => setReveal({ ...reveal, [s.key]: !reveal[s.key] })}
                     className="h-8 w-8 p-0"
-                    title={reveal[s.key] ? "Скрыть" : "Показать"}
+                    title={reveal[s.key] ? "Скрыть секрет" : "Показать секрет"}
+                    aria-label={reveal[s.key] ? "Скрыть секрет" : "Показать секрет"}
                   >
                     {reveal[s.key] ? "−" : "+"}
                   </Button>
                 )}
+                {/* v2.11.0 (U-21): видимая подпись «Сохранить» + aria-label —
+                    иконочная кнопка была нечитаема для скринридеров */}
                 <Button
                   size="sm"
                   variant="ghost"
                   onClick={() => handleSave(s.key)}
                   disabled={updateMut.isPending || !dirty[s.key]}
-                  className="h-8"
-                  title="Сохранить"
+                  className="h-8 gap-1"
+                  aria-label="Сохранить настройку"
                 >
                   <ShieldCheck className="h-3.5 w-3.5" style={{ color: "var(--plum)" }} />
+                  Сохранить
                 </Button>
               </div>
               {s.updatedAt && (
@@ -1084,13 +1236,46 @@ function RoutingSettingsLegacyCard() {
 }
 
 // === Legacy: Резервные копии ===
+// v2.11.0 (U-16): общий хелпер кулдауна 1/час для кнопок создания бэкапов —
+// после успешного создания кнопка блокируется с обратным отсчётом до
+// освобождения слота (rate-limit admin:heavy POST = 1/час, 429 раньше
+// приходил сюрпризом при повторном клике).
+const BACKUP_RATE_LIMIT_MS = 60 * 60 * 1000;
+
+function useBackupCooldown(createdListMs: number | null, localCreatedMs: number | null) {
+  const [now, setNow] = React.useState(() => Date.now());
+  const baseMs = Math.max(createdListMs ?? 0, localCreatedMs ?? 0);
+  const leftMs = baseMs > 0 ? BACKUP_RATE_LIMIT_MS - (now - baseMs) : 0;
+  const active = leftMs > 0;
+  React.useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, [active]);
+  return {
+    active,
+    minutesLeft: Math.max(1, Math.ceil(leftMs / 60_000)),
+  };
+}
+
+function newestCreatedAtMs(list: Array<{ createdAt: string }>): number | null {
+  let acc: number | null = null;
+  for (const b of list) {
+    const t = Date.parse(b.createdAt);
+    if (Number.isFinite(t) && (acc == null || t > acc)) acc = t;
+  }
+  return acc;
+}
+
 function BackupsLegacyCard() {
   const { data, isLoading, isFetching, refetch } = useBackups();
   const createMut = useCreateBackup();
+  const [localCreatedMs, setLocalCreatedMs] = React.useState<number | null>(null);
 
   async function handleCreate() {
     try {
       const res = await createMut.mutateAsync();
+      setLocalCreatedMs(Date.now());
       toast.success("Backup создан", {
         description: `${res.backupId.slice(0, 12)}… · ${res.fileSize ? fmtBytes(res.fileSize) : "—"}`,
       });
@@ -1100,6 +1285,7 @@ function BackupsLegacyCard() {
   }
 
   const backups = data?.backups || [];
+  const cooldown = useBackupCooldown(newestCreatedAtMs(backups), localCreatedMs);
 
   return (
     <div className="legacy-card">
@@ -1112,15 +1298,18 @@ function BackupsLegacyCard() {
       <div className="space-y-3">
         <Button
           onClick={handleCreate}
-          disabled={createMut.isPending}
+          disabled={createMut.isPending || cooldown.active}
           className="w-full"
           style={{ background: "var(--plum)", color: "var(--fg-on-dark)" }}
           variant="default"
+          title={cooldown.active ? "Создание бэкапа доступно раз в час" : undefined}
         >
           {createMut.isPending ? (
             <>
               <RefreshCw className="h-4 w-4 animate-spin" /> Создание дампа…
             </>
+          ) : cooldown.active ? (
+            <>лимит 1/час — доступно через {cooldown.minutesLeft} мин</>
           ) : (
             <>
               <Database className="h-4 w-4" /> Создать backup
@@ -1164,7 +1353,8 @@ function BackupsLegacyCard() {
                         }}
                       >
                         {b.status === "completed" ? <CheckCircle2 className="h-2.5 w-2.5 inline mr-1" /> : b.status === "failed" ? <AlertCircle className="h-2.5 w-2.5 inline mr-1" /> : null}
-                        {b.status}
+                        {/* v2.11.0 (U-15): RU-подпись статуса вместо сырого enum */}
+                        {BACKUP_STATUS_RU[b.status] ?? b.status}
                       </span>
                     </div>
                     <div className="flex items-center gap-3 text-[11px] flex-wrap" style={{ color: "var(--muted)" }}>
@@ -1202,10 +1392,12 @@ function BackupsLegacyCard() {
 function GitHubBackupLegacyCard() {
   const { data, isLoading, isFetching, refetch } = useGitHubBackups();
   const createMut = useCreateGitHubBackup();
+  const [localCreatedMs, setLocalCreatedMs] = React.useState<number | null>(null);
 
   async function handleCreate() {
     try {
       const res = await createMut.mutateAsync();
+      setLocalCreatedMs(Date.now());
       toast.success("Backup загружен на GitHub", {
         description: `${res.backupId.slice(0, 12)}… · ${fmtBytes(res.assetSize)}`,
       });
@@ -1216,6 +1408,7 @@ function GitHubBackupLegacyCard() {
 
   const configured = data?.configured !== false;
   const backups = data?.backups || [];
+  const cooldown = useBackupCooldown(newestCreatedAtMs(backups), localCreatedMs);
 
   return (
     <div className="legacy-card">
@@ -1243,15 +1436,18 @@ function GitHubBackupLegacyCard() {
         <>
           <Button
             onClick={handleCreate}
-            disabled={createMut.isPending}
+            disabled={createMut.isPending || cooldown.active}
             className="w-full gap-1.5"
             style={{ background: "var(--plum)", color: "var(--fg-on-dark)" }}
             variant="default"
+            title={cooldown.active ? "Создание бэкапа доступно раз в час" : undefined}
           >
             {createMut.isPending ? (
               <>
                 <RefreshCw className="h-4 w-4 animate-spin" /> Загрузка на GitHub…
               </>
+            ) : cooldown.active ? (
+              <>лимит 1/час — доступно через {cooldown.minutesLeft} мин</>
             ) : (
               <>
                 <Github className="h-4 w-4" /> Создать backup на GitHub
@@ -1287,7 +1483,8 @@ function GitHubBackupLegacyCard() {
                         style={{ background: "var(--plum-dim)" }}
                       >
                         <CheckCircle2 className="h-2.5 w-2.5 inline mr-1" />
-                        release
+                        {/* v2.11.0 (U-15): RU-подпись вместо сырого «release» */}
+                        релиз
                       </span>
                     </div>
                     <div className="flex items-center gap-3 text-[11px] flex-wrap" style={{ color: "var(--muted)" }}>

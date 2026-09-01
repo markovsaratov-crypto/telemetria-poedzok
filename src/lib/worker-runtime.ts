@@ -273,7 +273,9 @@ async function pollExportJobs(): Promise<void> {
       // хранит логический путь (для совместимости со схемой и логами), но
       // это просто строка — fs-операций по ней нет.
       const logicalFileRef = `export://${jobId}.${ext}`;
-      const expiresAt = Date.now() + env().EXPORT_URL_TTL_HOURS * 3600 * 1000;
+      // v2.11.0 (АУДИТ C-4): expiresAt — ISO-строка (было число epoch-ms:
+      // в SQLite integer < text → сравнения «истёк/не истёк» ломались).
+      const expiresAt = new Date(Date.now() + env().EXPORT_URL_TTL_HOURS * 3600 * 1000).toISOString();
       await libsql.execute({
         sql: `UPDATE ExportJob SET status = 'completed', fileUrl = ?, fileSize = ?, expiresAt = ?, completedAt = ?, error = NULL, updatedAt = ? WHERE id = ?`,
         args: [logicalFileRef, Buffer.byteLength(content), expiresAt, now, now, jobId],

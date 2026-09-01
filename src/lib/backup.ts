@@ -33,7 +33,15 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
     const rows: Record<string, unknown[]> = {};
     const tableCounts: Record<string, number> = {};
     for (const table of tables) {
-      const res = await libsql.execute(`SELECT * FROM ${table}`);
+      let res;
+      if (table === "Setting") {
+        // v2.11.0 (АУДИТ C-32): сырые дампы нераспознанных батчей (до 64 КБ,
+        // accelerometer/координаты) НЕ попадают в бэкапы — диагностика
+        // не должна разъезжаться по копиям (включая GitHub-релизы).
+        res = await libsql.execute(`SELECT * FROM Setting WHERE key != 'diag.ingest.raw'`);
+      } else {
+        res = await libsql.execute(`SELECT * FROM ${table}`);
+      }
       rows[table] = res.rows as unknown[];
       tableCounts[table] = res.rows.length;
     }

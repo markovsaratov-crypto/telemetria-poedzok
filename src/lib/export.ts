@@ -27,6 +27,18 @@ export interface SessionWithPoints extends SessionBase {
   gpsPoints: GpsPoint[];
 }
 
+// v2.11.0 (АУДИТ C-11): startTime бывает ISO-строкой (все сессии sensorlogger) —
+// Number(ISO) = NaN → toISOString() падал → 500 на GPX/KML. Теперь оба формата.
+function startTimeMs(startTime: number | string): number {
+  return typeof startTime === "number" ? startTime : Date.parse(String(startTime));
+}
+
+// v2.11.0 (АУДИТ C-31): XML-экранирование значений в GPX/KML — deviceId с &/</>
+// раньше давал невалидный XML.
+function xmlEsc(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+
 function fmtIso(ms: number): string {
   return new Date(ms).toISOString();
 }
@@ -45,16 +57,17 @@ export function toGPX(session: SessionWithPoints): string {
       return attrs.join("\n");
     })
     .join("\n");
-  // P1-8: startTime из обёртки приходит числом (эпоха мс) — toISOString() на числе падал (500 на GPX)
-  const startIso = fmtIso(Number(session.startTime));
+  // P1-8 + v2.11.0: startTime — число (эпоха мс) ИЛИ ISO-строка
+  const startIso = fmtIso(startTimeMs(session.startTime));
+  const devEsc = xmlEsc(session.deviceId);
   return `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="Telemetria v2.9" xmlns="http://www.topografix.com/GPX/1/1">
+<gpx version="1.1" creator="Telemetria v2.11" xmlns="http://www.topografix.com/GPX/1/1">
   <metadata>
-    <name>Сессия ${session.deviceId} — ${startIso}</name>
+    <name>Сессия ${devEsc} — ${startIso}</name>
     <time>${startIso}</time>
   </metadata>
   <trk>
-    <name>${session.deviceId}</name>
+    <name>${devEsc}</name>
     <trkseg>
 ${pts}
     </trkseg>
@@ -69,7 +82,7 @@ export function toKML(session: SessionWithPoints): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <kml xmlns="http://www.opengis.net/kml/2.2">
   <Document>
-    <name>Сессия ${session.deviceId}</name>
+    <name>Сессия ${xmlEsc(session.deviceId)}</name>
     <Placemark>
       <name>GPS Track</name>
       <LineString>

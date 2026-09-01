@@ -94,8 +94,18 @@ export function ZipImport() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {/* Drop zone */}
+        {/* Drop zone — v2.11.0 (U-20): клавиатурная доступность (role=button,
+            Enter/Space открывают диалог выбора файла); визуал без изменений */}
         <div
+          role="button"
+          tabIndex={0}
+          aria-label="Перетащите ZIP-архив или выберите нажатием"
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              inputRef.current?.click();
+            }
+          }}
           onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={() => setDragOver(false)}
           onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}

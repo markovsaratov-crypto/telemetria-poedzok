@@ -54,6 +54,34 @@ export function useHealth() {
   });
 }
 
+// ===== v2.11.0 (U-17): RU-расшифровки исходов инжеста и статусов для UI =====
+// INGEST_OUTCOME_RU зеркалит одноимённую константу из src/lib/ingest-trace.ts:
+// тот файл — серверный (импортирует @libsql-клиент и создаёт соединение в
+// module scope), его нельзя тянуть в «use client»-бандл — браузерный чанк
+// упадёт при загрузке. Синхронизировать при изменении набора исходов.
+export const INGEST_OUTCOME_RU: Record<string, string> = {
+  accepted: "точки приняты",
+  empty: "пустой батч (test push)",
+  no_gps: "нет GPS-точек в батче",
+  dropped_all: "все точки отброшены (точность > 100 м)",
+  invalid: "невалидный формат (400)",
+  duplicate: "дубль (идемпотентность)",
+};
+
+// v2.11.0 (U-15): RU-подписи статусов (сессии/бэкапы) — с fallback на исходное значение.
+export const SESSION_STATUS_RU: Record<string, string> = {
+  completed: "завершена",
+  recording: "идёт запись",
+  processing: "в обработке",
+};
+export const BACKUP_STATUS_RU: Record<string, string> = {
+  completed: "завершён",
+  failed: "ошибка",
+  running: "выполняется",
+  pending: "в очереди",
+  dead: "мёртвая",
+};
+
 // ===== Aggregate stats (dashboard overview) =====
 export interface StatsResponse {
   totalSessions: number;

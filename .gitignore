@@ -81,3 +81,9 @@ infra-credentials.xlsx
 creds.env
 *.env.local
 .env
+
+# v2.11.0 (АУДИТ C-1): прод-дампы БД НИКОГДА не коммитятся — в них полный
+# трекинг + креды. Долговечные копии — только GitHub Releases (приватные).
+db/backups/*.json
+db/*.sqlite
+*.db

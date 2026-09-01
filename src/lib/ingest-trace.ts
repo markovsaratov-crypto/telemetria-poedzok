@@ -31,6 +31,10 @@ const MAX_RECENT = 20;
 // (до 64 КБ), только последнее, перезаписывается при каждом новом no_gps.
 const RAW_KEY = "diag.ingest.raw";
 const MAX_RAW_CHARS = 64_000;
+// v2.11.0 (АУДИТ C-32): TTL сырого дампа — 24 часа. Полноразмерное тело с
+// accelerometer/координатами не должно жить в БД вечно; новый нераспознанный
+// батч всё равно перезапишет его.
+const RAW_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type IngestRoute = "sensorlogger" | "ingest";
 
@@ -79,24 +83,31 @@ export function recordIngestAttempt(a: IngestAttempt): void {
   if (a.outcome !== "accepted") {
     inc(`ingest_${a.outcome}_total`, OUTCOME_HELP[a.outcome], 1, a.route);
   }
-  void (async () => {
-    try {
-      const trace = await readIngestTrace();
-      const recent = [a, ...trace.recent].slice(0, MAX_RECENT);
-      const payload = JSON.stringify({ last: a, recent });
-      const now = new Date().toISOString();
-      await libsql.execute({
-        sql: `INSERT INTO Setting (key, value, updatedAt, updatedBy)
-              VALUES (?, ?, ?, 'ingest-trace')
-              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt, updatedBy = excluded.updatedBy`,
-        args: [TRACE_KEY, payload, now],
-      });
-    } catch (err) {
-      logger.warn("ingest trace write failed (non-fatal)", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  })();
+  // v2.11.0 (АУДИТ C-17): запись трейса сериализована in-process цепочкой —
+  // раньше параллельные попытки читали один буфер и перезаписывали друг друга
+  // (last-writer-wins терял записи кольца).
+  traceWriteQueue = traceWriteQueue.then(() => writeTraceAttempt(a)).catch(() => {});
+}
+
+let traceWriteQueue: Promise<void> = Promise.resolve();
+
+async function writeTraceAttempt(a: IngestAttempt): Promise<void> {
+  try {
+    const trace = await readIngestTrace();
+    const recent = [a, ...trace.recent].slice(0, MAX_RECENT);
+    const payload = JSON.stringify({ last: a, recent });
+    const now = new Date().toISOString();
+    await libsql.execute({
+      sql: `INSERT INTO Setting (key, value, updatedAt, updatedBy)
+            VALUES (?, ?, ?, 'ingest-trace')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt, updatedBy = excluded.updatedBy`,
+      args: [TRACE_KEY, payload, now],
+    });
+  } catch (err) {
+    logger.warn("ingest trace write failed (non-fatal)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -185,6 +196,7 @@ export function recordIngestRaw(
 /**
  * Прочитать дамп — напрямую из БД. Возвращается только по требованию
  * (?ingestRaw=1 в /api/stats), чтобы не таскать 64 КБ в каждом ответе.
+ * v2.11.0 (АУДИТ C-32): старше 24 часов → null (дамп протух).
  */
 export async function readIngestRaw(): Promise<IngestRawDump | null> {
   try {
@@ -196,6 +208,7 @@ export async function readIngestRaw(): Promise<IngestRawDump | null> {
     const row = res.rows[0] as Record<string, unknown>;
     const parsed = JSON.parse(String(row.value)) as Partial<IngestRawDump>;
     if (!parsed || typeof parsed.body !== "string" || typeof parsed.at !== "string") return null;
+    if (Date.now() - Date.parse(parsed.at) > RAW_TTL_MS) return null;
     return parsed as IngestRawDump;
   } catch {
     return null;

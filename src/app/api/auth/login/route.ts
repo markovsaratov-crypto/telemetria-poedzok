@@ -10,9 +10,6 @@ import {
   setSessionCookie,
 } from "@/lib/auth";
 import { userDb } from "@/lib/user-db";
-import { createRateLimiter, rlKey } from "@/lib/rate-limit";
-import { env } from "@/lib/env";
-import { getClientIP } from "@/lib/http-utils";
 import { inc } from "@/lib/metrics";
 import { logger } from "@/lib/logger";
 
@@ -30,23 +27,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Rate limit на логин (защита от брутфорса, §6.9)
-    const ip = getClientIP(request);
-    const limiter = createRateLimiter();
-    const rl = await limiter.check(rlKey("auth:login", ip), env().RATE_LIMIT_MAX_AUTH, 60);
-    if (!rl.allowed) {
-      inc("auth_login_rate_limited_total", "Auth login rate limited", 1);
-      return NextResponse.json(
-        { error: "Too many login attempts", retryAfter: rl.retryAfter },
-        {
-          status: 429,
-          headers: {
-            "X-Request-Id": requestId,
-            "Retry-After": String(rl.retryAfter),
-          },
-        }
-      );
-    }
+    // v2.11.0 (АУДИТ C-19): rate-limit логина УБРАН из роута — прокси уже
+    // проверяет тот же бакет auth:login (тот же ключ rl:auth:login:<ip>) —
+    // двойное списание съедало лимит: 5 попыток/мин превращались в ~2.5.
+    // Брутфорс-защита не ослабла: прокси отвечает 429 до роута.
 
     const { email, password } = parsed.data;
 
@@ -58,7 +42,7 @@ export async function POST(request: NextRequest) {
       const ok = await verifyPasswordHash(password, user?.passwordHash ?? dummyHash);
       if (!user || !ok) {
         inc("auth_login_failed_total", "Auth login failures", 1);
-        logger.warn("Login failed (multi-user bad creds)", { requestId, ip, email });
+        logger.warn("Login failed (multi-user bad creds)", { requestId, email });
         return NextResponse.json(
           { error: "Invalid credentials" },
           { status: 401, headers: { "X-Request-Id": requestId } }
@@ -71,7 +55,7 @@ export async function POST(request: NextRequest) {
       );
       setSessionCookie(response, cookieValue);
       inc("auth_login_success_total", "Auth login successes", 1);
-      logger.info("Login success (multi-user)", { requestId, ip, userId: user.id });
+      logger.info("Login success (multi-user)", { requestId, userId: user.id });
       return response;
     }
 
@@ -79,7 +63,7 @@ export async function POST(request: NextRequest) {
     const ok = await verifyPassword(password);
     if (!ok) {
       inc("auth_login_failed_total", "Auth login failures", 1);
-      logger.warn("Login failed (bad password)", { requestId, ip });
+      logger.warn("Login failed (bad password)", { requestId });
       return NextResponse.json(
         { error: "Invalid credentials" },
         { status: 401, headers: { "X-Request-Id": requestId } }
@@ -93,7 +77,7 @@ export async function POST(request: NextRequest) {
     );
     setSessionCookie(response, cookieValue);
     inc("auth_login_success_total", "Auth login successes", 1);
-    logger.info("Login success (legacy owner)", { requestId, ip, sessionId });
+    logger.info("Login success (legacy owner)", { requestId, sessionId });
     return response;
   } catch (err) {
     logger.error("Login error", { requestId, error: err instanceof Error ? err.message : String(err) });

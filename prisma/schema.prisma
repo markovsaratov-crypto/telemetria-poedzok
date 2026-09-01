@@ -197,3 +197,14 @@ model Setting {
   updatedAt  DateTime @default(now()) @updatedAt
   updatedBy  String?
 }
+
+// v2.11.0 (АУДИТ C-14): идемпотентность инжеста SensorLogger по (deviceId, messageId).
+// HTTP-ретраи приложения больше не создают дубликаты GPS-точек.
+model IngestMessage {
+  deviceId    String
+  messageId   String
+  firstSeenAt DateTime @default(now())
+
+  @@id([deviceId, messageId])
+  @@index([firstSeenAt])
+}

@@ -40,13 +40,20 @@ function toCamel(row: Record<string, unknown>): Record<string, unknown> {
 
 // P1-10 → v2.9.4 fix: унификация временных аргументов SQL-фильтров.
 // Дата-время в Session/ExportJob/BackupJob хранится как TEXT ISO-8601 UTC
-// («2026-08-16T09:46:40.747Z») — libsql сериализует Date в ISO при INSERT.
-// Раньше возвращались epoch-ms ЧИСЛА: в SQLite text всегда > integer,
-// из-за чего фильтры startTime >= ?/deletedAt < ? молча матчили ВСЕ text-строки
-// (todaySessions считал все сессии, perDay был нулями, retention-purge не находил
-// grace-истёкшие строки). Prod-БД нормализована миграцией v2.9.4 (все datetime — text),
-// здесь приводим аргументы к тому же формату.
-// NB: GpsPoint.timestamp — INTEGER ms (BigInt) и фильтрами через toTs не проходит.
+// («2026-08-16T09:46:40.747Z»).
+// v2.11.0 (АУДИТ C-4, эмпирически подтверждено): @libsql/client превращает
+// аргумент-Date в ЧИСЛО epoch-ms (typeof REAL), а НЕ в ISO-строку — комментарий
+// «libsql сериализует Date в ISO» был ложным. 11 писателей дат писали числа →
+// в SQLite integer < text → фильтры startTime >= ?/deletedAt < ? молча
+// теряли строки (prod: 13/36 сессий с числовым startTime, deletedAt-числа).
+// Решение: normVal() — ЛЮБОЙ Date в аргументах дамп-обёрток → ISO-строка.
+// NB: GpsPoint.timestamp — INTEGER ms (BigInt) и не проходит через normVal (не Date).
+function normVal(v: unknown): unknown {
+  return v instanceof Date ? v.toISOString() : v;
+}
+function normVals(vals: unknown[]): unknown[] {
+  return vals.map(normVal);
+}
 function toTs(v: Date | number): string {
   if (v instanceof Date) return v.toISOString();
   // число трактуем как epoch-ms (Prisma-стиль вызовы)
@@ -133,11 +140,19 @@ export const db = {
       const params: unknown[] = [];
       if (args?.where?.status) { sql += " AND status = ?"; params.push(args.where.status); }
       // P1-10: startTime { gte } (было молча игнорировалось → «сегодня» показывало всего)
-      const gte = (args?.where?.startTime as { gte?: Date | number } | undefined)?.gte;
-      if (gte) { sql += " AND startTime >= ?"; params.push(toTs(gte)); }
+      const st = (args?.where?.startTime as { gte?: Date | number; lt?: Date | number } | undefined);
+      if (st?.gte != null) { sql += " AND startTime >= ?"; params.push(toTs(st.gte)); }
+      if (st?.lt != null) { sql += " AND startTime < ?"; params.push(toTs(st.lt)); }
       const result = await libsql.execute({ sql, args: params as InValue[] });
       return Number((result.rows[0] as Record<string, unknown>).count);
     },
+    // v2.11.0 (АУДИТ C-2/C-5/C-6/C-7/C-21): ЕДИНСТВЕННАЯ реализация findMany.
+    // Раньше их было ДВЕ и вторая (bottom override) молча затирала первую:
+    // дропались deletedAt:{lt}/purgedAt (retention grace), OR (поиск), тэки.
+    // Здесь: keyset-пагинация вместо «id != cursor + OFFSET 1» (страница 2
+    // возвращала 19 уже видимых строк), scalar deviceId → точное =, а не
+    // LIKE %…% (C-21: подстрока/подстановки ломали семантику фильтра),
+    // take без значения → без LIMIT (hard cap 5000 от OOM), OR-условия поиска.
     async findMany(args?: {
       where?: Record<string, unknown>;
       orderBy?: Record<string, string>;
@@ -145,45 +160,130 @@ export const db = {
       cursor?: { id: string };
       skip?: number;
       include?: Record<string, unknown>;
+      select?: Record<string, unknown>;
     }) {
-      const take = args?.take ?? 20;
-      const skip = args?.skip ?? (args?.cursor ? 1 : 0);
-      let sql = "SELECT * FROM Session WHERE deletedAt IS NULL";
-      const params: unknown[] = [];
-      const deviceId = args?.where?.deviceId as { contains?: string } | string | undefined;
-      if (deviceId && typeof deviceId === "object" && deviceId.contains) { sql += " AND deviceId LIKE ?"; params.push(`%${deviceId.contains}%`); }
-      else if (deviceId) { sql += " AND deviceId LIKE ?"; params.push(`%${String(deviceId)}%`); }
-      if (args?.where?.status) { sql += " AND status = ?"; params.push(args.where.status); }
-      if (args?.where?.routeId) { sql += " AND routeId = ?"; params.push(args.where.routeId); }
-      if (args?.cursor?.id) { sql += " AND id != ?"; params.push(args.cursor.id); }
-      // P1-10: расширенные фильтры (раньше молча игнорировались — retention удалял бы НОВЫЕ сессии!)
+      const HARD_CAP = 5000;
+      const take = Math.min(args?.take ?? HARD_CAP, HARD_CAP);
       const w = args?.where || {};
-      const st = w.startTime as { lt?: Date | number; gte?: Date | number } | undefined;
-      if (st?.lt != null) { sql += " AND startTime < ?"; params.push(toTs(st.lt)); }
-      if (st?.gte != null) { sql += " AND startTime >= ?"; params.push(toTs(st.gte)); }
-      // deletedAt: null — базовый WHERE; поддерживаем { not: null } и { lt, not: null } (retention grace)
-      if (w.deletedAt === null) { /* already in WHERE */ }
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+
+      // deviceId: scalar → ТОЧНОЕ совпадение (C-21); {contains} → LIKE с ESCAPE
+      const devId = w.deviceId as { contains?: string } | string | undefined;
+      if (devId && typeof devId === "object" && devId.contains != null) {
+        conditions.push("deviceId LIKE ? ESCAPE '\\'");
+        params.push(`%${String(devId.contains).replace(/[\\%_]/g, (m) => "\\" + m)}%`);
+      } else if (typeof devId === "string" && devId) {
+        conditions.push("deviceId = ?");
+        params.push(devId);
+      }
+      // id: scalar | {in}
+      const idIn = (w.id as { in?: string[] } | undefined)?.in;
+      if (Array.isArray(idIn)) {
+        if (idIn.length === 0) return [];
+        conditions.push(`id IN (${idIn.map(() => "?").join(", ")})`);
+        params.push(...idIn);
+      } else if (typeof w.id === "string") {
+        conditions.push("id = ?");
+        params.push(w.id);
+      }
+      if (typeof w.status === "string") { conditions.push("status = ?"); params.push(w.status); }
+      if (typeof w.routeId === "string") { conditions.push("routeId = ?"); params.push(w.routeId); }
+      // текстовые колонки: null | {not: null} (поиск/теги)
+      for (const col of ["notes", "tags", "deviceName"] as const) {
+        const v = w[col];
+        if (v === null) { conditions.push(`${col} IS NULL`); }
+        else if (v && typeof v === "object" && (v as { not?: unknown }).not === null) {
+          conditions.push(`${col} IS NOT NULL`);
+        } else if (typeof v === "string") { conditions.push(`${col} = ?`); params.push(v); }
+      }
+      // startTime/endTime: gte/lt/gt (ISO-строки через toTs)
+      const stW = w.startTime as { gte?: Date | number; lt?: Date | number } | undefined;
+      if (stW?.gte != null) { conditions.push("startTime >= ?"); params.push(toTs(stW.gte)); }
+      if (stW?.lt != null) { conditions.push("startTime < ?"); params.push(toTs(stW.lt)); }
+      const etW = w.endTime as { lt?: Date | number; gt?: Date | number; gte?: Date | number } | undefined;
+      if (etW?.lt != null) { conditions.push("endTime < ?"); params.push(toTs(etW.lt)); }
+      if (etW?.gt != null) { conditions.push("endTime > ?"); params.push(toTs(etW.gt)); }
+      if (etW?.gte != null) { conditions.push("endTime >= ?"); params.push(toTs(etW.gte)); }
+      // deletedAt: null (базовый WHERE) | {not:null} | {lt, not:null} — retention grace
+      if (w.deletedAt === null) { /* базовый фильтр WHERE deletedAt IS NULL */ }
       else if (w.deletedAt && typeof w.deletedAt === "object") {
         const da = w.deletedAt as { lt?: Date | number; not?: unknown };
-        if (da.lt != null) {
-          sql = sql.replace("deletedAt IS NULL", "deletedAt IS NOT NULL AND deletedAt < ?");
-          params.push(toTs(da.lt));
-        } else if (da.not != null) {
-          sql = sql.replace("deletedAt IS NULL", "deletedAt IS NOT NULL");
+        if (da.lt != null) { conditions.push("deletedAt IS NOT NULL AND deletedAt < ?"); params.push(toTs(da.lt)); }
+        else if (da.not != null) { conditions.push("deletedAt IS NOT NULL"); }
+      }
+      // purgedAt: null | {lt} | {not: null} — фильтруется ТОЛЬКО когда явно передан
+      const pa = w.purgedAt as null | { lt?: Date | number; not?: unknown } | undefined;
+      if (pa !== undefined) {
+        if (pa === null) conditions.push("purgedAt IS NULL");
+        else if (pa && typeof pa === "object") {
+          if ((pa as { lt?: Date | number }).lt != null) { conditions.push("purgedAt < ?"); params.push(toTs((pa as { lt: Date | number }).lt)); }
+          else if ((pa as { not?: unknown }).not != null) conditions.push("purgedAt IS NOT NULL");
         }
       }
-      // purgedAt: null | { lt: Date | number } — обрабатываем оба варианта
-      const pa = w.purgedAt as null | { lt?: Date | number; not?: unknown } | undefined;
-      if (pa === undefined || pa === null || (pa && (pa as { not?: unknown }).not === undefined && Object.keys(pa).length === 0)) {
-        sql += " AND purgedAt IS NULL"; // purgedAt: null — дефолт
-      } else if (pa && (pa as { lt?: Date | number }).lt != null) {
-        sql += " AND purgedAt < ?"; params.push(toTs((pa as { lt: Date | number }).lt));
+      // OR: массив {col: {contains}} — глобальный поиск (C-6: раньше молча игнорировался)
+      const or = w.OR as Array<Record<string, { contains?: string }>> | undefined;
+      if (Array.isArray(or) && or.length > 0) {
+        const orConds: string[] = [];
+        for (const branch of or) {
+          for (const [col, val] of Object.entries(branch)) {
+            if (val && typeof val === "object" && val.contains != null && ["deviceId", "deviceName", "notes", "tags"].includes(col)) {
+              orConds.push(`${col} LIKE ? ESCAPE '\\'`);
+              params.push(`%${String(val.contains).replace(/[\\%_]/g, (m) => "\\" + m)}%`);
+            }
+          }
+        }
+        if (orConds.length > 0) conditions.push(`(${orConds.join(" OR ")})`);
       }
+
+      // Курсорная пагинация: keyset по (startTime, id) — эмуляция Prisma cursor+skip:1.
+      // C-5: старая схема «id != cursor + OFFSET 1» выдавала страницу 2 из уже видимых строк.
+      let cursorSkip = 0;
+      if (args?.cursor?.id) {
+        const cur = await libsql.execute({
+          sql: "SELECT startTime FROM Session WHERE id = ? LIMIT 1",
+          args: [args.cursor.id],
+        });
+        if (cur.rows.length > 0) {
+          const curStart = String((cur.rows[0] as Record<string, unknown>).startTime);
+          conditions.push("(startTime < ? OR (startTime = ? AND id < ?))");
+          params.push(curStart, curStart, args.cursor.id);
+        } else {
+          cursorSkip = 1; // курсор удалён — fallback на старую семантику
+          conditions.push("id != ?");
+          params.push(args.cursor.id);
+        }
+      }
+      const skip = args?.skip ?? cursorSkip;
+
+      let sql = "SELECT * FROM Session WHERE deletedAt IS NULL";
+      if (conditions.length > 0) sql += " AND " + conditions.join(" AND ");
       const order = args?.orderBy?.startTime === "asc" ? "ASC" : "DESC";
-      sql += ` ORDER BY startTime ${order} LIMIT ?`;
+      sql += ` ORDER BY startTime ${order}, id ${order} LIMIT ?`;
       if (skip > 0) { sql += " OFFSET ?"; params.push(take, skip); } else { params.push(take); }
+
       const result = await libsql.execute({ sql, args: params as InValue[] });
-      return result.rows.map(r => toCamel(r as Record<string, unknown>));
+      const rows = result.rows.map(r => toCamel(r as Record<string, unknown>));
+      // select: скалярные поля + вложенные gpsPoints/route (P0-2)
+      if (args?.select) {
+        const out: Record<string, unknown>[] = [];
+        for (const row of rows) {
+          const proj: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(args.select)) {
+            if (!v) continue;
+            if (k === "gpsPoints") proj.gpsPoints = await fetchGpsPoints(row.id as string, args.select.gpsPoints as RelationOpts);
+            else if (k in row) proj[k] = row[k];
+          }
+          out.push(proj);
+        }
+        return out;
+      }
+      // include: gpsPoints / trafficJobs / route
+      if (args?.include) {
+        for (const row of rows) await projectSession(row, undefined, args.include);
+        return rows;
+      }
+      return rows;
     },
     // P1-10: aggregate (_sum) — /api/stats падал с TypeError (метода не было)
     async aggregate(args?: { _sum?: Record<string, unknown>; where?: Record<string, unknown> }) {
@@ -231,20 +331,20 @@ export const db = {
       const now = new Date().toISOString();
       const data = { id: crypto.randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
-      const values = Object.values(data);
+      const values = normVals(Object.values(data));
       const placeholders = keys.map(() => "?").join(", ");
       const result = await libsql.execute({ sql: `INSERT INTO Session (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
       return toCamel(result.rows[0] as Record<string, unknown>);
     },
     async update(args: { where: { id: string }; data: Record<string, unknown> }) {
       const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
-      const values = Object.values(args.data);
+      const values = normVals(Object.values(args.data));
       const result = await libsql.execute({ sql: `UPDATE Session SET ${sets} WHERE id = ? RETURNING *`, args: [...values, args.where.id] as InValue[] });
       return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
     },
     async updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }) {
       const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
-      const values = Object.values(args.data);
+      const values = normVals(Object.values(args.data));
       const conditions: string[] = [];
       const condParams: unknown[] = [];
       const w = args.where || {};
@@ -304,16 +404,27 @@ export const db = {
     },
   },
   gpsPoint: {
+    // v2.11.0 (АУДИТ C-16): было по одному INSERT на строку (последовательные
+    // HTTPS-раундтрипы к Turso ~50-100 мс каждый; 100 точек ≈ 5-10 с).
+    // Теперь — многорядный INSERT чанками по 50 строк (450 плейсхолдеров <
+    // лимита SQLite 999 переменных).
     async createMany(args: { data: Array<Record<string, unknown>> }) {
-      for (const item of args.data) {
-        // GpsPoint.id — NOT NULL (cuid в Prisma): генерируем, если не передан (P0-2)
-        const data = { id: crypto.randomUUID(), ...pruneUndefined(item) };
-        const keys = Object.keys(data);
-        const values = Object.values(data).map((v) => (v === undefined ? null : v));
-        const placeholders = keys.map(() => "?").join(", ");
-        await libsql.execute({ sql: `INSERT INTO GpsPoint (${keys.join(", ")}) VALUES (${placeholders})`, args: values as InValue[] });
+      const items = args.data.map((item) => ({ id: crypto.randomUUID(), ...pruneUndefined(item) }));
+      if (items.length === 0) return { count: 0 };
+      // Колонки — по ключам первой строки; отсутствующие в остальных → NULL
+      const cols = Object.keys(items[0]);
+      const rows = items.map((item) => normVals(cols.map((c) => (item[c] === undefined ? null : item[c]))));
+      const ph = `(${cols.map(() => "?").join(", ")})`;
+      const CH = Math.max(1, Math.floor(900 / cols.length)); // < 999 переменных SQLite
+      for (let i = 0; i < rows.length; i += CH) {
+        const chunk = rows.slice(i, i + CH);
+        const placeholders = chunk.map(() => ph).join(", ");
+        await libsql.execute({
+          sql: `INSERT INTO GpsPoint (${cols.join(", ")}) VALUES ${placeholders}`,
+          args: chunk.flat() as InValue[],
+        });
       }
-      return { count: args.data.length };
+      return { count: rows.length };
     },
     async deleteMany(args: { where: Record<string, unknown> }) {
       const result = await libsql.execute({ sql: "DELETE FROM GpsPoint WHERE sessionId = ?", args: [args.where.sessionId] as InValue[] });
@@ -325,14 +436,14 @@ export const db = {
       const now = new Date().toISOString();
       const data = { id: crypto.randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
-      const values = Object.values(data);
+      const values = normVals(Object.values(data));
       const placeholders = keys.map(() => "?").join(", ");
       const result = await libsql.execute({ sql: `INSERT INTO TrafficJob (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
       return toCamel(result.rows[0] as Record<string, unknown>);
     },
     async update(args: { where: { id: string }; data: Record<string, unknown> }) {
       const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
-      const values = Object.values(args.data);
+      const values = normVals(Object.values(args.data));
       const result = await libsql.execute({ sql: `UPDATE TrafficJob SET ${sets} WHERE id = ? RETURNING *`, args: [...values, args.where.id] as InValue[] });
       return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
     },
@@ -343,19 +454,40 @@ export const db = {
       const result = await libsql.execute({ sql, args: params as InValue[] });
       return Number((result.rows[0] as Record<string, unknown>).count);
     },
+    // v2.11.0 (АУДИТ C-8): id:{in} теперь поддержан (раньше молча игнорировался —
+    // worker/poll получал последние 50 джобов вместо захваченных); include.session
+    // умеет gpsPoints (раньше джоб падал 500 на j.session.gpsPoints.map).
     async findMany(args?: { where?: Record<string, unknown>; orderBy?: Record<string, string>; take?: number; include?: Record<string, unknown> }) {
       const take = args?.take ?? 50;
-      let sql = "SELECT * FROM TrafficJob";
+      const conditions: string[] = [];
       const params: unknown[] = [];
-      if (args?.where?.status) { sql += " WHERE status = ?"; params.push(args.where.status); }
+      if (typeof args?.where?.status === "string") { conditions.push("status = ?"); params.push(args.where.status); }
+      const idIn = (args?.where?.id as { in?: string[] } | undefined)?.in;
+      if (Array.isArray(idIn)) {
+        if (idIn.length === 0) return [];
+        conditions.push(`id IN (${idIn.map(() => "?").join(", ")})`);
+        params.push(...idIn);
+      }
+      let sql = "SELECT * FROM TrafficJob";
+      if (conditions.length > 0) sql += " WHERE " + conditions.join(" AND ");
       sql += " ORDER BY createdAt DESC LIMIT ?";
       params.push(take);
       const result = await libsql.execute({ sql, args: params as InValue[] });
       const jobs = result.rows.map(r => toCamel(r as Record<string, unknown>));
       if (args?.include?.session) {
+        const wantPoints = !!(args.include.session as { select?: { gpsPoints?: unknown } }).select?.gpsPoints;
         for (const job of jobs) {
-          const sResult = await libsql.execute({ sql: "SELECT deviceId, startTime FROM Session WHERE id = ?", args: [job.sessionId as InValue] });
-          if (sResult.rows.length > 0) job.session = toCamel(sResult.rows[0] as Record<string, unknown>);
+          const sResult = await libsql.execute({ sql: "SELECT * FROM Session WHERE id = ?", args: [job.sessionId as InValue] });
+          if (sResult.rows.length > 0) {
+            const session = toCamel(sResult.rows[0] as Record<string, unknown>);
+            if (wantPoints) {
+              const pts = await libsql.execute({ sql: "SELECT lat, lon, speed, altitude, accuracy, bearing, timestamp FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC", args: [job.sessionId as InValue] });
+              session.gpsPoints = pts.rows.map(r => { const p = toCamel(r as Record<string, unknown>); p.timestamp = Number(p.timestamp); return p; });
+            } else {
+              delete session.gpsPoints;
+            }
+            job.session = session;
+          }
         }
       }
       return jobs;
@@ -374,32 +506,49 @@ export const db = {
       const now = new Date().toISOString();
       const data = { id: crypto.randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
-      const values = Object.values(data);
+      const values = normVals(Object.values(data));
       const placeholders = keys.map(() => "?").join(", ");
       await libsql.execute({ sql: `INSERT INTO AuditLog (${keys.join(", ")}) VALUES (${placeholders})`, args: values as InValue[] });
     },
+    // v2.11.0 (АУДИТ C-5): keyset-пагинация по (createdAt, id) вместо
+    // «id != cursor + OFFSET 1» — страница 2 возвращала уже виденные строки.
     async findMany(args?: { where?: Record<string, unknown>; orderBy?: Record<string, string>; take?: number; cursor?: { id: string }; skip?: number }) {
       const take = args?.take ?? 50;
-      const skip = args?.skip ?? (args?.cursor ? 1 : 0);
-      let sql = "SELECT * FROM AuditLog";
-      const params: unknown[] = [];
       const conditions: string[] = [];
+      const params: unknown[] = [];
       const actContains = (args?.where?.action as { contains?: string } | undefined)?.contains;
-      if (actContains) { conditions.push("action LIKE ?"); params.push(`%${actContains}%`); }
+      if (actContains) { conditions.push("action LIKE ? ESCAPE '\\\'"); params.push(`%${actContains.replace(/[\\%_]/g, (m) => "\\" + m)}%`); }
       if (args?.where?.actorType) { conditions.push("actorType = ?"); params.push(args.where.actorType); }
       if (args?.where?.targetType) { conditions.push("targetType = ?"); params.push(args.where.targetType); }
+      let cursorSkip = 0;
+      if (args?.cursor?.id) {
+        const cur = await libsql.execute({ sql: "SELECT createdAt FROM AuditLog WHERE id = ? LIMIT 1", args: [args.cursor.id] });
+        if (cur.rows.length > 0) {
+          const curCreated = String((cur.rows[0] as Record<string, unknown>).createdAt);
+          conditions.push("(createdAt < ? OR (createdAt = ? AND id < ?))");
+          params.push(curCreated, curCreated, args.cursor.id);
+        } else {
+          cursorSkip = 1;
+          conditions.push("id != ?");
+          params.push(args.cursor.id);
+        }
+      }
+      const skip = args?.skip ?? cursorSkip;
+      let sql = "SELECT * FROM AuditLog";
       if (conditions.length > 0) sql += " WHERE " + conditions.join(" AND ");
-      if (args?.cursor?.id) { sql += skip > 0 ? " AND id != ?" : " WHERE id != ?"; params.push(args.cursor.id); }
-      sql += " ORDER BY createdAt DESC LIMIT ?";
+      sql += " ORDER BY createdAt DESC, id DESC LIMIT ?";
       if (skip > 0) { sql += " OFFSET ?"; params.push(take, skip); } else { params.push(take); }
       const result = await libsql.execute({ sql, args: params as InValue[] });
       return result.rows.map(r => toCamel(r as Record<string, unknown>));
     },
+    // v2.11.0 (АУДИТ C-23): deleteMany без условий — защита аудиторского следа
+    // (одно неверное обновление вызова — и DELETE FROM AuditLog стирает всё).
     async deleteMany(args?: { where?: Record<string, unknown> }) {
       let sql = "DELETE FROM AuditLog";
       const params: unknown[] = [];
       const createdLt = (args?.where?.createdAt as { lt?: Date | number } | undefined)?.lt;
       if (createdLt != null) { sql += " WHERE createdAt < ?"; params.push(toTs(createdLt)); }
+      else { return { count: 0 }; } // guard: пустое where → отказ (в отличие от Prisma)
       const result = await libsql.execute({ sql, args: params as InValue[] });
       return { count: result.rowsAffected };
     },
@@ -417,14 +566,14 @@ export const db = {
       const now = new Date().toISOString();
       const data = { id: crypto.randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
-      const values = Object.values(data);
+      const values = normVals(Object.values(data));
       const placeholders = keys.map(() => "?").join(", ");
       const result = await libsql.execute({ sql: `INSERT INTO Route (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
       return toCamel(result.rows[0] as Record<string, unknown>);
     },
     async update(args: { where: { id: string }; data: Record<string, unknown> }) {
       const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
-      const values = Object.values(args.data);
+      const values = normVals(Object.values(args.data));
       const result = await libsql.execute({ sql: `UPDATE Route SET ${sets} WHERE id = ? RETURNING *`, args: [...values, args.where.id] as InValue[] });
       return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
     },
@@ -449,9 +598,9 @@ export const db = {
       const updateData = { ...args.update };
       for (const k of Object.keys(updateData)) if (updateData[k] === undefined) delete updateData[k];
       const createKeys = Object.keys(createData);
-      const createValues = Object.values(createData);
+      const createValues = normVals(Object.values(createData));
       const updateKeys = Object.keys(updateData);
-      const updateValues = Object.values(updateData);
+      const updateValues = normVals(Object.values(updateData));
       const placeholders = createKeys.map(() => "?").join(", ");
       const sets = updateKeys.map((k) => `${k} = ?`).join(", ");
       await libsql.execute({ sql: `INSERT INTO RouteCache (${createKeys.join(", ")}) VALUES (${placeholders}) ON CONFLICT(hash) DO UPDATE SET ${sets}`, args: [...createValues, ...updateValues] as InValue[] });
@@ -475,7 +624,7 @@ export const db = {
       const now = new Date().toISOString();
       const data = { id: crypto.randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
-      const values = Object.values(data);
+      const values = normVals(Object.values(data));
       const placeholders = keys.map(() => "?").join(", ");
       const result = await libsql.execute({ sql: `INSERT INTO ExportJob (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
       return toCamel(result.rows[0] as Record<string, unknown>);
@@ -486,14 +635,14 @@ export const db = {
       const now = new Date().toISOString();
       const data = { id: crypto.randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
-      const values = Object.values(data);
+      const values = normVals(Object.values(data));
       const placeholders = keys.map(() => "?").join(", ");
       const result = await libsql.execute({ sql: `INSERT INTO BackupJob (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
       return toCamel(result.rows[0] as Record<string, unknown>);
     },
     async update(args: { where: { id: string }; data: Record<string, unknown> }) {
       const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
-      const values = Object.values(args.data);
+      const values = normVals(Object.values(args.data));
       const result = await libsql.execute({ sql: `UPDATE BackupJob SET ${sets} WHERE id = ? RETURNING *`, args: [...values, args.where.id] as InValue[] });
       return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
     },
@@ -562,9 +711,9 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
             ...pruneUndefined(args.data),
           };
           const keys = Object.keys(data);
-          const values = Object.values(data);
+          const values = normVals(Object.values(data));
           const placeholders = keys.map(() => "?").join(", ");
-          const result = await tx.execute({ sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values });
+          const result = await tx.execute({ sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
           return toCamel(result.rows[0] as Record<string, unknown>);
         },
         async createMany(args: { data: Array<Record<string, unknown>> }) {
@@ -573,9 +722,9 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
           for (const item of args.data) {
             const data = { id: crypto.randomUUID(), ...pruneUndefined(item) };
             const keys = Object.keys(data);
-            const values = Object.values(data).map((v) => (v === undefined ? null : v));
+            const values = normVals(Object.values(data).map((v) => (v === undefined ? null : v)));
             const placeholders = keys.map(() => "?").join(", ");
-            await tx.execute({ sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders})`, args: values });
+            await tx.execute({ sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders})`, args: values as InValue[] });
             count += 1;
           }
           return { count };
@@ -587,7 +736,7 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
           const keys = Object.keys(data);
           if (keys.length === 0) return null;
           const setSql = keys.map((k) => `${k} = ?`).join(", ");
-          const values = [...Object.values(data), args.where.id];
+          const values = normVals([...Object.values(data), args.where.id]);
           const result = await tx.execute({ sql: `UPDATE ${table} SET ${setSql} WHERE id = ? RETURNING *`, args: values as InValue[] });
           return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
         },
@@ -638,90 +787,6 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
 (db as any).backupJob.findUnique = async (args: { where: { id: string } }) => {
   const result = await libsql.execute({ sql: "SELECT * FROM BackupJob WHERE id = ?", args: [args.where.id] });
   return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
-};
-
-// session.findMany with more where options (gte, lt, etc.)
-const originalFindMany = (db as any).session.findMany;
-(db as any).session.findMany = async (args?: {
-  where?: Record<string, unknown>;
-  orderBy?: Record<string, string>;
-  take?: number;
-  cursor?: { id: string };
-  skip?: number;
-  select?: Record<string, boolean>;
-  include?: Record<string, unknown>;
-}) => {
-  const take = args?.take ?? 20;
-  const skip = args?.skip ?? (args?.cursor ? 1 : 0);
-  let sql = "SELECT * FROM Session WHERE deletedAt IS NULL";
-  const params: unknown[] = [];
-  const w = args?.where || {};
-  
-  // Handle deviceId contains
-  const devId = w.deviceId as { contains?: string } | string | undefined;
-  if (devId && typeof devId === "object" && devId.contains) { sql += " AND deviceId LIKE ?"; params.push(`%${devId.contains}%`); }
-  else if (devId) { sql += " AND deviceId LIKE ?"; params.push(`%${String(devId)}%`); }
-  // Handle id: scalar or { in: [...] } — P0-2 (batch/bulk-delete)
-  const idIn = (w.id as { in?: string[] } | undefined)?.in;
-  if (Array.isArray(idIn)) {
-    if (idIn.length === 0) return [];
-    sql += ` AND id IN (${idIn.map(() => "?").join(", ")})`;
-    params.push(...idIn);
-  } else if (typeof w.id === "string") { sql += " AND id = ?"; params.push(w.id); }
-  // Handle status
-  if (w.status) { sql += " AND status = ?"; params.push(w.status); }
-  // Handle routeId
-  if (w.routeId) { sql += " AND routeId = ?"; params.push(w.routeId); }
-  // Handle startTime gte/lt
-  const stW = w.startTime as { gte?: Date | number; lt?: Date | number } | undefined;
-  if (stW?.gte != null) { sql += " AND startTime >= ?"; params.push(toTs(stW.gte)); }
-  if (stW?.lt != null) { sql += " AND startTime < ?"; params.push(toTs(stW.lt)); }
-  // Handle endTime
-  const etW = w.endTime as { lt?: Date | number; gt?: Date | number } | undefined;
-  if (etW?.lt != null) { sql += " AND endTime < ?"; params.push(toTs(etW.lt)); }
-  if (etW?.gt != null) { sql += " AND endTime > ?"; params.push(toTs(etW.gt)); }
-  // Handle deletedAt
-  const delW = w.deletedAt as null | { not?: null } | undefined;
-  if (delW === null) { /* already in WHERE */ }
-  else if (delW && typeof delW === "object" && delW.not === null) { sql += " AND deletedAt IS NOT NULL"; }
-  // Handle cursor
-  if (args?.cursor?.id) { sql += " AND id != ?"; params.push(args.cursor.id); }
-  
-  const order = args?.orderBy?.startTime === "asc" ? "ASC" : "DESC";
-  sql += ` ORDER BY startTime ${order} LIMIT ?`;
-  if (skip > 0) { sql += " OFFSET ?"; params.push(take, skip); } else { params.push(take); }
-  
-  const result = await libsql.execute({ sql, args: params as InValue[] });
-  const rows = result.rows.map(r => toCamel(r as Record<string, unknown>));
-  // select: scalar fields + nested gpsPoints (P0-2)
-  if (args?.select) {
-    const out: Record<string, unknown>[] = [];
-    for (const row of rows) {
-      const proj: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(args.select)) {
-        if (!v) continue;
-        if (k === "gpsPoints") proj.gpsPoints = await fetchGpsPoints(row.id as string, args.select.gpsPoints as RelationOpts);
-        else if (k in row) proj[k] = row[k];
-      }
-      out.push(proj);
-    }
-    return out;
-  }
-  return rows;
-};
-
-// session.count with more where options
-const originalCount = (db as any).session.count;
-(db as any).session.count = async (args?: { where?: Record<string, unknown> }) => {
-  let sql = "SELECT COUNT(*) as count FROM Session WHERE deletedAt IS NULL";
-  const params: unknown[] = [];
-  const w = args?.where || {};
-  if (w.status) { sql += " AND status = ?"; params.push(w.status); }
-  const cntSt = w.startTime as { gte?: Date | number } | undefined;
-  if (cntSt?.gte != null) { sql += " AND startTime >= ?"; params.push(toTs(cntSt.gte)); }
-  if (w.deletedAt === null) { /* already in WHERE */ }
-  const result = await libsql.execute({ sql, args: params as InValue[] });
-  return Number((result.rows[0] as Record<string, unknown>).count);
 };
 
 // session.groupBy

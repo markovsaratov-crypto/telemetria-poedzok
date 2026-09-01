@@ -1595,11 +1595,29 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
 }
 .v4-app .ingest-list li:last-child { border-bottom: none; }
 .v4-app .ingest-list .mono { font-family: var(--mono); font-size: 10.5px; }
+/* v2.10.7: образец структуры нераспознанного батча (no_gps) */
+.v4-app .ingest-sample-wrap { margin-top: 8px; }
+.v4-app .ingest-sample {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: var(--bg, #faf9f7);
+  border: 1px dashed var(--line2);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--ink, #2a2723);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 132px;
+  overflow-y: auto;
+}
 @media (max-width: 720px) {
   .v4-app .ingest-list li { grid-template-columns: 76px 1fr auto; }
   .v4-app .ingest-list li span:nth-child(2) { display: none; }
   .v4-app .ingest-diag .param { flex-direction: column; gap: 2px; }
   .v4-app .ingest-diag .param b { font-size: 11px; }
+  .v4-app .ingest-sample { font-size: 10px; max-height: 110px; }
 }
 .v4-app .pipe-bar {
   display: flex;

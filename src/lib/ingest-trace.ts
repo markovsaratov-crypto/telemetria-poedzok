@@ -42,6 +42,9 @@ export interface IngestAttempt {
   points: number; // принято точек
   dropped: number; // отброшено по accuracy
   bytes: number | null; // размер тела запроса
+  // v2.10.7: образец структуры payload для нераспознанных батчей (no_gps/empty/invalid) —
+  // показывает, ПОД КАКИМИ КЛЮЧАМИ лежат данные, чтобы расширить парсер.
+  sample?: string | null;
 }
 
 export interface IngestTrace {
@@ -103,7 +106,7 @@ export async function readIngestTrace(): Promise<IngestTrace> {
     const parsed = JSON.parse(String(row.value)) as Partial<IngestTrace>;
     const recent = (Array.isArray(parsed.recent) ? parsed.recent : []).filter(
       (r) => r && typeof r.at === "string" && typeof r.outcome === "string"
-    );
+    ) as IngestAttempt[];
     return {
       last: parsed.last ?? recent[0] ?? null,
       recent: recent.slice(0, MAX_RECENT),

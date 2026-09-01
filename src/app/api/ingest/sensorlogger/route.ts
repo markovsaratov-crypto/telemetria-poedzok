@@ -16,20 +16,30 @@ import { randomUUID } from "crypto";
 
 const SESSION_GAP_MS = 60_000; // 60с gap = новая сессия
 
+interface RawLocation {
+  latitude?: number;
+  longitude?: number;
+  lat?: number;
+  lon?: number;
+  lng?: number;
+  speed?: number;
+  altitude?: number;
+  horizontalAccuracy?: number;
+  accuracy?: number;
+  course?: number;
+  bearing?: number;
+  heading?: number;
+}
+
 interface RawPoint {
-  time?: number;
-  timestamp?: number;
-  location?: {
-    latitude?: number;
-    longitude?: number;
-    speed?: number;
-    altitude?: number;
-    horizontalAccuracy?: number;
-    verticalAccuracy?: number;
-    course?: number;
-    bearing?: number;
-    heading?: number;
-  };
+  time?: number | string;
+  timestamp?: number | string;
+  // v2.10.7: альтернативные контейнеры — приложения кладут координаты
+  // не только в location (SensorLogger-клоны: coords/position/gps)
+  location?: RawLocation;
+  coords?: RawLocation;
+  position?: RawLocation;
+  gps?: RawLocation;
   // Плоские fallback-поля
   latitude?: number;
   lat?: number;
@@ -56,20 +66,30 @@ interface NormalizedPoint {
 }
 
 function extractPoint(raw: RawPoint): NormalizedPoint | null {
-  const loc = raw.location || {};
-  const lat = raw.latitude ?? raw.lat ?? loc.latitude;
-  const lon = raw.longitude ?? raw.lon ?? raw.lng ?? loc.longitude;
+  // v2.10.7: контейнер координат — любой из известных (location/coords/position/gps)
+  const loc: RawLocation = raw.location ?? raw.coords ?? raw.position ?? raw.gps ?? {};
+  const lat = raw.latitude ?? raw.lat ?? loc.latitude ?? loc.lat;
+  const lon = raw.longitude ?? raw.lon ?? raw.lng ?? loc.longitude ?? loc.lon ?? loc.lng;
   if (lat == null || lon == null || isNaN(Number(lat)) || isNaN(Number(lon))) return null;
+  // Sensor Logger-маркеры «нет GPS-фикса»: lat=-1, lon=-1 (§3.3 методологии) — фильтруем
+  if (Number(lat) === -1 && Number(lon) === -1) return null;
 
   const tsRaw = raw.time ?? raw.timestamp;
   if (tsRaw == null) return null;
-  const ts = Number(tsRaw);
-  // нс → мс, мс → мс, с → мс
-  const timestampMs = ts > 1e15 ? Math.floor(ts / 1e6) : ts > 1e12 ? ts : ts > 1e9 ? ts * 1000 : Date.now();
+  // v2.10.7: ISO-строки («2026-09-01T07:53:26.490Z») раньше давали NaN → Date.now()
+  let timestampMs: number;
+  if (typeof tsRaw === "string" && tsRaw.length >= 10) {
+    const iso = Date.parse(tsRaw);
+    timestampMs = isNaN(iso) ? Date.now() : iso;
+  } else {
+    const ts = Number(tsRaw);
+    // нс → мс, мс → мс, с → мс
+    timestampMs = ts > 1e15 ? Math.floor(ts / 1e6) : ts > 1e12 ? ts : ts > 1e9 ? ts * 1000 : Date.now();
+  }
 
   const speed = raw.speed ?? loc.speed ?? null;
   const altitude = raw.altitude ?? loc.altitude ?? null;
-  const accuracy = raw.horizontalAccuracy ?? raw.accuracy ?? loc.horizontalAccuracy ?? null;
+  const accuracy = raw.horizontalAccuracy ?? raw.accuracy ?? loc.horizontalAccuracy ?? loc.accuracy ?? null;
   const bearing = raw.course ?? raw.bearing ?? raw.heading ?? loc.course ?? loc.bearing ?? loc.heading ?? null;
 
   return {
@@ -81,6 +101,69 @@ function extractPoint(raw: RawPoint): NormalizedPoint | null {
     bearing: bearing != null && Number(bearing) >= 0 && Number(bearing) <= 360 ? Number(bearing) : null,
     timestampMs,
   };
+}
+
+// v2.10.7: извлечение массива точек из тела запроса. Кроме корневого массива и
+// {points:[]}, некоторые сборки SensorLogger кладут батч под data/records/samples/
+// locations/entries/batches — или сенсоры по типам: {data:{location:[...]}}.
+// Возвращает null, если подходящего массива не найдено (→ sample-диагностика).
+const ARRAY_KEYS = ["points", "data", "records", "samples", "locations", "entries", "batches"] as const;
+
+function extractItems(body: unknown): RawPoint[] | null {
+  if (Array.isArray(body)) return body as RawPoint[];
+  if (body && typeof body === "object") {
+    const obj = body as Record<string, unknown>;
+    for (const key of ARRAY_KEYS) {
+      const v = obj[key];
+      if (Array.isArray(v)) {
+        // явно пустой батч ({"points":[]}) → outcome «empty», не «no_gps»
+        if (v.length === 0) return [];
+        // batches может быть массивом массивов — flatten один уровень
+        if (Array.isArray(v[0])) {
+          return (v as unknown[][]).flat() as RawPoint[];
+        }
+        return v as RawPoint[];
+      }
+    }
+    // {data:{location:[...], accelerometer:[...]}} — сенсоры по типам.
+    // Вложенный контейнер часто в ед. числе (location/gps/position/coords),
+    // поэтому список шире, чем ARRAY_KEYS верхнего уровня.
+    const data = obj.data;
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      const nested = data as Record<string, unknown>;
+      for (const key of [...ARRAY_KEYS, "location", "gps", "position", "coords"] as const) {
+        const v = nested[key];
+        if (Array.isArray(v) && v.length > 0) return v as RawPoint[];
+      }
+    }
+    return [body as RawPoint];
+  }
+  return null;
+}
+
+// v2.10.7: образец структуры payload для нераспознанных батчей — показывает,
+// под какими ключами лежат данные. Обрезаем до 300 символов, приватные данные
+// владельца в его же диагностике — приемлемо; полные координаты не светим.
+function describePayloadShape(body: unknown): string {
+  try {
+    const brief = (x: unknown, n: number): string => {
+      const s = JSON.stringify(x);
+      return s.length > n ? s.slice(0, n) + "…" : s;
+    };
+    if (Array.isArray(body)) {
+      const first = body[0];
+      const keys =
+        first && typeof first === "object" ? Object.keys(first as object).join(",") : typeof first;
+      return `массив[${body.length}], keys=[${keys}], first=${brief(first, 240)}`;
+    }
+    if (body && typeof body === "object") {
+      const keys = Object.keys(body as object).join(",");
+      return `объект, keys=[${keys}], ${brief(body, 240)}`;
+    }
+    return `${typeof body}: ${brief(body, 120)}`;
+  } catch {
+    return "не удалось сериализовать";
+  }
 }
 
 async function createRecordingSession(deviceId: string, deviceName: string, firstTsMs: number): Promise<string> {
@@ -149,23 +232,23 @@ export async function POST(request: NextRequest) {
     }
     const deviceName = url.searchParams.get("deviceName") || "SensorLogger";
 
-    // 3. Parse body — массив (SensorLogger) или объект с points (наш формат)
+    // 3. Parse body — массив (SensorLogger) или объект с массивом точек в известном контейнере
     const body = await request.json().catch(() => null);
     if (!body) {
       return json({ error: "Invalid JSON body" }, 400, { "X-Request-Id": requestId });
     }
-    const items: RawPoint[] = Array.isArray(body)
-      ? body
-      : Array.isArray((body as { points?: unknown[] }).points)
-        ? (body as { points: RawPoint[] }).points
-        : [body as RawPoint];
-    if (items.length === 0) {
+    // v2.10.7: extractItems ищет массив точек в известных контейнерах (points/data/
+    // records/samples/locations/entries/batches, {data:{location:[...]}})
+    const items = extractItems(body);
+    if (!items || items.length === 0) {
       // SensorLogger "Test Push" шлёт пустой/минимальный body — считаем тест успешным
       // DIAG-1: «тихий успех» для приложения — трассируем, чтобы отличить от реальной отправки
       recordIngestAttempt({
         at: new Date().toISOString(), route: "sensorlogger", deviceId,
         outcome: "empty", points: 0, dropped: 0,
         bytes: Buffer.byteLength(JSON.stringify(body ?? null)),
+        // v2.10.7: образец структуры — в админке L1 видно, что именно прислало приложение
+        sample: describePayloadShape(body),
       });
       return json({ ok: true, test: true, message: "SensorLogger push test passed. Ready to receive GPS data.", deviceId, deviceName }, 200, { "X-Request-Id": requestId });
     }
@@ -200,9 +283,19 @@ export async function POST(request: NextRequest) {
         outcome: droppedInaccurate > 0 ? "dropped_all" : "no_gps",
         points: 0, dropped: droppedInaccurate,
         bytes: Buffer.byteLength(JSON.stringify(body)),
+        // v2.10.7: образец структуры батча — видно, ПОД КАКИМИ ключами лежат данные,
+        // если парсер не угадал формат приложения (кейс 01.09: 5×28КБ no_gps)
+        sample: describePayloadShape(body),
       });
       return json(
-        { ok: true, test: true, message: "No GPS points extracted from batch (missing location data). Push test passed.", deviceId, deviceName },
+        {
+          ok: true,
+          test: true,
+          message: "No GPS points extracted from batch (missing location data). Push test passed.",
+          deviceId,
+          deviceName,
+          payloadShape: describePayloadShape(body),
+        },
         200,
         { "X-Request-Id": requestId }
       );

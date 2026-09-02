@@ -33,8 +33,10 @@ const SESSION_COOKIE_NAME = sessionCookieName();
 const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics", "/api/share"]; // P1-9: /api/share — публичный по спеке
 // GET /api/sessions/<id>/share?token= — публичный доступ по спеке (матрица §7); P1-9
 const SHARE_GET_RE = /^\/api\/sessions\/[^/]+\/share$/;
-// v2.14.1: точные дешёвые GET-чтения вкладки «Поездки» (статы одной записи).
+// v2.14.1→2.14.2: точные GET-чтения UI (статы/events/track одной записи).
 const SESSION_STATS_RE = /^\/api\/sessions\/[^/]+\/stats$/;
+const SESSION_EVENTS_RE = /^\/api\/sessions\/[^/]+\/events$/;
+const SESSION_TRACK_RE = /^\/api\/sessions\/[^/]+\/track$/;
 const ADMIN_PATHS = ["/api/admin/"];
 const WORKER_PATHS = ["/api/worker/"];
 
@@ -58,14 +60,21 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
   }
   if (pathname === "/api/admin/requeue") return { limit: e.RATE_LIMIT_MAX_REQUEUE, windowSec: 60, scope: "admin:requeue" }; // P1-11: спека §7.3 — 10/мин
   if (pathname === "/api/audit") return { limit: e.RATE_LIMIT_MAX_AUDIT, windowSec: 60, scope: "audit" };
-  // v2.14.1: «read»-скоп — дешёвые GET-чтения списка поездок: /api/sessions (список),
-  // /api/sessions/{id}/stats (статы записи; склейка Ф1 шлёт их пачкой по всем записям группы),
-  // /api/geocode/reverse (адреса финиша). Вместе с ретраями react-query всплеск превышал
-  // default 60/мин (429 «Повторите через 1 мин», статы карточек «—»). Тяжёлые чтения
-  // (track/events) и мутации остаются в default-скопе.
+  // v2.14.1: «read»-скоп — GET-чтения собственного UI. Открытие вкладок «Аналитика»
+  // (период-агрегат: stats+events+track по ≤30 сессиям) и «Поездки» (статы каждой записи
+  // группы + геокоды) — до ~90 запросов всплеском; вместе с ретраями react-query они
+  // выбивали default 60/мин (429 «Повторите через 1 мин», статы карточек «—»).
+  // v2.14.2: events/track добавлены в read-скоп — период-агрегат аналитики качает их
+  // пачкой по определению (G-G и карта периода); параллелизм ограничен клиентским
+  // семафором api-client (6 GET), так что серверная память под контролем.
+  // Мутации и прочие роуты — в default-скопе как было.
   if (
     method === "GET" &&
-    (pathname === "/api/sessions" || SESSION_STATS_RE.test(pathname) || pathname === "/api/geocode/reverse")
+    (pathname === "/api/sessions" ||
+      SESSION_STATS_RE.test(pathname) ||
+      SESSION_EVENTS_RE.test(pathname) ||
+      SESSION_TRACK_RE.test(pathname) ||
+      pathname === "/api/geocode/reverse")
   ) {
     return { limit: e.RATE_LIMIT_MAX_READ, windowSec: 60, scope: "read" };
   }

@@ -70,17 +70,51 @@ export function humanizeRetryAfter(sec: number): string {
   return m > 0 ? `${h} ч ${m} мин` : `${h} ч`;
 }
 
+// v2.14.2: семафор параллелизма GET-запросов (FIFO, 6 одновременных).
+// Вкладка «Аналитика» (период-агрегат: stats+events+track по ≤30 сессиям = до 90 GET)
+// и «Поездки» (статы каждой записи группы) выпускают десятки параллельных GET:
+// на 512 МБ инстансе это пик памяти (каждый роут грузит все точки сессии) и
+// выбивание rate-limit. Семафор не меняет семантику — только темп: очередь ждёт
+// своей очереди, слот освобождается в finally (ошибки/таймауты не «утекают»).
+const GET_CONCURRENCY = 6;
+let getActive = 0;
+const getWaiters: Array<() => void> = [];
+
+function acquireGetSlot(): Promise<void> {
+  if (getActive < GET_CONCURRENCY) {
+    getActive++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    getWaiters.push(() => {
+      getActive++;
+      resolve();
+    });
+  });
+}
+
+function releaseGetSlot(): void {
+  getActive = Math.max(0, getActive - 1);
+  const next = getWaiters.shift();
+  if (next) next();
+}
+
 async function apiFetch<T = unknown>(
   path: string,
   opts: FetchOpts = {}
 ): Promise<T> {
-  const { query, raw, expect = "json", headers, ...rest } = opts;
+  const { query, raw, expect = "json", headers, method, ...rest } = opts;
   const url = buildUrl(path, query);
+
+  // v2.14.2: GET (в т.ч. raw-загрузки) — через семафор; мутации — без ограничений.
+  const isGet = (method || "GET").toUpperCase() === "GET";
+  if (isGet) await acquireGetSlot();
 
   let res: Response;
   try {
     res = await fetch(url, {
       ...rest,
+      method,
       headers: {
         Accept: "application/json",
         ...(headers || {}),
@@ -92,6 +126,8 @@ async function apiFetch<T = unknown>(
       description: err instanceof Error ? err.message : "Не удалось связаться с сервером",
     });
     throw new ApiError("Network error", 0);
+  } finally {
+    if (isGet) releaseGetSlot();
   }
 
   const requestId = res.headers.get("x-request-id") || undefined;

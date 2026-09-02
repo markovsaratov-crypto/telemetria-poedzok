@@ -748,10 +748,23 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
 // Additional methods needed by API routes
 
 // gpsPoint.count
+// v2.12.0 (D-1): поддержан relation-фильтр where.session.deletedAt = null —
+// «точки только ЖИВЫХ сессий» (раньше считались все строки GpsPoint, включая
+// осиротевшие точки софт-делетнутых сессий → счётчик в админке расходился
+// с суммой по поездкам).
 (db as any).gpsPoint.count = async (args?: { where?: Record<string, unknown> }) => {
   let sql = "SELECT COUNT(*) as count FROM GpsPoint";
   const params: unknown[] = [];
-  if (args?.where?.sessionId) { sql += " WHERE sessionId = ?"; params.push(args.where.sessionId); }
+  const w = args?.where ?? {};
+  if (w.sessionId != null) {
+    sql += " WHERE sessionId = ?";
+    params.push(w.sessionId);
+    if ((w.session as { deletedAt?: unknown } | undefined)?.deletedAt === null) {
+      sql += " AND sessionId IN (SELECT id FROM Session WHERE deletedAt IS NULL)";
+    }
+  } else if ((w.session as { deletedAt?: unknown } | undefined)?.deletedAt === null) {
+    sql += " WHERE sessionId IN (SELECT id FROM Session WHERE deletedAt IS NULL)";
+  }
   const result = await libsql.execute({ sql, args: params as InValue[] });
   return Number((result.rows[0] as Record<string, unknown>).count);
 };

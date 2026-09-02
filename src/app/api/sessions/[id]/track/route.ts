@@ -7,6 +7,10 @@ import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { haversineM } from "@/lib/geo";
+import { normalizeSessionSpeeds } from "@/lib/kpi";
+
+// v2.13.0 (Ф6): пороги резкости — §7.1/§7.2 (10 км/ч/с = 2,78 м/с²); раньше 10 м/с² (≈1g)
+const HARSH_THRESHOLD_MS2 = 10 / 3.6;
 
 // Пороги скоростных бакетов для цветовых сегментов (§7 методологии)
 const SPEED_BUCKETS = [
@@ -17,12 +21,6 @@ const SPEED_BUCKETS = [
   { max: 100, color: "#8b5cf6", label: "80–100" },
   { max: 999, color: "#dc2626", label: "100+" },
 ];
-
-function colorForSpeed(v: number | null): string {
-  if (v === null) return "#9ca3af";
-  for (const b of SPEED_BUCKETS) if (v <= b.max) return b.color;
-  return "#dc2626";
-}
 
 export async function GET(
   request: NextRequest,
@@ -51,11 +49,25 @@ export async function GET(
     const startLat = points[0].lat;
     const startLng = points[0].lon;
 
+    // v2.13.0 (Ф6): normalizeSessionSpeeds (AUDIT B-4) — как в /stats и /events.
+    // Сырое поле speed бывает битым (запись с пиком 166 км/ч имела speed ≤ 20 км/ч) —
+    // весь трек окрашивался в «0–20». Теперь скорость согласована с геометрией.
+    const rawNorm = session.gpsPoints.map((p) => ({
+      lat: p.lat,
+      lon: p.lon,
+      timestamp: Number(p.timestamp),
+      speed: p.speed,
+      bearing: p.bearing,
+      accuracy: p.accuracy,
+      altitude: p.altitude,
+    }));
+    const normPoints = normalizeSessionSpeeds(rawNorm);
+
     // Компактный массив точек: [t_sec, lat, lng, v_ms, alt, st(0/1), brg]
     // st = 1 если moving (v > 0.5 м/с), иначе 0
-    const trackPoints = points.map((p, i) => {
+    const trackPoints = normPoints.map((p, i) => {
       const t = Math.round((Number(p.timestamp) - startMs) / 1000);
-      const v = p.speed ?? 0;
+      const v = p.speed ?? 0; // м/с, нормализованная (AUDIT B-4)
       return {
         i,
         t,
@@ -69,15 +81,25 @@ export async function GET(
       };
     });
 
+    // v2.13.0 (Ф6): пороги бакетов — КМ/Ч (как в легенде и скоростном профиле §5.3);
+    // раньше v (м/с) сравнивалась с числами 20/40/60/… — сдвиг в 3,6×.
+    const colorForSpeedKmh = (kmh: number | null): string => {
+      if (kmh === null) return "#9ca3af";
+      for (const b of SPEED_BUCKETS) if (kmh <= b.max) return b.color;
+      return "#dc2626";
+    };
+
     // Цветовые сегменты по скорости — группа последовательных точек с одним цветом
+    // v2.13.0 (Ф6): цвет — по КМ/Ч нормализованной скорости
     const segments: { color: string; bucket: string; points: { lat: number; lng: number }[]; startIndex: number; endIndex: number }[] = [];
-    let currentColor = colorForSpeed(trackPoints[0].v);
+    const kmhOf = (p: (typeof trackPoints)[number]) => p.v != null ? p.v * 3.6 : null;
+    let currentColor = colorForSpeedKmh(kmhOf(trackPoints[0]));
     let currentBucket = SPEED_BUCKETS.find((b) => b.color === currentColor)?.label ?? "?";
     let currentPoints: { lat: number; lng: number }[] = [{ lat: trackPoints[0].lat, lng: trackPoints[0].lng }];
     let startIndex = 0;
 
     for (let i = 1; i < trackPoints.length; i++) {
-      const c = colorForSpeed(trackPoints[i].v);
+      const c = colorForSpeedKmh(kmhOf(trackPoints[i]));
       if (c === currentColor) {
         currentPoints.push({ lat: trackPoints[i].lat, lng: trackPoints[i].lng });
       } else {
@@ -101,15 +123,17 @@ export async function GET(
       }
     }
 
-    // Точки резких торможений (|dv| > 10 м/с² за 1 сек)
+    // Точки резких торможений/разгонов — v2.13.0 (Ф3/Ф6): нормализованные м/с,
+    // порог §7.1/§7.2 = 10 км/ч/с (2,78 м/с²); раньше 10 м/с² ≈ 1g — кольца
+    // «резкое торможение» на карте почти не появлялись.
     const harshPoints: { lat: number; lng: number; type: "braking" | "acceleration"; dv: number; idx: number; t: number }[] = [];
     for (let i = 2; i < trackPoints.length - 2; i++) {
       const v0 = trackPoints[i - 2].v;
       const v1 = trackPoints[i + 2].v;
       const dt = (trackPoints[i + 2].t - trackPoints[i - 2].t);
-      if (dt === 0) continue;
-      const accel = (v1 - v0) / dt;
-      if (Math.abs(accel) > 10) {
+      if (v0 == null || v1 == null || dt === 0) continue;
+      const accel = (v1 - v0) / dt; // м/с²
+      if (Math.abs(accel) > HARSH_THRESHOLD_MS2) {
         harshPoints.push({
           lat: trackPoints[i].lat,
           lng: trackPoints[i].lng,

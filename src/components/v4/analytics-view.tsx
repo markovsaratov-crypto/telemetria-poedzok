@@ -43,7 +43,7 @@ import {
   type RouteComparisonData,
   type RouteTrendData,
 } from "@/lib/hooks";
-import { useV4Track, useV4Events, usePeriodStats, type PeriodAggregate } from "@/lib/v4-hooks";
+import { useV4Track, useV4Events, usePeriodStats, useSpeedRecord, type PeriodAggregate } from "@/lib/v4-hooks";
 import type { TrackResponse, EventsResponse } from "@/lib/api-client";
 import { bindTips } from "./use-v4-tipbox";
 import { GaugeArc } from "./widgets/gauge-arc";
@@ -95,6 +95,11 @@ export function AnalyticsView({ period, sessionId }: Props) {
   // Активен, когда конкретная поездка не выбрана (клик по period-pill).
   // Выбор конкретной поездки в dropdown → только её данные (режим ниже).
   const periodAgg = usePeriodStats(period);
+  // v2.13.0 (Ф1): §4.5 MaxSpeedAllTime — один запрос на приложение (кэш 5 мин)
+  const speedRecord = useSpeedRecord();
+  const record = speedRecord.data
+    ? { kmh: speedRecord.data.maxSpeedAllTimeKmh, date: speedRecord.data.date }
+    : undefined;
 
   const rootRef = React.useRef<HTMLDivElement>(null);
 
@@ -146,7 +151,7 @@ export function AnalyticsView({ period, sessionId }: Props) {
     return (
       <div ref={rootRef}>
         <PeriodHeader agg={agg} period={period} />
-        <KpiBlock stats={agg.stats} period={period} aggregated />
+        <KpiBlock stats={agg.stats} period={period} record={record} aggregated />
         <DrivingScoreBlock stats={agg.stats} events={agg.events} aggregated />
         <SpeedProfileBlock stats={agg.stats} aggregated />
         <PlanFactBlock stats={agg.stats} comparison={null} aggregated />
@@ -193,7 +198,7 @@ export function AnalyticsView({ period, sessionId }: Props) {
         endLat={sessionMeta?.endLat ?? null}
         endLon={sessionMeta?.endLon ?? null}
       />
-      <KpiBlock stats={stats.data} period={period} />
+      <KpiBlock stats={stats.data} period={period} record={record} />
       <DrivingScoreBlock stats={stats.data} events={events.data} />
       <SpeedProfileBlock stats={stats.data} />
       <PlanFactBlock stats={stats.data} comparison={comparison.data} />
@@ -443,10 +448,13 @@ function SessionHeader({
 function KpiBlock({
   stats,
   period,
+  record,
   aggregated = false,
 }: {
   stats: SessionStats | null | undefined;
   period: PeriodKey;
+  // v2.13.0 (Ф1): §4.5 MaxSpeedAllTime из /api/stats/speed-record (кэш 5 мин)
+  record?: { kmh: number | null; date: string | null } | undefined;
   aggregated?: boolean;
 }) {
   // Compute KPI values from live stats.
@@ -472,6 +480,12 @@ function KpiBlock({
   const at = stats?.methodology?.activeTrip;
   const tailsSec =
     at?.hasActiveTrip ? Math.max(0, at.preTripIdle + at.postTripIdle) : 0;
+
+  // v2.13.0 (Ф1): §4.5 MaxSpeedAllTime — живое значение вместо захардкоженного «—».
+  const recordKmh = record?.kmh;
+  const recordDateLabel = record?.date
+    ? new Date(record.date).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })
+    : null;
 
   return (
     <section>
@@ -526,10 +540,10 @@ function KpiBlock({
         />
         <KpiCard
           label="Рекорд скорости"
-          tip="Рекорд скорости за всё время (§4.5 MaxSpeedAllTime): максимум по всем вашим записям за всё время | Ваш личный рекорд — сравните с сегодняшним максимумом"
-          value="—"
+          tip={`Рекорд скорости за всё время (§4.5 MaxSpeedAllTime): максимум по всем вашим записям за всё время, с той же фильтрацией GPS-выбросов, что и «Макс. скорость»${recordDateLabel ? ` | Установлен ${recordDateLabel}` : ""} | Ваш личный рекорд — сравните с максимумом выбранного периода/поездки слева`}
+          value={recordKmh != null ? fmtNum(recordKmh, 1) : "—"}
           unit="км/ч"
-          trend={["—", "neu"]}
+          trend={[recordDateLabel ?? "—", "neu"]}
           sparkData={sparkData}
           color="#7B4B9E"
           variant="k-violet"
@@ -639,7 +653,7 @@ function DrivingScoreBlock({
   events: EventsResponse | null | undefined;
   aggregated?: boolean;
 }) {
-  void aggregated; // подписка блока на режим (период-агрегат) — данные уже агрегированы вызывающим
+  void aggregated; // v2.13.0 (Ф4): aggregated теперь используется (planTrips) — строка оставлена как маркер режима
   // Canonical CAP value + breakdown from stats.methodology.ecoScore.
   // /stats endpoint computes EcoScore with corpus-calibrated baselines (median of
   // all sessions + 1.2x margin for small corpus per §7.3). Fallback to count-based
@@ -704,19 +718,25 @@ function DrivingScoreBlock({
     activeTrip?.hasActiveTrip && activeTrip.activeDuration > 0
       ? activeTrip.activeDuration
       : stats?.duration;
+  // v2.13.0 (Ф4): §6.3 TimeSavingIndex — среднее НА ПОЕЗДКУ. В период-режиме делим
+  // на число записей с планом (planTripCount из агрегата; нулевые планы 2ГИС не
+  // считаются). Раньше подпись «мин/поездку» показывала НЕДЕЛЁННУЮ сумму (−39,7).
+  const hasPlan = planDurationSec != null && planDurationSec > 0;
+  const planTrips = aggregated && stats?.route?.planTripCount && stats.route.planTripCount > 0 ? stats.route.planTripCount : 1;
   const eff = React.useMemo(() => {
-    if (planDurationSec != null && actualDuration != null && planDurationSec > 0) {
-      return (actualDuration - planDurationSec) / 60;
+    if (hasPlan && actualDuration != null) {
+      return (actualDuration - (planDurationSec as number)) / 60 / planTrips;
     }
     // No plan — neutral efficiency.
     return 0;
-  }, [planDurationSec, actualDuration]);
+  }, [hasPlan, planDurationSec, actualDuration, planTrips]);
+  // Суммарное отклонение за период — для строки «отклонение (всего)» в rows.
+  const effTotalMin = hasPlan && actualDuration != null ? (actualDuration - (planDurationSec as number)) / 60 : null;
 
   const ez = effZone(eff);
   const effPct = effToGaugePct(eff);
   // v2.12.0 (D-5): нет плана — «—» и нейтральная подпись (раньше «−0,0 мин/поездку»
   // при план/факт «—» выглядело как нулевая экономия)
-  const hasPlan = planDurationSec != null && planDurationSec > 0;
   const effBigValue = hasPlan
     ? `${eff > 0 ? "+" : "−"}${Math.abs(eff).toFixed(1).replace(".", ",")}`
     : "—";
@@ -786,7 +806,10 @@ function DrivingScoreBlock({
           note={
             <>
               Шкала: 0 в центре, левее — экономия (слива), правее — перерасход (алый). Отклонение =
-              (ActiveDuration − PlanDuration)/60 за поездку — стоянки-«хвосты» записи не учитываются.
+              (ActiveDuration − PlanDuration)/60 — стоянки-«хвосты» записи не учитываются.
+              {aggregated && hasPlan && planTrips > 1 && effTotalMin != null
+                ? ` За период — среднее на поездку: Σ отклонение ${(effTotalMin > 0 ? "+" : "−") + Math.abs(effTotalMin).toFixed(1).replace(".", ",")} мин делится на ${planTrips} ${pluralRu(planTrips, ["поездку", "поездки", "поездок"])} с планом.`
+                : ""}
               {!hasPlan ? " Для этой записи план маршрута не рассчитан — сравнение с планом недоступно." : ""}
             </>
           }
@@ -808,13 +831,15 @@ function DrivingScoreBlock({
               valueColor: eff > 0 ? "var(--red)" : "var(--plum)",
             },
             {
-              label: "отклонение",
+              label: aggregated ? "отклонение (всего)" : "отклонение",
               tip: hasPlan
-                ? `Отклонение факта от плана: ${eff > 0 ? "перерасход" : "экономия"} ${Math.abs(eff).toFixed(1)} мин (${stats?.route?.durationDeviationPct ?? 0}%)`
+                ? aggregated
+                  ? `Суммарное отклонение факта от плана за период: ${effTotalMin != null ? (effTotalMin > 0 ? "перерасход" : "экономия") + " " + Math.abs(effTotalMin).toFixed(1).replace(".", ",") + " мин" : "—"}; в среднем ${Math.abs(eff).toFixed(1).replace(".", ",")} мин/поездку (${stats?.route?.durationDeviationPct ?? 0}%)`
+                  : `Отклонение факта от плана: ${eff > 0 ? "перерасход" : "экономия"} ${Math.abs(eff).toFixed(1)} мин (${stats?.route?.durationDeviationPct ?? 0}%)`
                 : "План маршрута не рассчитан — отклонение недоступно",
-              barPct: hasPlan ? Math.min(100, Math.abs(eff) * 20) : 0,
+              barPct: hasPlan ? Math.min(100, Math.abs(effTotalMin ?? eff) * 20) : 0,
               barColor: eff > 0 ? "var(--red)" : "var(--plum)",
-              value: hasPlan ? `${effBigValue} мин` : "—",
+              value: hasPlan ? `${effTotalMin != null ? (effTotalMin > 0 ? "+" : "−") + Math.abs(effTotalMin).toFixed(1).replace(".", ",") : effBigValue} мин` : "—",
               valueColor: hasPlan ? (eff > 0 ? "var(--red)" : "var(--plum)") : "var(--faint)",
             },
           ]}
@@ -1058,7 +1083,15 @@ function PlanFactBlock({
   // Поэтому все производные значения — через optional chaining, а useMemo хранит
   // пустой массив если stats ещё не загружен.
   const route = stats?.route;
-  const actualDurSec = stats?.duration ?? 0;
+  // v2.13.0 (Ф4): FIX-C2 доведён до блока 04 — «факт» = ActiveDuration (§4.11),
+  // как в gauge «Эффективность», в API computePlanFact и в tooltip §6.3, который
+  // и раньше обещал «факт — активная поездка». Раньше hero «+105 мин» (полная
+  // запись со стоянками) противоречил «−39,7 мин» (активная) на одном экране.
+  const pfActiveTrip = stats?.methodology?.activeTrip;
+  const actualDurSec =
+    pfActiveTrip?.hasActiveTrip && pfActiveTrip.activeDuration > 0
+      ? pfActiveTrip.activeDuration
+      : (stats?.duration ?? 0);
   const planDurSec = route?.planDurationSec ?? null;
   let dtMin: number | null = null;
   if (planDurSec != null && planDurSec > 0) {
@@ -1087,7 +1120,7 @@ function PlanFactBlock({
   const cmpPercentile = comparison?.percentile ?? null;
   const cmpTrend = comparison?.trend;
   const trendWord = cmpTrend?.rating === "improving" ? "улучшающийся" : cmpTrend?.rating === "degrading" ? "ухудшающийся" : cmpTrend?.rating === "stable" ? "стабильный" : "недостаточно данных";
-  const trendSlopeWord = cmpTrend?.slope == null ? "—" : (cmpTrend.slope > 0 ? "+" : cmpTrend.slope < 0 ? "−" : "±") + Math.abs(cmpTrend.slope).toString().replace(".", ",");
+  const trendSlopeWord = cmpTrend?.slope == null ? "—" : (cmpTrend.slope > 0 ? "+" : cmpTrend.slope < 0 ? "−" : "±") + fmtNum(Math.abs(cmpTrend.slope), 2);
 
   const planSpeedKmh = planDurSec != null && route?.planDistanceM != null && planDurSec > 0
     ? (route.planDistanceM / planDurSec) * 3.6
@@ -1178,7 +1211,8 @@ function PlanFactBlock({
               {heroVal} <span className="unit">мин</span>
             </div>
             <div className="pf-sub">
-              {dtPct != null ? `${dtPct.toFixed(1).replace(".", ",")}% к плану` : "нет данных о плане"}{" "}
+              {/* v2.13.0 (Ф5): 2 знака у процентов */}
+              {dtPct != null ? `${fmtNum(dtPct, 2)}% к плану` : "нет данных о плане"}{" "}
               <span className={`chip ${heroChip}`}>{heroLabel}</span>
             </div>
           </div>
@@ -1190,7 +1224,8 @@ function PlanFactBlock({
                 Откл. по дистанции
               </span>
               <b className={distDevPct == null ? "c-faint" : Math.abs(distDevPct) <= 2 ? "c-amber" : distDevPct > 0 ? "c-red" : "c-plum"}>
-                {distDevPct == null ? "—" : `${distDevPct > 0 ? "+" : ""}${distDevPct.toString().replace(".", ",")}%`}
+                {/* v2.13.0 (Ф5): 2 знака после запятой (владелец) — раньше сырой toString давал «-5,987384005838807%» */}
+                {distDevPct == null ? "—" : `${distDevPct > 0 ? "+" : ""}${fmtNum(distDevPct, 2)}%`}
               </b>
             </div>
             <div className="pf-mini">
@@ -1200,7 +1235,8 @@ function PlanFactBlock({
                 Откл. по скорости
               </span>
               <b className={spdDevPct == null ? "c-faint" : Math.abs(spdDevPct) <= 2 ? "c-amber" : spdDevPct > 0 ? "c-plum" : "c-red"}>
-                {spdDevPct == null ? "—" : `${spdDevPct > 0 ? "+" : ""}${spdDevPct.toString().replace(".", ",")}%`}
+                {/* v2.13.0 (Ф5): 2 знака после запятой */}
+                {spdDevPct == null ? "—" : `${spdDevPct > 0 ? "+" : ""}${fmtNum(spdDevPct, 2)}%`}
               </b>
             </div>
             <div className="pf-mini">
@@ -1292,7 +1328,7 @@ function PlanFactBlock({
                 label="Перцентиль"
               />
               <Stat
-                value={cmpVsAvgPct != null ? `${cmpVsAvgPct > 0 ? "+" : ""}${cmpVsAvgPct.toString().replace(".", ",")}%` : "—"}
+                value={cmpVsAvgPct != null ? `${cmpVsAvgPct > 0 ? "+" : ""}${fmtNum(cmpVsAvgPct, 2)}%` : "—"}
                 cls={cmpVsAvgPct == null ? "c-faint" : cmpVsAvgPct <= 0 ? "c-plum" : "c-red"}
                 tip="Отклонение от среднего (§10.2): отрицательное — быстрее среднего, положительное — медленнее"
                 label="vs среднего"
@@ -1402,7 +1438,7 @@ function BehaviorBlock({
         <span className="sec-sub">
           {/* v2.12.0 (D-9): плюрализация «1 манёвр / 2 манёвра / 5 манёвров» */}
           {events
-            ? `${fmtNumber(maneuversCount)} ${pluralRu(maneuversCount, ["манёвр", "манёвра", "манёвров"])} · ${fmtInt(ggPointsCount)} ${pluralRu(ggPointsCount, ["точка", "точки", "точек"])} G-G · accelerationRMS ${accelRMS} м/с²`
+            ? `${fmtNumber(maneuversCount)} ${pluralRu(maneuversCount, ["манёвр", "манёвра", "манёвров"])} · ${fmtInt(ggPointsCount)} ${pluralRu(ggPointsCount, ["точка", "точки", "точек"])} G-G · accelerationRMS ${fmtNum(accelRMS, 2)} м/с²`
             : "загрузка событий…"}
         </span>
       </div>
@@ -1412,7 +1448,7 @@ function BehaviorBlock({
             Диаграмма манёвров
             <span
               className="help"
-              data-tip="Каждая точка — манёвр: по горизонтали боковое ускорение (longA/g), по вертикали продольное (разгон вверх, торможение вниз). Визуализация метрик §7.4 AccelerationRMS и §7.5 JerkRMS. Алые кольца — события резких торможений и разгонов (§7.1, §7.2). Внутри 0,4g — плавная езда. Источник: /events.gg.points[] (x=longA/g, y=latA/g)."
+              data-tip="Каждая точка — манёвр: по горизонтали боковое ускорение latA/g (влево — отрицательное, вправо — положительное), по вертикали продольное longA/g (разгон вверх, торможение вниз). Визуализация метрик §7.4 AccelerationRMS и §7.5 JerkRMS. Алые кольца — события резких торможений и разгонов (§7.1, §7.2). Внутри 0,4g — плавная езда. Источник: /events.gg.points[] (x=longA/g, y=latA/g, отрисовка — с поворотом осей: X экрана = latA, Y экрана = longA)."
             >
               ?
             </span>
@@ -2329,7 +2365,7 @@ function RouteComparison({ routeGroup }: { routeGroup: RouteGroupInfo }) {
           <div className="heat-title">Тренд времени · Theil-Sen</div>
           <RouteTrendSvg trend={data} />
           <p className="trend-cap">
-            Наклон <b>{slope > 0 ? "+" : slope < 0 ? "−" : "±"}{Math.abs(slope).toString().replace(".", ",")} сек/день</b> · 95% CI <b>{ciText ?? "—"}</b> — {trendWord} тренд. Пунктир — медианная регрессия, точки — поездки.
+            Наклон <b>{slope > 0 ? "+" : slope < 0 ? "−" : "±"}{fmtNum(Math.abs(slope), 1)} сек/день</b> · 95% CI <b>{ciText ?? "—"}</b> — {trendWord} тренд. Пунктир — медианная регрессия, точки — поездки.
           </p>
         </>
       )}

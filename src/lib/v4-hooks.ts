@@ -20,6 +20,21 @@ import {
 import { useSessions, type SessionStats } from "./hooks";
 import { type PeriodKey } from "./v4-utils";
 
+// /api/stats/speed-record — §4.5 MaxSpeedAllTime (v2.13.0 Ф1).
+export interface SpeedRecordResponse {
+  maxSpeedAllTimeKmh: number | null;
+  sessionId: string | null;
+  date: string | null;
+}
+export function useSpeedRecord() {
+  return useQuery<SpeedRecordResponse | null>({
+    queryKey: ["v4", "speed-record"],
+    queryFn: () => api.get<SpeedRecordResponse>("/api/stats/speed-record"),
+    staleTime: 300_000, // кэш сервера тоже 5 мин
+    retry: 1,
+  });
+}
+
 // /api/sessions/[id]/track — Leaflet polyline + segments + harsh points.
 export function useV4Track(sessionId: string | null) {
   return useQuery<TrackResponse | null>({
@@ -175,6 +190,9 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
   const planDurationSec = sum(routes.map((r) => r.planDurationSec));
   const trafficDurationSec = sum(routes.map((r) => r.trafficDurationSec));
   const timeLostToTrafficSec = sum(routes.map((r) => r.timeLostToTrafficSec));
+  // v2.13.0 (Ф4): знаменатель «мин/поездку» — только записи с реальным планом
+  // (planDurationSec > 0; нулевые планы 2ГИС для джиттер-сессий не считаются).
+  const planTripCount = routes.filter((r) => (r.planDurationSec ?? 0) > 0).length;
 
   const ecoScoreValue = wavg(
     m.map((x) => ({ v: x.ecoScore?.value ?? null, w: x.activeTrip?.activeDuration ?? 0 })) as Array<{ v: number | null; w: number }>
@@ -300,24 +318,38 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       trafficFetched: routes.some((r) => r.trafficFetched),
       trafficDurationSec,
       timeLostToTrafficSec,
+      // v2.13.0 (Ф5): 2 знака после запятой — раньше агрегат отдавал сырой float
+      // («-5,987384005838807%» в UI). Синхронно с pct() одиночной сессии.
       durationDeviationPct:
         // FIX-C2: факт = Σ активных длительностей (§6.2), а не полные записи
         planDurationSec > 0
-          ? ((activeDurTotal > 0 ? activeDurTotal : duration) - planDurationSec) / planDurationSec * 100
+          ? Math.round(((activeDurTotal > 0 ? activeDurTotal : duration) - planDurationSec) / planDurationSec * 10000) / 100
           : null,
       distanceDeviationPct:
-        planDistanceM > 0 ? ((distance - planDistanceM) / planDistanceM) * 100 : null,
+        planDistanceM > 0 ? Math.round((distance - planDistanceM) / planDistanceM * 10000) / 100 : null,
       speedDeviationPct: null,
+      // v2.13.0 (Ф4): для честного «мин/поездку» в gauge эффективности
+      planTripCount,
     },
   };
 }
 
+// v2.13.0 (Ф2): равномерный сэмпл вместо «первые N хронологически» — раньше
+// срез 3000 G-G точек описывал 16 августа при подписи «30 дней».
+function sampleUniform<T>(items: T[], max: number): T[] {
+  if (items.length <= max) return items;
+  const step = (items.length - 1) / (max - 1);
+  return Array.from({ length: max }, (_, i) => items[Math.round(i * step)]);
+}
+
+const round2 = (x: number) => Math.round(x * 100) / 100;
+
 function aggregateEvents(items: EventsResponse[]): EventsResponse {
   // Порядок входного массива уже хронологический (от вызывающего).
-  const maneuvers = items.flatMap((e) => e.maneuvers).slice(0, 4000);
-  const ggPoints = items.flatMap((e) => e.gg?.points ?? []).slice(0, 3000);
-  const harshEvents = items.flatMap((e) => e.harshEvents).slice(0, 2000);
-  const hscEvents = items.flatMap((e) => e.hscEvents).slice(0, 2000);
+  const maneuvers = sampleUniform(items.flatMap((e) => e.maneuvers), 4000);
+  const ggPoints = sampleUniform(items.flatMap((e) => e.gg?.points ?? []), 3000);
+  const harshEvents = sampleUniform(items.flatMap((e) => e.harshEvents), 2000);
+  const hscEvents = sampleUniform(items.flatMap((e) => e.hscEvents), 2000);
   return {
     sessionId: `period:${items.length}`,
     deviceId: "aggregate",
@@ -326,8 +358,10 @@ function aggregateEvents(items: EventsResponse[]): EventsResponse {
     harshEvents,
     hscEvents,
     summary: {
-      accelerationRMS: avg(items.map((e) => e.summary?.accelerationRMS ?? null)) ?? 0,
-      jerkRMS: avg(items.map((e) => e.summary?.jerkRMS ?? null)) ?? 0,
+      // v2.13.0 (Ф5): округление 2 знака — раньше сырой avg давал
+      // «accelerationRMS 0.48666666666666664 м/с²» в шапке блока 06.
+      accelerationRMS: round2(avg(items.map((e) => e.summary?.accelerationRMS ?? null)) ?? 0),
+      jerkRMS: round2(avg(items.map((e) => e.summary?.jerkRMS ?? null)) ?? 0),
       harshBraking: sum(items.map((e) => e.summary?.harshBraking ?? 0)),
       harshAcceleration: sum(items.map((e) => e.summary?.harshAcceleration ?? 0)),
       maneuvers: sum(items.map((e) => e.summary?.maneuvers ?? 0)),

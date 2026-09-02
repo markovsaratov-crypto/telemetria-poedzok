@@ -472,7 +472,8 @@ interface RoutePlanFact {
 }
 
 function PlanFactBlock({ r }: { r: RoutePlanFact }) {
-  const dev = (v: number | null) => (v == null ? "—" : `${v > 0 ? "+" : ""}${fmtNumber(v, 1)}%`);
+  // v2.13.0 (Ф5): отклонения — 2 знака после запятой (синхронно с v4-аналитикой)
+  const dev = (v: number | null) => (v == null ? "—" : `${v > 0 ? "+" : ""}${fmtNumber(v, 2)}%`);
   const devColor = (v: number | null) => (v == null ? "" : v > 10 ? "text-red-600 dark:text-red-400" : v > 0 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400");
   const items = [
     { icon: <RouteIcon className="h-3 w-3" />, label: "План · дистанция", value: r.planDistanceM != null ? `${fmtNumber(r.planDistanceM / 1000, 2)} км` : "—", sub: r.provider ? `провайдер: ${r.provider}` : "нет плана" },

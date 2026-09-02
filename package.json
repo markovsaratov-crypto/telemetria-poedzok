@@ -1,6 +1,6 @@
 {
   "name": "telemetria-poedzok",
-  "version": "2.14.0",
+  "version": "2.14.1",
   "private": true,
   "scripts": {
     "dev": "next dev -p ${PORT:-3000}",

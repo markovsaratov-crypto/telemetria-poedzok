@@ -15,6 +15,10 @@ const schema = z.object({
   REGISTRATION_ENABLED: z.string().default("false"),
   RATE_LIMIT_MAX_INGEST: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_MAX_DEFAULT: z.coerce.number().int().positive().default(60),
+  // v2.14.1: дешёвые GET-чтения вкладки «Поездки» (список, статы записей, геокод) —
+  // отдельный скоп: склейка поездок делает всплеск N stats+geocode запросов на одно
+  // открытие вкладки, при N>=20 они с ретраями react-query выбивают default 60/мин (429-тосты).
+  RATE_LIMIT_MAX_READ: z.coerce.number().int().positive().default(240),
   RATE_LIMIT_MAX_AUTH: z.coerce.number().int().positive().default(5),
   RATE_LIMIT_MAX_PLAN: z.coerce.number().int().positive().default(5),
   RATE_LIMIT_MAX_AUDIT: z.coerce.number().int().positive().default(60),
@@ -125,6 +129,7 @@ export function env(): Env {
       REGISTRATION_ENABLED: process.env.REGISTRATION_ENABLED || "false",
       RATE_LIMIT_MAX_INGEST: Number(process.env.RATE_LIMIT_MAX_INGEST) || 120,
       RATE_LIMIT_MAX_DEFAULT: Number(process.env.RATE_LIMIT_MAX_DEFAULT) || 60,
+      RATE_LIMIT_MAX_READ: Number(process.env.RATE_LIMIT_MAX_READ) || 240,
       RATE_LIMIT_MAX_AUTH: Number(process.env.RATE_LIMIT_MAX_AUTH) || 5,
       RATE_LIMIT_MAX_PLAN: Number(process.env.RATE_LIMIT_MAX_PLAN) || 5,
       RATE_LIMIT_MAX_AUDIT: Number(process.env.RATE_LIMIT_MAX_AUDIT) || 60,

@@ -68,7 +68,7 @@ import { ZipImport } from "@/components/zip-import";
 const DOCS = {
   methodology: "v2.10.4 · 31.08",
   methodologyPrev: "v2.9 · 29.08",
-  spec: "v2.14.0 · 03.09",
+  spec: "v2.14.1 · 03.09",
   specPrev: "v2.13.0 · 03.09",
 } as const;
 
@@ -274,6 +274,13 @@ function A1ParamsBlock() {
                 чип «идёт запись» пульсирует; <b>Ф3</b> — воркер закрывает зависшие recording-сессии
                 после 10 минут тишины (metric <b>recording_reaped_total</b>, финализация общая с
                 инжестом в <b>session-finalize.ts</b>)
+              </li>
+              <li>
+                <b className="c-plum">спека v2.14.1</b> лимит чтений «Поездок»: открытие вкладки со
+                склейкой шлёт пачку stats+geocode по всем записям — всплеск с ретраями превышал
+                общий 60/мин (<s>тосты «Повторите через 1 мин»</s>, статы карточек «—»). Дешёвые
+                GET-чтения (список, статы записи, геокод) выделены в <b>read</b>-скоп
+                <b>240/мин</b> (env <b>RATE_LIMIT_MAX_READ</b>); тяжёлые чтения и мутации — как было
               </li>
             </ul>
           </div>

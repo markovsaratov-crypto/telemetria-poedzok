@@ -62,14 +62,14 @@ import { bindTips } from "./use-v4-tipbox";
 import { CsvImport } from "@/components/csv-import";
 import { ZipImport } from "@/components/zip-import";
 
-// Версии документов (v2.12.0): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
+// Версии документов (v2.13.0): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
 // При следующем релизе доков обновить здесь + строки изменений ниже + шапки файлов в docs/
 // (методология не менялась с v2.10.4 — prev у неё остаётся v2.9).
 const DOCS = {
   methodology: "v2.10.4 · 31.08",
   methodologyPrev: "v2.9 · 29.08",
-  spec: "v2.12.0 · 02.09",
-  specPrev: "v2.11.0 · 01.09",
+  spec: "v2.13.0 · 03.09",
+  specPrev: "v2.12.0 · 02.09",
 } as const;
 
 export function AdminViewV4() {
@@ -256,6 +256,14 @@ function A1ParamsBlock() {
                 + кэш); единый счётчик GPS-точек (<s>15 266/15 155/15 148</s> → сходятся) ;
                 <s>«−66,6 балла»</s> → clamp штрафов EcoScore; <s>«39 РЕЗКО» на стоянке</s> →
                 медиан-фильтр GPS-выбросов; «Тяжёлые участки» и «Частые маршруты» уважают период
+              </li>
+              <li>
+                <b className="c-plum">спека v2.13.0</b> пять дефектов владельца: <s>«Рекорд скорости —»</s> →
+                живой §4.5 MaxSpeedAllTime (новый <b>/api/stats/speed-record</b>); <s>левая половина G-G пуста</s> →
+                знаковый latA (влево/вправо); <s>8 событий при 42 у методологии</s> → порог §7.1 10 км/ч/с
+                (было 10 м/с² ≈ 1g); <s>«+105 мин» vs «−39,7 мин»</s> → FIX-C2 доведён до блока 04;
+                <s>«-5,987384005838807%»</s> → 2 знака после запятой; скорость карты — нормализация
+                (B-4) + км/ч-пороги (сдвиг 3,6×)
               </li>
             </ul>
           </div>

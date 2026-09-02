@@ -10,9 +10,12 @@ import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { normalizeSessionSpeeds, medianSmooth3, isUsableSpeedPoint } from "@/lib/kpi";
 
-const HARSH_THRESHOLD_MS2 = 10; // |a| > 10 м/с² → harsh (§4 методологии)
+// v2.13.0 (Ф3): порог приведён к методологии §7.1/§7.2 — 10 км/ч за секунду
+// = 2,78 м/с². Раньше было 10 м/с² (≈1g — экстренное торможение): счётчик блока
+// «События вождения» расходился с конвейером методологии (EcoScore) в ~5 раз.
+const HARSH_THRESHOLD_MS2 = 10 / 3.6; // 10 км/ч/с → м/с² (§7.1/§7.2)
 const JERK_THRESHOLD_MS3 = 5; // |j| > 5 м/с³ → harsh jerk
-const HIGH_SPEED_CORNER_THRESHOLD = 60; // манёвр >60°/5с/60км/ч (HSC)
+const HIGH_SPEED_CORNER_THRESHOLD = 60; // скорость >60 км/ч (§7.10), угол — 45° ниже
 
 function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371000;
@@ -109,8 +112,11 @@ export async function GET(
       const b1 = p1.bearing ?? bearingDeg(p0.lat, p0.lon, p1.lat, p1.lon);
       const b2 = p2.bearing ?? bearingDeg(p1.lat, p1.lon, p2.lat, p2.lon);
       const b3 = p3.bearing ?? bearingDeg(p2.lat, p2.lon, p3.lat, p3.lon);
-      const db12 = Math.abs(normAngle(b2 - b1));
-      const db23 = Math.abs(normAngle(b3 - b2));
+      // v2.13.0 (Ф2): БЕЗ Math.abs — знак поворота сохраняется (влево −, вправо +,
+      // bearing растёт по часовой). Раньше latA ≥ 0 всегда → на G-G-диаграмме
+      // левая половина была структурно пуста при любых данных.
+      const db12 = normAngle(b2 - b1);
+      const db23 = normAngle(b3 - b2);
       const totalTurn = db12 + db23;
       const distance12 = haversineM(p1.lat, p1.lon, p2.lat, p2.lon);
       const distance23 = haversineM(p2.lat, p2.lon, p3.lat, p3.lon);
@@ -141,16 +147,18 @@ export async function GET(
     const accelerationRMS = accelValues.length > 0 ? Math.sqrt(accelValues.reduce((s, v) => s + v, 0) / accelValues.length) : 0;
     const jerkRMS = jerkValues.length > 0 ? Math.sqrt(jerkValues.reduce((s, v) => s + v, 0) / jerkValues.length) : 0;
 
-    // Harsh events: |a| > 10 м/с²
+    // Harsh events: |a| > 2,78 м/с² (10 км/ч/с, §7.1/§7.2)
     const harshEvents = maneuvers.filter((m) => Math.abs(m.longA) > HARSH_THRESHOLD_MS2);
 
-    // HSC: high-speed cornering — поворот >60° на скорости >60км/ч за 5 сек
+    // HSC: high-speed cornering — поворот >45° на скорости >60км/ч за 5 сек (§7.10)
     const hscEvents: Array<{ lat: number; lng: number; t: number; turnDeg: number; speed: number }> = [];
     for (let i = 5; i < maneuvers.length; i++) {
       const window = maneuvers.slice(i - 5, i + 1);
+      // v2.13.0 (Ф3): 45° — как §7.10 и конвейер методологии (CORNERING_BEARING_DEG);
+      // раньше 60° — events-роут занижал HSC против methodology.highSpeedCornering.
       const speedOk = window.every((m) => m.speed > HIGH_SPEED_CORNER_THRESHOLD);
       const totalTurn = window.reduce((s, m, idx) => (idx > 0 ? s + Math.abs(normAngle(m.bearing - window[idx - 1].bearing)) : 0), 0);
-      if (speedOk && totalTurn > 60) {
+      if (speedOk && totalTurn > 45) {
         hscEvents.push({ lat: maneuvers[i].lat, lng: maneuvers[i].lng, t: maneuvers[i].t, turnDeg: Math.round(totalTurn), speed: maneuvers[i].speed });
       }
     }

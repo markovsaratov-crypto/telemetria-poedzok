@@ -79,8 +79,10 @@ async function computePlanFact(
       }
     }
 
+    // v2.13.0 (Ф5): 2 знака после запятой (владелец: «должна иметь 2 знака»).
+    // Раньше Math.round(·1000)/10 = 1 знак, а период-агрегат отдавал сырой float (15 знаков).
     const pct = (actual: number, plan: number) =>
-      plan > 0 ? Math.round(((actual - plan) / plan) * 1000) / 10 : null;
+      plan > 0 ? Math.round(((actual - plan) / plan) * 10000) / 100 : null;
 
     let speedDeviationPct: number | null = null;
     if (actualAvgSpeed != null && planDistanceM && planDurationSec && planDurationSec > 0) {

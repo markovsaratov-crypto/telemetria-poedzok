@@ -336,6 +336,9 @@ export interface SessionStats {
     durationDeviationPct: number | null;
     distanceDeviationPct: number | null;
     speedDeviationPct: number | null;
+    // v2.13.0 (Ф4): число поездок с планом в период-агрегате — знаменатель
+    // для честного «мин/поездку» (§6.3 TimeSavingIndex). Одиночная сессия не проставляет.
+    planTripCount?: number | null;
   };
 }
 

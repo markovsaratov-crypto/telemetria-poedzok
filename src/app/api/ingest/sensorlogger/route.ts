@@ -12,6 +12,7 @@ import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import { recordIngestAttempt, recordIngestRaw } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток; v2.10.8: сырой дамп
+import { finalizeSession } from "@/lib/session-finalize"; // v2.14.0 (Ф3): shared с воркером-«жнецом»
 import pLimit from "p-limit";
 import { randomUUID } from "crypto";
 
@@ -265,56 +266,8 @@ async function createRecordingSession(deviceId: string, deviceName: string, firs
   return id;
 }
 
-// v2.11.0 (АУДИТ C-9): финализация + TrafficJob без «висячего» trafficJobId.
-// Раньше .catch(()=>{}) глотал ЛЮБЫЕ ошибки вставки джоба, а UPDATE всё равно
-// прописывал trafficJobId = jobId несуществующего джоба → сессия без маршрутизации.
-// Теперь: вставка с проверкой — при дубликате/ошибке находим существующий джоб сессии.
-async function ensureTrafficJob(sessionId: string): Promise<void> {
-  const now = new Date().toISOString();
-  const jobId = randomUUID();
-  let inserted = false;
-  try {
-    await libsql.execute({
-      sql: `INSERT INTO TrafficJob (id, sessionId, status, priority, attempts, createdAt, updatedAt)
-            VALUES (?, ?, 'pending', 0, 0, ?, ?)`,
-      args: [jobId, sessionId, now, now],
-    });
-    inserted = true;
-  } catch (err) {
-    logger.warn("TrafficJob insert failed — ищем существующий", {
-      sessionId, error: err instanceof Error ? err.message : String(err),
-    });
-  }
-  if (inserted) {
-    await libsql.execute({
-      sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
-      args: [jobId, now, sessionId],
-    });
-  } else {
-    const existing = await libsql.execute({
-      sql: `SELECT id FROM TrafficJob WHERE sessionId = ? ORDER BY createdAt DESC LIMIT 1`,
-      args: [sessionId],
-    });
-    if (existing.rows.length > 0) {
-      const exId = String((existing.rows[0] as Record<string, unknown>).id);
-      await libsql.execute({
-        sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
-        args: [exId, now, sessionId],
-      });
-    }
-  }
-}
-
-async function finalizeSession(sessionId: string): Promise<void> {
-  const now = new Date().toISOString();
-  await libsql.execute({
-    sql: `UPDATE Session SET status = 'completed', updatedAt = ? WHERE id = ? AND status = 'recording'`,
-    args: [now, sessionId],
-  });
-  // v2.11.0 (АУДИТ C-9): TrafficJob с защитой от дублей и висячих ссылок
-  await ensureTrafficJob(sessionId);
-  logger.info("Session finalized", { sessionId });
-}
+// v2.11.0 (АУДИТ C-9): финализация + TrafficJob — с v2.14.0 (Ф3) в src/lib/session-finalize.ts
+// (общая с воркером-«жнецом» зависших recording-сессий), здесь — только вызов.
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();

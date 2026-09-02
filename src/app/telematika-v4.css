@@ -2646,3 +2646,59 @@ html.dark .v4-app .v4-bottom-nav {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* === v2.14.0 (Ф1/Ф2): склеенные поездки + живая запись === */
+/* Пульс чипа «идёт запись»: мягкое мигание — живой статус видно краем глаза */
+@keyframes v4-chip-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.v4-app .chip-live {
+  animation: v4-chip-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .v4-app .chip-live { animation: none; }
+}
+/* Заголовок блока «записи этой поездки» */
+.v4-app .frag-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 9px 2px 6px;
+  margin-top: 2px;
+  border-top: 1px dashed var(--line);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+}
+/* Строка-фрагмент: время · км · точки · статус — компактная, как строка журнала */
+.v4-app .frag-list {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel2);
+  overflow: hidden;
+}
+.v4-app .frag-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+.v4-app .frag-row:last-child { border-bottom: none; }
+.v4-app .frag-row b {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--text);
+  flex: none;
+}
+.v4-app .frag-row > span { flex: none; }
+.v4-app .frag-row > span:nth-of-type(1) { color: var(--text); font-weight: 600; }
+.v4-app .frag-row .chip { margin-left: auto; }
+@media (max-width: 480px) {
+  .v4-app .frag-row { gap: 7px; padding: 6px 8px; font-size: 10.5px; flex-wrap: wrap; }
+  .v4-app .frag-row .chip { margin-left: 0; }
+}

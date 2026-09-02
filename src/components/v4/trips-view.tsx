@@ -5,10 +5,10 @@
 "use client";
 
 import * as React from "react";
-import { useSessions, useSessionStats, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
+import { useSessions, useSessionStats, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
 import { ecoCls, ecoLab } from "@/lib/v4-utils";
-import { fmtSecFull } from "@/lib/format";
+import { fmtSecFull, fmtDurMin, fmtNumber, pluralRu } from "@/lib/format";
 import { bindTips } from "./use-v4-tipbox";
 
 export function TripsView({ onGoAdmin }: { onGoAdmin?: () => void }) {
@@ -192,18 +192,22 @@ function TripsSummary({ list }: { list: SessionListItem[] }) {
     totalDistKm: number;
     ecoSum: number;
     ecoCount: number;
-  }>({ totalDurMin: 0, totalDistKm: 0, ecoSum: 0, ecoCount: 0 });
+    // v2.12.0 (D-4): сколько сессий уже посчитано — пока не все, сводка помечена
+    // «считаем…» (раньше частичные суммы выглядели как финальные и «росли» на глазах)
+    loadedCount: number;
+  }>({ totalDurMin: 0, totalDistKm: 0, ecoSum: 0, ecoCount: 0, loadedCount: 0 });
 
-  const hh = Math.floor(agg.totalDurMin / 60);
-  const mm = Math.round(agg.totalDurMin % 60);
   const avgEco = agg.ecoCount > 0 ? Math.round(agg.ecoSum / agg.ecoCount) : null;
+  const computing = agg.loadedCount < list.length;
 
   return (
     <>
       <SummaryAggregator list={list} onAgg={setAgg} />
       <div className="card tsum">
         <div className="tsum-main">
-          <b>{list.length} поездок</b>
+          <b>
+            {fmtNumber(list.length)} {pluralRu(list.length, ["поездка", "поездки", "поездок"])}
+          </b>
           <span>
             последняя:{" "}
             {list[0]
@@ -212,6 +216,7 @@ function TripsSummary({ list }: { list: SessionListItem[] }) {
                   month: "short",
                 })
               : "—"}
+            {computing ? " · считаем сводку…" : ""}
           </span>
         </div>
         <div className="tsum-stats">
@@ -220,7 +225,8 @@ function TripsSummary({ list }: { list: SessionListItem[] }) {
             <span>км всего</span>
           </div>
           <div>
-            <b>{agg.totalDurMin > 0 ? `${hh} ч ${mm} м` : "—"}</b>
+            {/* v2.12.0 (округления): единый формат длительности «5 ч 7 мин» */}
+            <b>{agg.totalDurMin > 0 ? fmtDurMin(agg.totalDurMin) : "—"}</b>
             <span>в поездках</span>
           </div>
           <div>
@@ -228,7 +234,9 @@ function TripsSummary({ list }: { list: SessionListItem[] }) {
             <span>средняя плавность</span>
           </div>
           <div>
-            <b>{list.reduce((s, x) => s + (x.pointCount ?? 0), 0)}</b>
+            {/* v2.12.0 (D-1): фактические строки GpsPoint (не денормализованный
+                pointCount — он расходился: Σ 15 266 vs факт 15 148) + разделители */}
+            <b>{fmtNumber(list.reduce((s, x) => s + (x.pointCountActual ?? x.pointCount ?? 0), 0))}</b>
             <span>GPS-точек</span>
           </div>
         </div>
@@ -248,6 +256,7 @@ function SummaryAggregator({
     totalDistKm: number;
     ecoSum: number;
     ecoCount: number;
+    loadedCount: number;
   }) => void;
 }) {
   // Track all loaded stats in a ref map to accumulate without losing prior values.
@@ -272,7 +281,9 @@ function SummaryAggregator({
           ecoCount++;
         }
       }
-      onAgg({ totalDurMin, totalDistKm, ecoSum, ecoCount });
+      // v2.12.0 (D-4): передаём и число посчитанных сессий — сводка честно
+      // помечает незавершённый расчёт
+      onAgg({ totalDurMin, totalDistKm, ecoSum, ecoCount, loadedCount: loadedRef.current.size });
     },
     [onAgg]
   );
@@ -312,6 +323,11 @@ function TripCard({
   onToggle: () => void;
 }) {
   const stats = useSessionStats(session.id);
+  // v2.12.0 (Q3): идентификация поездки по адресу конечной точки (требование
+  // владельца). endLat/endLon — последняя точка записи из /api/sessions;
+  // адрес резолвится через /api/geocode/reverse (кэш 30 дней на сервере).
+  const dest = useReverseGeocode(session.endLat ?? null, session.endLon ?? null);
+  const destShort = dest.data?.short ?? null;
 
   const start = new Date(session.startTime);
   const dd = String(start.getDate()).padStart(2, "0");
@@ -328,12 +344,32 @@ function TripCard({
       ? Math.max(0, Math.min(100, Math.round(ecoValue)))
       : null;
 
+  // v2.12.0 (D-2): «0,0 км · 68 мин» при нулевой дистанции и avgSpeed=null —
+  // это «нет данных о движении» (GPS-джиттер без активной поездки), не «0 км».
+  const noMovement =
+    stats.data != null && distanceKm != null && durationMin != null &&
+    distanceKm <= 0 && stats.data.avgSpeed == null;
   const sub =
-    durationMin != null && distanceKm != null
-      ? `${distanceKm.toFixed(1).replace(".", ",")} км · ${Math.round(durationMin)} мин`
-      : session.pointCount
-        ? `${session.pointCount} точек`
-        : "загрузка…";
+    noMovement
+      ? `${fmtNumber(session.pointCountActual ?? session.pointCount)} ${pluralRu(session.pointCountActual ?? session.pointCount, ["точка", "точки", "точек"])} · нет данных о движении · ${fmtDurMin(durationMin)}`
+      : durationMin != null && distanceKm != null
+        ? `${distanceKm.toFixed(1).replace(".", ",")} км · ${fmtDurMin(durationMin)}`
+        : session.pointCount
+          ? `${fmtNumber(session.pointCountActual ?? session.pointCount)} ${pluralRu(session.pointCountActual ?? session.pointCount, ["точка", "точки", "точек"])}`
+          : "загрузка…";
+
+  // Заголовок: адрес финиша → fallback имя устройства → deviceId
+  const title =
+    destShort != null ? (
+      <span title={dest.data?.address ?? undefined}>
+        <span aria-hidden="true" style={{ color: "var(--plum)", fontWeight: 800 }}>→ </span>
+        {destShort}
+      </span>
+    ) : dest.isLoading ? (
+      <span style={{ color: "var(--muted)", fontWeight: 600 }}>→ адрес финиша…</span>
+    ) : (
+      <span>{session.deviceName || session.deviceId}</span>
+    );
 
   return (
     <div className={`trip ${isOpen ? "open" : ""}`}>
@@ -358,12 +394,12 @@ function TripCard({
         </div>
         <div className="trip-info">
           <div className="t-route">
-            {session.deviceName || session.deviceId}
+            {title}
             {/* v2.11.0 (U-15): RU-подпись статуса вместо сырого enum */}
             <span
               className="chip chip-amber"
               style={{ marginLeft: 6, fontSize: 10 }}
-              data-tip={`Статус записи: ${SESSION_STATUS_RU[session.status] ?? session.status} | ${session.pointCount} точек GPS`}
+              data-tip={`Статус записи: ${SESSION_STATUS_RU[session.status] ?? session.status} | ${fmtNumber(session.pointCountActual ?? session.pointCount)} ${pluralRu(session.pointCountActual ?? session.pointCount, ["точка", "точки", "точек"])} GPS`}
             >
               {SESSION_STATUS_RU[session.status] ?? session.status}
             </span>
@@ -371,8 +407,9 @@ function TripCard({
           <div className="t-sub">{sub}</div>
         </div>
         <div className={`t-eco ${eco != null ? ecoCls(eco) : ""}`}>
+          {/* v2.12.0 (V-5): единицы в бейдже — «39 / 100 · резко» вместо «39 РЕЗКО» */}
           <b>{eco ?? "—"}</b>
-          <small>{eco != null ? ecoLab(eco) : "—"}</small>
+          <small>{eco != null ? `${ecoLab(eco)} · из 100` : "—"}</small>
         </div>
         <i className="chev">›</i>
       </div>
@@ -390,6 +427,8 @@ function TripBody({
   session: SessionListItem;
   stats: SessionStats | null;
 }) {
+  // v2.12.0 (Q3): полный адрес финиша — в детальной карточке
+  const dest = useReverseGeocode(session.endLat ?? null, session.endLon ?? null);
   if (!stats) {
     return (
       <div className="trip-body">
@@ -415,14 +454,18 @@ function TripBody({
         minute: "2-digit",
       })
     : null;
-  const moveMin = Math.round(stats.movingTime / 60);
-  const idleMin = Math.round(stats.idleTime / 60);
+  // v2.12.0 (округления): «0 мин» для записей < 60 сек → секунды (fmtSecFull);
+  // минуты — только когда они минуты (68 мин), часы — от 60 минут (1 ч 32 мин)
+  const moveStr = fmtSecFull(stats.movingTime);
+  const idleStr = fmtSecFull(stats.idleTime);
   const gapSec = stats.gapTime ?? 0;
   // FIX-C1: средняя — из API (§4.3: активная дистанция / активная длительность).
   // Раньше пересчитывалась локально как «вся дистанция / вся длительность» —
   // расходилась с подписью «активной части» и занижалась хвостами.
   const avgKmh = stats.avgSpeed != null ? stats.avgSpeed * 3.6 : null;
   const maxKmh = stats.maxSpeed != null ? stats.maxSpeed * 3.6 : null;
+  // v2.12.0 (D-2): дистанция 0 без активной поездки — «нет данных», не «0 км»
+  const hasMovement = stats.distance > 0 || stats.avgSpeed != null;
 
   return (
     <div className="trip-body">
@@ -432,19 +475,32 @@ function TripBody({
         <span>финиш:</span>
         <b>{endStr ?? "—"}</b>
       </div>
+      {dest.data ? (
+        <div className="seg-total" style={{ marginBottom: 10 }}>
+          <span>куда:</span>
+          <b
+            style={{ fontWeight: 600 }}
+            data-tip={`Адрес конечной точки записи (Nominatim, кэш на сервере) | ${dest.data.cached ? "из кэша" : "свежий запрос"}`}
+          >
+            → {dest.data.short}
+          </b>
+        </div>
+      ) : null}
       <div className="stats-grid" style={{ marginTop: 0, marginBottom: 10 }}>
         <Stat
-          value={`${stats.pointCount}`}
+          value={`${fmtNumber(stats.pointCount)}`}
           tip="Количество GPS-точек в записи (после фильтрации выбросов и дедупликации)"
           label="GPS-точек"
         />
         <Stat
-          value={`${Math.round(stats.distance / 1000).toString().replace(".", ",")} км`}
-          tip="Дистанция (§4.2): сумма гаверсинусов между соседними точками активной части"
+          // v2.12.0 (округления): 1 знак после запятой (Math.round давал «1 км»
+          // и «1,3 км» на одном экране; .replace после round был мёртвым кодом)
+          value={hasMovement ? `${(stats.distance / 1000).toFixed(1).replace(".", ",")} км` : "нет данных"}
+          tip="Дистанция (§4.2): сумма гаверсинусов между соседними точками активной части. 0 и отсутствие активной поездки = GPS-запись без движения"
           label="Дистанция"
         />
         <Stat
-          value={`${Math.round(stats.duration / 60)} мин`}
+          value={fmtDurMin(stats.duration / 60)}
           tip="Длительность записи (§4.1): от первой до последней точки, включая стоянки-«хвосты». Аналитика (дистанция, скорость) — по активной поездке (§4.11)"
           label="Длительность"
         />
@@ -455,16 +511,16 @@ function TripBody({
         />
         <Stat
           value={maxKmh != null ? `${maxKmh.toFixed(1).replace(".", ",")} км/ч` : "—"}
-          tip="Максимальная скорость (§4.4) — пик с фильтрацией выбросов"
+          tip="Максимальная скорость (§4.4) — пик с фильтрацией выбросов и сглаживанием"
           label="Макс. скорость"
         />
         <Stat
-          value={`${moveMin} мин`}
+          value={moveStr}
           tip="Время в движении (§4.6): скорость выше 2 км/ч после гистерезиса"
           label="В движении"
         />
         <Stat
-          value={`${idleMin} мин`}
+          value={idleStr}
           tip="Время стоянок (§4.7): скорость ниже 2 км/ч"
           label="Стоянки"
         />

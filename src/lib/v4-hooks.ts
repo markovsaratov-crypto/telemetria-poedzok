@@ -61,8 +61,7 @@ export function periodStartMs(period: PeriodKey, now = Date.now()): number {
       return now - 7 * 86_400_000;
     case "d30":
       return now - 30 * 86_400_000;
-    case "month":
-      return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    // v2.12.0: «Месяц» (календарный с 1-го числа) удалён — 30 дней скользящим окном достаточно
     case "all":
     default:
       return 0;

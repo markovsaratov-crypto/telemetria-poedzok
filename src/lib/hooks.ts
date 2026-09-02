@@ -657,20 +657,64 @@ export function useMetrics(opts?: UseQueryOptions<string>) {
 }
 
 // ===== Reverse geocoding =====
+// v2.12.0 (Q3): хук оживлён — теперь им идентифицируются поездки по адресу
+// конечной точки (требование владельца). Чтобы не завалить Nominatim пачкой
+// параллельных запросов при первом рендере списка, queryFn ждёт слот в
+// глобальной вежливой очереди (≤1 запрос / 700 мс). Кэш 30 дней на сервере —
+// повторные открытия мгновенны.
+export interface GeocodeResult {
+  address: string;
+  // v2.12.0 (Q3): компактная подпись («улица Ленина, 44») для заголовков
+  short: string;
+  cachedAt?: string;
+  cached: boolean;
+  error?: string;
+}
+
+let geoQueue: Array<() => void> = [];
+let geoActive = false;
+
+function acquireGeocodeSlot(): Promise<void> {
+  return new Promise((resolve) => {
+    geoQueue.push(resolve);
+    void (async () => {
+      if (geoActive) return;
+      geoActive = true;
+      while (geoQueue.length > 0) {
+        const next = geoQueue.shift();
+        if (next) next();
+        await new Promise((r) => setTimeout(r, 700));
+      }
+      geoActive = false;
+    })();
+  });
+}
+
 export function useReverseGeocode(lat: number | null, lon: number | null) {
   return useQuery({
     queryKey: ["geocode", lat, lon],
     queryFn: async () => {
       if (lat == null || lon == null) return null;
+      await acquireGeocodeSlot();
       const qs = `?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
-      return api.get<{ address: string; cachedAt?: string; cached: boolean }>(
-        `/api/geocode/reverse${qs}`
-      );
+      return api.get<GeocodeResult>(`/api/geocode/reverse${qs}`);
     },
     enabled: lat != null && lon != null,
     staleTime: Infinity, // cached server-side
-    retry: 1,
+    retry: 0, // Nominatim недоступен — не долбим повторами
   });
+}
+
+// v2.12.0 (Q3): адрес конечной точки для идентификации поездки/маршрута.
+// Возвращает короткую подпись и признак загрузки; при ошибке — null
+// (вызывающий показывает fallback — имя устройства).
+export function useDestAddress(lat: number | null | undefined, lon: number | null | undefined) {
+  const q = useReverseGeocode(lat ?? null, lon ?? null);
+  return {
+    short: q.data?.short ?? null,
+    full: q.data?.address ?? null,
+    isLoading: q.isLoading,
+  };
 }
 
 // ===== Batch session stats (start/dest coords, distance, duration) =====
@@ -848,10 +892,15 @@ export interface RouteGroupInfo {
   polylineSample: { lat: number; lon: number }[] | null;
 }
 
-export function useRouteGroups() {
+export function useRouteGroups(period?: string) {
   return useQuery({
-    queryKey: ["route-groups"],
-    queryFn: () => api.get<{ groups: RouteGroupInfo[]; total: number }>("/api/routes/grouped"),
+    // v2.12.0 (D-8): период входит в ключ — смена «Сегодня»→«30 дней» перезабирает
+    // группы с сервера (?period=...), а не показывает общий список.
+    queryKey: ["route-groups", period ?? "all"],
+    queryFn: () =>
+      api.get<{ groups: RouteGroupInfo[]; total: number }>(
+        `/api/routes/grouped${period ? `?period=${encodeURIComponent(period)}` : ""}`
+      ),
     staleTime: 60_000,
   });
 }
@@ -871,6 +920,8 @@ export interface HeavySegmentGroup {
   hotspotCount: number;
   avgDistanceM: number | null;
   lastSeen: string;
+  // v2.12.0 (Q3): координаты финиша — адресная идентификация маршрута
+  endCoord?: { lat: number; lon: number } | null;
   polylineSample: { lat: number; lon: number }[];
   worstHotspots: HeavySegmentHotspot[];
 }
@@ -883,10 +934,14 @@ export interface HeavySegmentsData {
   worstP75: number | null;
 }
 
-export function useHeavySegments() {
+export function useHeavySegments(period?: string) {
   return useQuery({
-    queryKey: ["heavy-segments"],
-    queryFn: () => api.get<HeavySegmentsData>("/api/routes/heavy-segments"),
+    // v2.12.0 (D-8): тяжёлые участки уважают выбранный период (?period=...).
+    queryKey: ["heavy-segments", period ?? "all"],
+    queryFn: () =>
+      api.get<HeavySegmentsData>(
+        `/api/routes/heavy-segments${period ? `?period=${encodeURIComponent(period)}` : ""}`
+      ),
     staleTime: 120_000,
     retry: 1,
   });

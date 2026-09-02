@@ -1,7 +1,11 @@
 // GET /api/sessions — список с курсорной пагинацией + фильтры (§4.2)
+// v2.12.0 (D-1, Q3): к каждому элементу добавляются pointCountActual (фактическое
+// число строк GpsPoint — денормализованный pointCount расходится после чисток) и
+// endLat/endLon (координаты последней точки — для адресной идентификации поездки
+// по названию конечной точки через /api/geocode/reverse).
 import { NextRequest } from "next/server";
 import { zSessionsQuery } from "@/lib/validation";
-import { db } from "@/lib/db";
+import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
@@ -48,8 +52,56 @@ export async function GET(request: NextRequest) {
     });
 
     const hasMore = sessions.length > q.limit;
-    const items = hasMore ? sessions.slice(0, q.limit) : sessions;
+    let items = hasMore ? sessions.slice(0, q.limit) : sessions;
     const nextCursor = hasMore ? items[items.length - 1].id : null;
+
+    // v2.12.0 (D-1, Q3): фактические счётчики строк GpsPoint и координаты финиша —
+    // двумя grouped-запросами по всем id страницы (не N+1).
+    if (items.length > 0) {
+      try {
+        const ids = items.map((s) => s.id);
+        const ph = ids.map(() => "?").join(",");
+        const [cntRes, endRes] = await Promise.all([
+          libsql.execute({
+            sql: `SELECT sessionId, COUNT(*) AS cnt FROM GpsPoint WHERE sessionId IN (${ph}) GROUP BY sessionId`,
+            args: ids,
+          }),
+          libsql.execute({
+            sql: `SELECT sessionId, lat, lon FROM (
+                    SELECT sessionId, lat, lon,
+                           ROW_NUMBER() OVER (PARTITION BY sessionId ORDER BY timestamp DESC) AS rn
+                    FROM GpsPoint WHERE sessionId IN (${ph})
+                  ) WHERE rn = 1`,
+            args: ids,
+          }),
+        ]);
+        const cntMap = new Map<string, number>();
+        for (const row of cntRes.rows) {
+          const r = row as unknown as Record<string, unknown>;
+          cntMap.set(String(r.sessionId), Number(r.cnt));
+        }
+        const endMap = new Map<string, { lat: number; lon: number }>();
+        for (const row of endRes.rows) {
+          const r = row as unknown as Record<string, unknown>;
+          endMap.set(String(r.sessionId), { lat: Number(r.lat), lon: Number(r.lon) });
+        }
+        items = items.map((s) => {
+          const end = endMap.get(s.id);
+          return {
+            ...s,
+            pointCountActual: cntMap.get(s.id) ?? 0,
+            endLat: end ? end.lat : null,
+            endLon: end ? end.lon : null,
+          };
+        });
+      } catch (err) {
+        // Деградация без разрушения списка: без адресов/фактических счётчиков
+        logger.warn("Sessions list enrichment failed", {
+          requestId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     return json({ sessions: items, nextCursor }, 200, { "X-Request-Id": requestId });
   } catch (err) {

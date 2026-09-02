@@ -31,6 +31,7 @@
 
 import { env } from "./env";
 import { haversineM } from "./geo";
+import { medianSmooth3, isUsableSpeedPoint } from "./kpi"; // v2.12.0 (D-6): медиан-фильтр для harsh-детекции
 import {
   computeMovingTime,
   computeActiveTrip,
@@ -193,6 +194,9 @@ export function speedVariation(points: MethodologyPoint[], activeTrip?: ActiveTr
 
 /**
  * §7.1/§7.2 HarshBraking/HarshAccel — Δv/Δt нормировано на 1 сек, только в активной части.
+ * v2.12.0 (D-6): скорости сглаживаются 3-точечной скользящей медией ДО Δv —
+ * одиночные GPS-выбросы (машина стоит, спайк 60 км/ч на 1 точку) больше не
+ * регистрируются как «резкие торможения/разгоны» (было «39 РЕЗКО» на стоянке).
  */
 export function harshEvents(
   points: MethodologyPoint[],
@@ -201,11 +205,17 @@ export function harshEvents(
   let braking = 0;
   let accel = 0;
   const activePts = filterActivePoints(points, activeTrip);
+  // Сглаженный ряд скоростей (null — точка непригодна)
+  const smoothed = medianSmooth3(
+    activePts.map((p) => (isUsableSpeedPoint(p) ? (p.speed as number) : null))
+  );
   for (let i = 1; i < activePts.length; i++) {
     const dtSec = (activePts[i].timestamp - activePts[i - 1].timestamp) / 1000;
     if (dtSec <= 0 || dtSec > 30) continue;
-    if (activePts[i].speed == null || activePts[i - 1].speed == null) continue;
-    const perSec = ((activePts[i].speed! - activePts[i - 1].speed!) * 3.6) / dtSec;
+    const v1 = smoothed[i - 1];
+    const v2 = smoothed[i];
+    if (v1 == null || v2 == null) continue;
+    const perSec = ((v2 - v1) * 3.6) / dtSec;
     if (perSec < -HARSH_KMH_PER_SEC) braking += 1;
     else if (perSec > HARSH_KMH_PER_SEC) accel += 1;
   }

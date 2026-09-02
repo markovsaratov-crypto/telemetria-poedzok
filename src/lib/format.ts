@@ -63,6 +63,49 @@ export function fmtSecFull(sec?: number | null): string {
   return `${Math.floor(m / 60)} ч ${m % 60} мин`;
 }
 
+// v2.12.0 (D-9, округления): длительность из МИНУТ — единый человекочитаемый формат
+// «45 сек» / «68 мин» / «1 ч 32 мин» / «5 ч». Заменяет зоопарк «92 мин» vs «5 ч 7 м»
+// и «0 мин» для записей короче минуты.
+export function fmtDurMin(min?: number | null): string {
+  if (min == null || !Number.isFinite(min) || min < 0) return "—";
+  const totalSec = Math.round(min * 60);
+  if (totalSec < 60) return `${totalSec} сек`;
+  const totalMin = Math.round(min);
+  if (totalMin < 60) return `${totalMin} мин`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m ? `${h} ч ${m} мин` : `${h} ч`;
+}
+
+// v2.12.0 (D-9): русская плюрализация — «1 сегмент / 2 сегмента / 5 сегментов».
+// forms = [единственное, парное (2–4), множественное (5+, 11–14)].
+export function pluralRu(n: number, forms: [string, string, string]): string {
+  const abs = Math.abs(n) % 100;
+  const n1 = abs % 10;
+  if (abs > 10 && abs < 20) return forms[2];
+  if (n1 > 1 && n1 < 5) return forms[1];
+  if (n1 === 1) return forms[0];
+  return forms[2];
+}
+
+// v2.12.0 (D-9): «N + существительное» с плюрализацией и разделителями тысяч.
+export function fmtCountRu(n: number | null | undefined, forms: [string, string, string]): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return `${fmtNumber(n)} ${pluralRu(n, forms)}`;
+}
+
+// v2.12.0 (D-3): штрафные/призовые баллы EcoScore с плюрализацией.
+// Дробные значения в русском требуют родительный ед.ч.: «−18,9 балла».
+// Целые: «0 баллов», «1 балл», «2 балла», «5 баллов». Минус-ноль не выводим.
+export function fmtPointsRu(p: number): string {
+  const rounded = Math.round(p * 10) / 10;
+  if (rounded === 0) return "0 баллов";
+  const sign = rounded < 0 ? "−" : "";
+  const abs = Math.abs(rounded);
+  if (Number.isInteger(abs)) return `${sign}${fmtNumber(abs)} ${pluralRu(abs, ["балл", "балла", "баллов"])}`;
+  return `${sign}${abs.toFixed(1).replace(".", ",")} балла`;
+}
+
 export function fmtBytes(bytes?: number | null): string {
   if (bytes == null || isNaN(bytes)) return "—";
   if (bytes < 1024) return `${bytes} Б`;

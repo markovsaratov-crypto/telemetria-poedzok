@@ -23,7 +23,8 @@ import {
 } from "lucide-react";
 import { useV4Tipbox, bindTips } from "./use-v4-tipbox";
 import { type PeriodKey } from "@/lib/v4-utils";
-import { useSessions } from "@/lib/hooks";
+import { useSessions, useReverseGeocode } from "@/lib/hooks";
+import type { SessionListItem } from "@/lib/api-client";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import { api } from "@/lib/api-client";
@@ -51,11 +52,12 @@ const TABS: { id: V4Tab; label: string; icon: React.ReactNode }[] = [
   { id: "admin", label: "Админ", icon: <SettingsIcon className="h-3.5 w-3.5" /> },
 ];
 
+// v2.12.0: «Месяц» удалён по требованию владельца — 4 периода достаточно
+// (30 дней — скользящее окно; календарный месяц дублировал его с путаницей).
 const PERIOD_LIST: { id: Period; label: string }[] = [
   { id: "today", label: "Сегодня" },
   { id: "week", label: "7 дней" },
   { id: "d30", label: "30 дней" },
-  { id: "month", label: "Месяц" },
   { id: "all", label: "Всё время" },
 ];
 
@@ -89,6 +91,43 @@ function relativeLabel(startTime: string | number | Date): string {
   }
 }
 
+// v2.12.0 (V-1): платформенно-зависимые подписи горячих клавиш — глифы ⌘/⇧
+// понятны только пользователям Mac; на Windows/Linux показываем Ctrl-форму.
+function useIsMac(): boolean {
+  const [isMac, setIsMac] = React.useState(false);
+  React.useEffect(() => {
+    setIsMac(/Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent));
+  }, []);
+  return isMac;
+}
+
+// v2.12.0 (Q3): подпись поездки в фильтре — адрес конечной точки
+// (идентификация по месту назначения), fallback — имя устройства.
+function TripFilterLabel({ session, bold = false }: { session: SessionListItem; bold?: boolean }) {
+  const dest = useReverseGeocode(session.endLat ?? null, session.endLon ?? null);
+  const destShort = dest.data?.short ?? null;
+  if (destShort != null) {
+    return (
+      <span
+        className={bold ? "" : undefined}
+        style={{ fontWeight: bold ? 700 : 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 170 }}
+        title={dest.data?.address ?? undefined}
+      >
+        <span aria-hidden="true" style={{ color: "var(--plum)", fontWeight: 800 }}>→ </span>
+        {destShort}
+      </span>
+    );
+  }
+  if (dest.isLoading) {
+    return (
+      <span style={{ color: "var(--muted)", fontWeight: 500, fontSize: 11 }}>
+        → адрес финиша…
+      </span>
+    );
+  }
+  return <b>{session.deviceName || session.deviceId}</b>;
+}
+
 export function TelematikaLayout(props: LayoutProps) {
   const {
     tab,
@@ -111,6 +150,10 @@ export function TelematikaLayout(props: LayoutProps) {
   const [tripFilterQuery, setTripFilterQuery] = React.useState("");
   const tripFilterRef = React.useRef<HTMLDivElement>(null);
   const layoutRef = React.useRef<HTMLDivElement>(null);
+  const isMac = useIsMac();
+  // v2.12.0 (V-1): подписи под иконками — «⌘K» на Mac, «Ctrl K» на Windows/Linux
+  const kbdCmd = isMac ? "⌘K" : "Ctrl K";
+  const kbdSearch = isMac ? "⌘⇧F" : "Ctrl⇧F";
 
   // Live sessions list for trip-filter dropdown.
   const sessions = useSessions({ limit: 50 });
@@ -249,20 +292,20 @@ export function TelematikaLayout(props: LayoutProps) {
             <button
               className="iconbtn"
               onClick={() => onSearchOpen()}
-              title="Глобальный поиск (⌘⇧F)"
+              title={`Глобальный поиск (${kbdSearch})`}
               aria-label="Поиск"
             >
               <Search className="h-4 w-4" />
-              <span className="kbd-mini">⌘⇧F</span>
+              <span className="kbd-mini">{kbdSearch}</span>
             </button>
             <button
               className="iconbtn"
               onClick={() => onCmdOpen()}
-              title="Команды (⌘K)"
+              title={`Команды (${kbdCmd})`}
               aria-label="Команды"
             >
               <Command className="h-4 w-4" />
-              <span className="kbd-mini">⌘K</span>
+              <span className="kbd-mini">{kbdCmd}</span>
             </button>
             <button
               className="iconbtn"
@@ -329,7 +372,7 @@ export function TelematikaLayout(props: LayoutProps) {
               >
                 {selectedSession ? (
                   <>
-                    <span>{selectedSession.deviceName || selectedSession.deviceId}</span>
+                    <TripFilterLabel session={selectedSession} />
                     <span className="mono" style={{ fontSize: 10, color: "var(--muted)" }}>
                       {fmtSessionLabel(selectedSession.startTime)}
                     </span>
@@ -384,7 +427,9 @@ export function TelematikaLayout(props: LayoutProps) {
                           }}
                         >
                           <span>
-                            <b>{s.deviceName || s.deviceId}</b>
+                            {/* v2.12.0 (Q3): идентификация поездки по адресу
+                                конечной точки — требование владельца */}
+                            <TripFilterLabel session={s} bold />
                             <br />
                             <span className="mono">{fmtSessionLabel(s.startTime)}</span>
                           </span>

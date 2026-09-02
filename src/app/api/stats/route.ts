@@ -15,9 +15,13 @@ export async function GET(request: NextRequest) {
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
     // All-time stats
+    // v2.12.0 (D-1): totalPoints — только точки ЖИВЫХ сессий (deletedAt IS NULL).
+    // Раньше считались все строки GpsPoint, включая осиротевшие точки
+    // софт-делетнутых сессий → «GPS-точек (всего)» в админке расходилось
+    // с суммой по поездкам в других разделах.
     const [totalSessions, totalPoints, totalRoutes, totalTrafficJobs, deadJobs, pendingJobs] = await Promise.all([
       db.session.count({ where: { deletedAt: null } }),
-      db.gpsPoint.count(),
+      db.gpsPoint.count({ where: { session: { deletedAt: null } } }),
       db.route.count(),
       db.trafficJob.count(),
       db.trafficJob.count({ where: { status: "dead" } }),

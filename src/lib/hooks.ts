@@ -215,6 +215,12 @@ export function useSessions(params: SessionsQuery) {
       return data;
     },
     staleTime: 15_000,
+    // v2.14.0 (Ф2): живое обновление списка — опрос каждые 30с, ПОКА ВКЛАДКА
+    // АКТИВНА (refetchIntervalInBackground=false по умолчанию — свёрнутая
+    // вкладка не расходует батарею/трафик). Закрывает кейс «вечерняя поездка
+    // не появилась»: вкладка, открытая днём, показывала дневной снапшот до
+    // ручной перезагрузки (refetchOnWindowFocus был выключен ещё в v2.9).
+    refetchInterval: 30_000,
   });
 }
 
@@ -342,7 +348,7 @@ export interface SessionStats {
   };
 }
 
-export function useSessionStats(id: string | null) {
+export function useSessionStats(id: string | null, opts?: { live?: boolean }) {
   return useQuery({
     queryKey: ["session-stats", id],
     queryFn: () => {
@@ -351,6 +357,10 @@ export function useSessionStats(id: string | null) {
     },
     enabled: !!id,
     staleTime: 30_000,
+    // v2.14.0 (Ф2): для идущей записи — обновление стат каждые 15с
+    // (раскрывая живую карточку, видно как растут точки/дистанция;
+    // для завершённых записей ничего не меняется — интервал не ставится)
+    refetchInterval: opts?.live ? 15_000 : undefined,
   });
 }
 

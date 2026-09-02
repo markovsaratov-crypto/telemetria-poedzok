@@ -5,6 +5,7 @@ import { env } from "./env";
 import { logger } from "./logger";
 import { inc, set } from "./metrics";
 import { routeRequest } from "./routing/chain";
+import { finalizeSession } from "./session-finalize"; // v2.14.0 (Ф3): «жнец» зависших recording-сессий
 
 // P0-фикс v2.9.10 (Render build failure — финальная версия без костылей):
 //
@@ -210,6 +211,34 @@ async function processOneJob(job: JobWithPoints, parentRequestId: string) {
   }
 }
 
+// v2.14.0 (Ф3): «жнец» зависших recording-сессий.
+// Проблема: сессия финализируется ТОЛЬКО когда приходит следующий батч с
+// разрывом >60с (код инжеста). Если телефон замолчал совсем (iOS убила логгер /
+// владелец закрыл приложение) — последняя сессия навсегда остаётся 'recording'
+// (реальный кейс 02.09: e39cd66f висела 6 часов, пока не пришли вечерние пуши).
+// Решение: раз в цикл опроса закрываем сессии, у которых нет GPS-точек дольше
+// STALE_RECORDING_TTL_MS. Гонка с инжестом безвредна: активно пишущая сессия
+// обновляет updatedAt каждым батчем → в выборку не попадает; если же батч
+// прилетел в момент закрытия — он доишется в завершённую сессию, а следующий
+// батч откроет новую (UI склеит их при паузе < 10 мин — Ф1).
+const STALE_RECORDING_TTL_MS = 10 * 60_000;
+
+async function reapStaleRecordingSessions(): Promise<number> {
+  const cutoff = new Date(Date.now() - STALE_RECORDING_TTL_MS).toISOString();
+  const stale = await libsql.execute({
+    sql: `SELECT id FROM Session
+          WHERE status = 'recording' AND deletedAt IS NULL AND updatedAt < ?
+          LIMIT 10`,
+    args: [cutoff],
+  });
+  for (const r of stale.rows) {
+    const id = String((r as Record<string, unknown>).id);
+    await finalizeSession(id); // completed + TrafficJob — та же логика, что при gap>60с
+    inc("recording_reaped_total", "Stale recording sessions closed by reaper", 1);
+  }
+  return stale.rows.length;
+}
+
 async function pollOnce(rt: WorkerRuntime) {
   const requestId = crypto.randomUUID();
   try {
@@ -227,6 +256,16 @@ async function pollOnce(rt: WorkerRuntime) {
     await pollExportJobs();
   } catch (err) {
     logger.error("export poll failed", { requestId, error: err instanceof Error ? err.message : String(err) });
+  }
+  // v2.14.0 (Ф3): закрытие зависших recording-сессий (тишина > 10 мин).
+  // Отдельный try/catch — сбой «жнеца» никогда не мешает остальному циклу.
+  try {
+    const reaped = await reapStaleRecordingSessions();
+    if (reaped > 0) {
+      logger.info("reaped stale recording sessions", { requestId, count: reaped });
+    }
+  } catch (err) {
+    logger.error("recording reaper failed", { requestId, error: err instanceof Error ? err.message : String(err) });
   }
 }
 

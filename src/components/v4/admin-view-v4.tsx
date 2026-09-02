@@ -62,14 +62,14 @@ import { bindTips } from "./use-v4-tipbox";
 import { CsvImport } from "@/components/csv-import";
 import { ZipImport } from "@/components/zip-import";
 
-// Версии документов (v2.11.0): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
+// Версии документов (v2.12.0): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
 // При следующем релизе доков обновить здесь + строки изменений ниже + шапки файлов в docs/
 // (методология не менялась с v2.10.4 — prev у неё остаётся v2.9).
 const DOCS = {
   methodology: "v2.10.4 · 31.08",
   methodologyPrev: "v2.9 · 29.08",
-  spec: "v2.11.0 · 01.09",
-  specPrev: "v2.10.8 · 01.09",
+  spec: "v2.12.0 · 02.09",
+  specPrev: "v2.11.0 · 01.09",
 } as const;
 
 export function AdminViewV4() {
@@ -249,6 +249,13 @@ function A1ParamsBlock() {
                 <b className="c-plum">спека v2.11.0</b> аудит кода+UX: системный фикс дат
                 (<s>числа epoch</s> → ISO), пагинация, идемпотентность инжеста, автобэкап-кроны
                 (<s>401</s> → работают), честные состояния загрузки/ошибок в интерфейсе
+              </li>
+              <li>
+                <b className="c-plum">спека v2.12.0</b> UX-ревью: <s>кнопка «Месяц»</s> → 4 периода;
+                идентификация поездок <b className="c-plum">по адресу конечной точки</b> (Nominatim
+                + кэш); единый счётчик GPS-точек (<s>15 266/15 155/15 148</s> → сходятся) ;
+                <s>«−66,6 балла»</s> → clamp штрафов EcoScore; <s>«39 РЕЗКО» на стоянке</s> →
+                медиан-фильтр GPS-выбросов; «Тяжёлые участки» и «Частые маршруты» уважают период
               </li>
             </ul>
           </div>

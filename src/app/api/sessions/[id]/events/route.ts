@@ -1,11 +1,14 @@
 // GET /api/sessions/[id]/events — детекция harsh events для G-G диаграммы.
 // Возвращает longitudinal/lateral acceleration для каждой точки + harsh events список.
 // v2.10.0: real AccelerationRMS/JerkRMS вместо seeded-манёвров.
+// v2.12.0 (D-6): скорости нормализуются (AUDIT B-4) и сглаживаются 3-точечной
+// медией — GPS-джиттер больше не порождает фантомные «резкие» события.
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
+import { normalizeSessionSpeeds, medianSmooth3, isUsableSpeedPoint } from "@/lib/kpi";
 
 const HARSH_THRESHOLD_MS2 = 10; // |a| > 10 м/с² → harsh (§4 методологии)
 const JERK_THRESHOLD_MS3 = 5; // |j| > 5 м/с³ → harsh jerk
@@ -44,20 +47,36 @@ export async function GET(
     const { id } = await params;
     const session = await db.session.findUnique({
       where: { id },
-      include: { gpsPoints: { orderBy: { timestamp: "asc" }, select: { lat: true, lon: true, timestamp: true, speed: true, bearing: true } } },
+      include: { gpsPoints: { orderBy: { timestamp: "asc" }, select: { lat: true, lon: true, timestamp: true, speed: true, bearing: true, accuracy: true } } },
     });
     if (!session || session.deletedAt) {
       return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     }
 
-    const points = session.gpsPoints;
-    if (points.length < 5) {
+    if (session.gpsPoints.length < 5) {
       return json(
         { sessionId: id, maneuvers: [], harshEvents: [], gg: { points: [], rings: [0.2, 0.4, 0.6] }, summary: { accelerationRMS: 0, jerkRMS: 0, harshBraking: 0, harshAcceleration: 0, maneuvers: 0 } },
         200,
         { "X-Request-Id": requestId }
       );
     }
+
+    // v2.12.0 (D-6): тот же конвейер подготовки скоростей, что и в /stats —
+    // normalizeSessionSpeeds (AUDIT B-4) + 3-точечная медиана против GPS-выбросов.
+    // Непригодные/отсутствующие скорости → 0 (как раньше «?? 0»), спайки гасятся медианой.
+    const rawPoints = session.gpsPoints.map((p) => ({
+      lat: p.lat,
+      lon: p.lon,
+      timestamp: Number(p.timestamp),
+      speed: p.speed,
+      bearing: p.bearing,
+      accuracy: p.accuracy,
+      altitude: null,
+    }));
+    const points = normalizeSessionSpeeds(rawPoints);
+    const speeds = medianSmooth3(
+      points.map((p) => (isUsableSpeedPoint(p) ? (p.speed as number) : 0))
+    ) as number[];
 
     // Вычисление longitudinal accel + lateral accel для каждой точки (кроме первых/последних 2)
     const maneuvers: { lat: number; lng: number; t: number; longA: number; latA: number; speed: number; bearing: number }[] = [];
@@ -76,9 +95,11 @@ export async function GET(
       const dt2 = (Number(p4.timestamp) - Number(p2.timestamp)) / 1000;
       if (dt1 <= 0 || dt2 <= 0) continue;
 
-      const v1 = p1.speed ?? 0;
-      const v2 = p2.speed ?? 0;
-      const v3 = p3.speed ?? 0;
+      // v2.12.0 (D-6): сглаженные скорости — одиночные GPS-спайки не дают
+      // фантомных ускорений (|a| > 10 м/с²) на стоянке
+      const v1 = speeds[i - 1] ?? 0;
+      const v2 = speeds[i] ?? 0;
+      const v3 = speeds[i + 1] ?? 0;
       // Longitudinal accel: central difference
       const longA = (v3 - v1) / ((dt1 + dt2) / 2);
       accelValues.push(longA * longA);
@@ -111,7 +132,7 @@ export async function GET(
         t: Math.round((Number(p2.timestamp) - Number(points[0].timestamp)) / 1000),
         longA: Math.round(longA * 100) / 100,
         latA: Math.round(latA * 100) / 100,
-        speed: Math.round((p2.speed ?? 0) * 3.6 * 10) / 10, // в км/ч для удобства
+        speed: Math.round(v2 * 3.6 * 10) / 10, // в км/ч для удобства (сглаженная)
         bearing: Math.round(b2),
       });
     }

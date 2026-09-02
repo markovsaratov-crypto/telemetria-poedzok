@@ -72,12 +72,37 @@ export function isUsableSpeedPoint(p: SpeedPoint): boolean {
   return true;
 }
 
-/** MaxSpeed (§4.4) с фильтром выбросов. Нет пригодных точек → null. */
+// v2.12.0 (D-6): 3-точечная скользящая медиана — гасит одиночные GPS-выбросы скорости.
+// Реальный пик (машина шла 40 → 60 → 58) остаётся пиком (медиана = 58), а
+// одиночный спайк на месте стоянки (0 → 60,8 → 0) превращается в 0.
+// Граничные точки (нет соседа с одной стороны) проходят как есть.
+export function median3(a: number, b: number, c: number): number {
+  return a + b + c - Math.min(a, b, c) - Math.max(a, b, c);
+}
+
+export function medianSmooth3(speeds: Array<number | null>): Array<number | null> {
+  const out: Array<number | null> = speeds.slice();
+  for (let i = 0; i < speeds.length; i++) {
+    const v = speeds[i];
+    if (v == null) continue;
+    const a = speeds[i - 1] ?? v;
+    const b = speeds[i + 1] ?? v;
+    out[i] = median3(a, v, b);
+  }
+  return out;
+}
+
+/** MaxSpeed (§4.4) с фильтром выбросов. Нет пригодных точек → null.
+ *  v2.12.0 (D-6): поверх статических границ (правдоподобие/точность) — 3-точечная
+ *  медиана: одиночный GPS-спайк больше не становится «максимальной скоростью». */
 export function maxSpeedMs(points: SpeedPoint[]): number | null {
+  const smoothed = medianSmooth3(
+    points.map((p) => (isUsableSpeedPoint(p) ? (p.speed as number) : null))
+  );
   let max: number | null = null;
-  for (const p of points) {
-    if (!isUsableSpeedPoint(p)) continue;
-    if (max == null || (p.speed as number) > max) max = p.speed as number;
+  for (const v of smoothed) {
+    if (v == null) continue;
+    if (max == null || v > max) max = v;
   }
   return max;
 }

@@ -190,6 +190,13 @@ export interface SessionListItem {
   startTime: string;
   endTime?: string | null;
   pointCount: number;
+  // v2.12.0 (D-1): фактическое число строк GpsPoint (денормализованный pointCount
+  // расходится с реальностью после чисток — например 4015 vs 3897).
+  pointCountActual?: number | null;
+  // v2.12.0 (Q3): координаты последней точки записи — адресная идентификация
+  // поездки по названию конечной точки (reverse geocode).
+  endLat?: number | null;
+  endLon?: number | null;
   payloadBytes: number;
   status: string;
   routeId?: string | null;

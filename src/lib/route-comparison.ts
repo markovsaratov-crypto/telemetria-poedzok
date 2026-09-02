@@ -48,6 +48,34 @@ export interface RouteGroupInfo {
 
 const RELIABILITY_FLOOR = 0.6; // §10.1: в агрегат входят только сессии с SessionReliability ≥ 0.6
 
+// v2.12.0 (D-8): период-фильтр для route-агрегатов. «Месяца» больше нет —
+// 4 периода согласованы с PeriodKey на клиенте.
+// Возвращает ISO-строку: Session.startTime в SQLite — TEXT ISO-8601 UTC (C-4),
+// аргументы-числа в libsql-фильтрах теряют строки (integer < text).
+export type RoutePeriod = "today" | "week" | "d30" | "all";
+
+export function routePeriodSinceIso(period: string | null): string | null {
+  const now = Date.now();
+  let since: number | null = null;
+  switch (period) {
+    case "today": {
+      const d = new Date(now);
+      since = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      break;
+    }
+    case "week":
+      since = now - 7 * 86_400_000;
+      break;
+    case "d30":
+      since = now - 30 * 86_400_000;
+      break;
+    case "all":
+    default:
+      since = null; // без фильтра (неизвестный параметр — как «all», обратная совместимость)
+  }
+  return since != null ? new Date(since).toISOString() : null;
+}
+
 // libsql-совместимый парсер дат: MIN/MAX возвращают ISO-строки, прямой SELECT — epoch int/BigInt
 function toMs(v: unknown): number {
   if (v == null) return NaN;
@@ -60,10 +88,13 @@ function toMs(v: unknown): number {
 
 // Загружает сессии routeHash-группы с вычислением ActiveTrip + SessionReliability (§11.6).
 // GPS-точки читаются напрямую через libsql (без db-обёрток — полный контроль над выборкой).
-export async function loadGroupSessions(routeHash: string): Promise<GroupSession[]> {
+// v2.12.0 (D-8): sinceIso — только сессии, начавшиеся не раньше (период-фильтр, ISO-строка).
+export async function loadGroupSessions(routeHash: string, sinceIso?: string | null): Promise<GroupSession[]> {
   const sessRes = await libsql.execute({
-    sql: "SELECT id, deviceId, startTime, endTime FROM Session WHERE routeHash = ? AND deletedAt IS NULL ORDER BY startTime ASC",
-    args: [routeHash],
+    sql: sinceIso != null
+      ? "SELECT id, deviceId, startTime, endTime FROM Session WHERE routeHash = ? AND deletedAt IS NULL AND startTime >= ? ORDER BY startTime ASC"
+      : "SELECT id, deviceId, startTime, endTime FROM Session WHERE routeHash = ? AND deletedAt IS NULL ORDER BY startTime ASC",
+    args: sinceIso != null ? [routeHash, sinceIso] : [routeHash],
   });
   if (sessRes.rows.length === 0) return [];
 
@@ -379,17 +410,39 @@ export async function computeGroupHotspots(routeHash: string, sessions: GroupSes
 }
 
 // === Список всех групп (для UI) ===
-export async function listRouteGroups(): Promise<RouteGroupInfo[]> {
-  const res = await libsql.execute(`
-    SELECT routeHash, topologyHash, COUNT(*) as cnt,
-           MIN(startTime) as firstSeen, MAX(startTime) as lastSeen,
-           GROUP_CONCAT(DISTINCT deviceId) as devices,
-           GROUP_CONCAT(id) as ids
-    FROM Session
-    WHERE routeHash IS NOT NULL AND deletedAt IS NULL
-    GROUP BY routeHash
-    ORDER BY lastSeen DESC
-  `);
+// v2.12.0 (D-8): sinceIso — ограничить выборку сессиями периода (группы без
+// сессий в периоде исчезают из ответа). v2.12.0 (D-7): группы обрабатываются
+// параллельно (Promise.all) вместо последовательного цикла — 8 групп больше
+// не ждут друг друга (~8 с → ~1 с).
+export async function listRouteGroups(sinceIso?: string | null): Promise<RouteGroupInfo[]> {
+  const res = await libsql.execute(
+    sinceIso != null
+      ? {
+          sql: `
+            SELECT routeHash, topologyHash, COUNT(*) as cnt,
+                   MIN(startTime) as firstSeen, MAX(startTime) as lastSeen,
+                   GROUP_CONCAT(DISTINCT deviceId) as devices,
+                   GROUP_CONCAT(id) as ids
+            FROM Session
+            WHERE routeHash IS NOT NULL AND deletedAt IS NULL AND startTime >= ?
+            GROUP BY routeHash
+            ORDER BY lastSeen DESC
+          `,
+          args: [sinceIso],
+        }
+      : {
+          sql: `
+            SELECT routeHash, topologyHash, COUNT(*) as cnt,
+                   MIN(startTime) as firstSeen, MAX(startTime) as lastSeen,
+                   GROUP_CONCAT(DISTINCT deviceId) as devices,
+                   GROUP_CONCAT(id) as ids
+            FROM Session
+            WHERE routeHash IS NOT NULL AND deletedAt IS NULL
+            GROUP BY routeHash
+            ORDER BY lastSeen DESC
+          `,
+        }
+  );
   const groups: RouteGroupInfo[] = [];
   for (const row of res.rows) {
     const r = row as unknown as Record<string, unknown>;
@@ -414,9 +467,15 @@ export async function listRouteGroups(): Promise<RouteGroupInfo[]> {
       sessionIds: ids,
       polylineSample: null,
     };
-    // Детали (ActiveTrip-агрегаты) — только для групп ≤ 12 сессий, чтобы endpoint оставался лёгким
-    if (ids.length > 0 && ids.length <= 12) {
-      const sessions = await loadGroupSessions(routeHash);
+    groups.push(info);
+  }
+
+  // Детали (ActiveTrip-агрегаты) — только для групп ≤ 12 сессий, чтобы endpoint оставался лёгким.
+  // v2.12.0 (D-7): параллельно — раньше последовательный await в цикле.
+  const detailGroups = groups.filter((g) => g.sessionIds.length > 0 && g.sessionIds.length <= 12);
+  const details = await Promise.all(
+    detailGroups.map(async (info) => {
+      const sessions = await loadGroupSessions(info.routeHash, sinceIso);
       const stats = routeDurationStats(sessions);
       info.avgActiveDurationSec = stats.avg;
       info.bestActiveDurationSec = stats.best;
@@ -449,9 +508,10 @@ export async function listRouteGroups(): Promise<RouteGroupInfo[]> {
           first.activeStartTime + first.activeDuration * 1000
         );
       }
-    }
-    groups.push(info);
-  }
+      return info;
+    })
+  );
+  void details; // info-объекты мутируются на месте (в groups)
   return groups;
 }
 

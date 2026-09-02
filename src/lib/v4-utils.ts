@@ -3,7 +3,9 @@
 // EcoScore + efficiency zone classifiers (methodology §7.3 + §6.3).
 // BUCKETS constant — 6 speed-bucket labels (0-20 / 20-40 / 40-60 / 60-80 / 80-100 / 100+).
 
-export type PeriodKey = "today" | "week" | "d30" | "month" | "all";
+// v2.12.0: период «Месяц» (календарный, с 1-го числа) удалён по требованию владельца —
+// осталось 4 периода: Сегодня / 7 дней (скользящее) / 30 дней (скользящее) / Всё время.
+export type PeriodKey = "today" | "week" | "d30" | "all";
 export type Period = PeriodKey;
 
 // 6 speed buckets for SpeedProfileBlock + G-G diagram axes.

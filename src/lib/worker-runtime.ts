@@ -7,6 +7,7 @@ import { inc, set } from "./metrics";
 import { routeRequest } from "./routing/chain";
 import { finalizeSession } from "./session-finalize"; // v2.14.0 (Ф3): «жнец» зависших recording-сессий
 import { computeMovingTime, computeActiveTrip } from "./active-trip"; // v2.16.0 (B-10): каноническое активное окно §4.11
+import { getCorpusEcoBaselines } from "./eco-corpus"; // v2.17.1: фоновый прогрев corpus-калибровки
 
 // P0-фикс v2.9.10 (Render build failure — финальная версия без костылей):
 //
@@ -238,6 +239,24 @@ async function reapStaleRecordingSessions(): Promise<number> {
   return stale.rows.length;
 }
 
+// v2.17.1: фоновый прогрев corpus-калибровки EcoScore (§7.3). Холодный свип
+// (JOIN всех живых сессий с точками + методология по каждой) занимает на проде
+// ~15–20 с — до v2.17.1 его платил ПЕРВЫЙ пользовательский stats-запрос после
+// старта инстанса (замер прод-лога v2.17.0: /api/stats/batch 20,3 с,
+// [id]/stats 21,5 с, speed-record 13,2 с — все ждали одного свипа). Воркер
+// in-process (общий globalThis-кэш с роутами) → прогреваем в фоне: первый
+// цикл воркера (~5 с после старта) и далее каждые 4 мин (TTL кэша 5 мин —
+// обновляем ДО истечения, пользователь не видит холодного прохода).
+// Fire-and-forget: свип не блокирует poll-цикл (TrafficJob/ExportJob/жнец);
+// коалесценция с пользовательскими вызовами — внутри eco-corpus (inflight).
+const CORPUS_PREWARM_INTERVAL_MS = 4 * 60_000;
+let corpusPrewarmLastAt = 0;
+function prewarmCorpusBaselines(): void {
+  if (Date.now() - corpusPrewarmLastAt < CORPUS_PREWARM_INTERVAL_MS) return;
+  corpusPrewarmLastAt = Date.now(); // ставим ДО прохода: сбой не ретраится чаще раза в 4 мин
+  void getCorpusEcoBaselines(); // ошибки логируются внутри (fallback на дефолты)
+}
+
 async function pollOnce(rt: WorkerRuntime) {
   const requestId = crypto.randomUUID();
   try {
@@ -266,6 +285,8 @@ async function pollOnce(rt: WorkerRuntime) {
   } catch (err) {
     logger.error("recording reaper failed", { requestId, error: err instanceof Error ? err.message : String(err) });
   }
+  // v2.17.1: фоновый прогрев corpus-калибровки EcoScore (см. комментарий выше)
+  prewarmCorpusBaselines();
 }
 
 // P1-8: обработка ExportJob (раньше навсегда оставались pending → «вечные 202»).

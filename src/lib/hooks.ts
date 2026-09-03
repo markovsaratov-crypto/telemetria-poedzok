@@ -3,12 +3,12 @@
 
 "use client";
 
-import { useEffect } from "react";
 import {
   useQuery,
   useMutation,
   useQueryClient,
   UseQueryOptions,
+  type QueryClient,
 } from "@tanstack/react-query";
 import {
   api,
@@ -388,6 +388,39 @@ const STATS_BATCH_COVER_MS = 5 * 60_000; // «покрытие» per-session к�
 /** id → timestamp последнего успешного посева из батча */
 const statsBatchCover = new Map<string, number>();
 
+/** Стабильный строковый ключ множества id (порядок не важен). */
+function idsKeyOf(ids: string[]): string {
+  return Array.from(new Set(ids.filter(Boolean))).sort().join(",");
+}
+
+/**
+ * Посев статов батча в кэш per-session ключей + отметка покрытия.
+ * Идемпотентен; вызывается СИНХРОННО до монтирования потребителей
+ * (см. комментарий в useSessionsStatsBatch — v2.17.2, фикс гонки).
+ */
+function seedStatsIntoCache(qc: QueryClient, stats: SessionStats[]): void {
+  if (stats.length === 0) return;
+  const now = Date.now();
+  for (const s of stats) {
+    qc.setQueryData(["session-stats", s.sessionId], s);
+    statsBatchCover.set(s.sessionId, now);
+  }
+}
+
+/** v2.17.2: id покрыт свежим батчем (кэш просеян, персональный запрос не нужен)? */
+export function isStatsBatchCovered(id: string): boolean {
+  return Date.now() - (statsBatchCover.get(id) ?? Number.NEGATIVE_INFINITY) < STATS_BATCH_COVER_MS;
+}
+
+/**
+ * v2.17.2: посев из ВНЕШНЕГО батча (период-агрегат «Аналитики» получает тот же
+ * /api/stats/batch, но через собственный queryFn) — «Поездки» после аналитики
+ * рендерятся из кэша мгновенно.
+ */
+export function seedSessionsStatsFromBatch(qc: QueryClient, stats: SessionStats[]): void {
+  seedStatsIntoCache(qc, stats);
+}
+
 /** Плоская функция — используется и хуком, и queryFn usePeriodStats. */
 export async function fetchSessionsStatsBatch(ids: string[]): Promise<StatsBatchResponse> {
   const uniq = Array.from(new Set(ids.filter(Boolean)));
@@ -408,36 +441,32 @@ export async function fetchSessionsStatsBatch(ids: string[]): Promise<StatsBatch
 
 /**
  * Батч-загрузка статов списка сессий + сидинг пер-сессионного кэша.
- * Ставится в корне вкладки («Поездки») рядом со списком сессий: один ключ
- * на множество id → один запрос на множество карточек.
+ * Ставится в корне вкладки («Поездки») и в корне лейаута (префетч) — один
+ * ключ на множество id → один запрос на множество карточек.
  */
 export function useSessionsStatsBatch(ids: string[]) {
   const qc = useQueryClient();
   // строковый ключ стабилен независимо от identity массива на каждом рендере
-  const idsKey = Array.from(new Set(ids.filter(Boolean))).sort().join(",");
+  const idsKey = idsKeyOf(ids);
 
-  const query = useQuery({
+  return useQuery({
     queryKey: ["stats-batch", idsKey],
-    queryFn: () => fetchSessionsStatsBatch(idsKey ? idsKey.split(",") : []),
+    queryFn: async () => {
+      const res = await fetchSessionsStatsBatch(idsKey ? idsKey.split(",") : []);
+      // v2.17.2 (фикс гонки, прод-лог v2.17.1): посев СИНХРОННО до возврата.
+      // queryFn выполняется ДО рендера детей на этих данных; посев в useEffect
+      // родителя опаздывал — эффекты детей срабатывают раньше родительского,
+      // useSessionStats при монтировании видел пустое покрытие и стартовал
+      // поштучный запрос на каждую запись: «шторм» из N запросов
+      // воспроизводился ровно в момент прилёта батча. Теперь покрытие
+      // устанавливается до монтирования карточек.
+      seedStatsIntoCache(qc, res.stats);
+      return res;
+    },
     enabled: idsKey !== "",
     staleTime: 30_000,
     retry: 1,
   });
-
-  // v2.17.0: «просеивание» ответа в кэш per-session ключей + отметка покрытия.
-  // Сеем только после успешного ответа — при сбое батча пер-сессионные хуки
-  // работают как раньше (каждый сам за себя).
-  useEffect(() => {
-    const stats = query.data?.stats;
-    if (!stats || stats.length === 0) return;
-    const now = Date.now();
-    for (const s of stats) {
-      qc.setQueryData(["session-stats", s.sessionId], s);
-      statsBatchCover.set(s.sessionId, now);
-    }
-  }, [query.data, qc]);
-
-  return query;
 }
 
 // ===== Batch sessions (for compare) =====

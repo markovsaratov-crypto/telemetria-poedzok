@@ -26,7 +26,7 @@
 "use client";
 
 import * as React from "react";
-import { useSessions, useSessionStats, useSessionsStatsBatch, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
+import { useSessions, useSessionStats, useSessionsStatsBatch, isStatsBatchCovered, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
 import { ecoCls, ecoLab } from "@/lib/v4-utils";
 import { fmtSecFull, fmtDurMin, fmtNumber, pluralRu } from "@/lib/format";
@@ -90,18 +90,26 @@ export function TripsView({ onGoAdmin }: { onGoAdmin?: () => void }) {
   // загрузки). Ответ просеивается в кэш ["session-stats", id] (хук внутри),
   // карточки/агрегаторы читают его без собственных запросов (coverage в
   // useSessionStats). Пока первый батч в полёте — держим скелетон; сбой или
-  // 15-секундный watchdog → рендерим карточки как раньше (поштучная загрузка).
+  // 25-секундный watchdog → рендерим карточки как раньше (поштучная загрузка).
+  // v2.17.2: если все id уже покрыты свежим батчем (префетч лейаута /
+  // период-агрегат «Аналитики» уже просеяли кэш) — карточки рендерятся
+  // мгновенно, не дожидаясь своего запроса.
   const ids = React.useMemo(() => list.map((s) => s.id), [list]);
   const statsBatch = useSessionsStatsBatch(ids);
   const [batchWatchdog, setBatchWatchdog] = React.useState(false);
   React.useEffect(() => {
     setBatchWatchdog(false);
     if (statsBatch.data != null || statsBatch.isError) return;
-    const t = window.setTimeout(() => setBatchWatchdog(true), 15_000);
+    const t = window.setTimeout(() => setBatchWatchdog(true), 25_000);
     return () => window.clearTimeout(t);
   }, [statsBatch.data, statsBatch.isError]);
+  const allCovered = ids.length > 0 && ids.every((id) => isStatsBatchCovered(id));
   const waitingForStats =
-    ids.length > 0 && statsBatch.data == null && !statsBatch.isError && !batchWatchdog;
+    ids.length > 0 &&
+    statsBatch.data == null &&
+    !statsBatch.isError &&
+    !batchWatchdog &&
+    !allCovered;
   // Рефреш показателя «свежести» раз в минуту (чтобы часы без перезагрузки обновлялись)
   const [, setTick] = React.useState(0);
   React.useEffect(() => {

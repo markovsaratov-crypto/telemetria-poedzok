@@ -8,22 +8,15 @@ import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { normalizeSessionSpeeds, medianSmooth3, isUsableSpeedPoint } from "@/lib/kpi";
+import { normalizeSessionSpeeds, medianSmooth3, isUsableSpeedPoint, HARSH_THRESHOLD_MS2 } from "@/lib/kpi";
+import { haversineM } from "@/lib/geo"; // v2.16.0 (D-9): канонический гаверсинус (была локальная копия)
 
 // v2.13.0 (Ф3): порог приведён к методологии §7.1/§7.2 — 10 км/ч за секунду
 // = 2,78 м/с². Раньше было 10 м/с² (≈1g — экстренное торможение): счётчик блока
 // «События вождения» расходился с конвейером методологии (EcoScore) в ~5 раз.
-const HARSH_THRESHOLD_MS2 = 10 / 3.6; // 10 км/ч/с → м/с² (§7.1/§7.2)
+// v2.16.0: константа — ЕДИНЫЙ HARSH_THRESHOLD_MS2 из kpi.ts (как в track-роуте).
 const JERK_THRESHOLD_MS3 = 5; // |j| > 5 м/с³ → harsh jerk
 const HIGH_SPEED_CORNER_THRESHOLD = 60; // скорость >60 км/ч (§7.10), угол — 45° ниже
-
-function haversineM(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371000;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(a));
-}
 
 function bearingDeg(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const dLon = ((lon2 - lon1) * Math.PI) / 180;
@@ -180,7 +173,8 @@ export async function GET(
         maneuvers,
         // G-G диаграмма points (x=longA/g, y=latA/g)
         gg: { points: ggPoints, rings: ggRings },
-        // Harsh events (|a| > 10 м/с²)
+        // Harsh events (|a| > 2,78 м/с² — §7.1/§7.2; комментарий v2.16.0: раньше тут
+        // врал «> 10 м/с²» при пороге 2,78)
         harshEvents: harshEvents.map((e) => ({
           lat: e.lat,
           lng: e.lng,
@@ -205,7 +199,9 @@ export async function GET(
       { "X-Request-Id": requestId }
     );
   } catch (e) {
-    logger.error("events fetch failed", { requestId, error: (e as Error).message });
-    return json({ error: (e as Error).message }, 500, { "X-Request-Id": requestId });
+    // v2.16.0 (B2): наружу — только generic-текст (детали SQL/внутренностей —
+    // в логи; было два роута из всех, что сыпали err.message клиенту)
+    logger.error("events fetch failed", { requestId, error: e instanceof Error ? e.message : String(e) });
+    return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });
   }
 }

@@ -32,9 +32,16 @@ export async function GET(
     }
 
     const trafficJob = session.trafficJobs[0];
-    const traffic = trafficJob?.result
-      ? JSON.parse(trafficJob.result)
-      : { status: trafficJob?.status ?? "pending", trafficFetched: false };
+    // v2.16.0 (B3): безопасный парс результата джоба — одна битая строка TrafficJob.result
+    // больше НЕ роняет GET валидной сессии в 500 (паттерн как в sessions/export)
+    let traffic: Record<string, unknown>;
+    try {
+      traffic = trafficJob?.result ? JSON.parse(trafficJob.result) : {};
+    } catch {
+      traffic = {};
+    }
+    if (!traffic.status) traffic.status = trafficJob?.status ?? "pending";
+    if (traffic.trafficFetched === undefined) traffic.trafficFetched = false;
 
     return json(
       {

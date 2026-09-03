@@ -14,6 +14,13 @@ const zUpdateBody = z.object({
   value: z.string().max(4096),
 });
 
+// v2.16.0 (S6): allow-list ключей — админ может менять ТОЛЬКО известные
+// переопределяемые настройки (как в listOverridableSettings). Раньше PUT писал
+// в таблицу Setting ЛЮБОЙ ключ — та же таблица хранит кэш геокода (geocode:*)
+// и диагностические ключи (diag.*) — любая опечатка/злоупотребление портила их.
+const SETTING_KEY_ALLOWLIST = ["TWO_GIS_API_KEY", "TWO_GIS_PROXY_URL", "OSRM_BASE_URL"] as const;
+export const _SETTING_KEY_ALLOWLIST = SETTING_KEY_ALLOWLIST;
+
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   try {
@@ -55,6 +62,13 @@ export async function PUT(request: NextRequest) {
 
     const userId = await getUserIdFromRequest(request);
     const { key, value } = parsed.data;
+    if (!(SETTING_KEY_ALLOWLIST as readonly string[]).includes(key)) {
+      return json(
+        { error: `Ключ «${key}» не является переопределяемой настройкой. Доступно: ${SETTING_KEY_ALLOWLIST.join(", ")}` },
+        400,
+        { "X-Request-Id": requestId }
+      );
+    }
     await setSetting(key, value, userId ?? auth.role);
     return json({ ok: true, key, value }, 200, { "X-Request-Id": requestId });
   } catch (err) {

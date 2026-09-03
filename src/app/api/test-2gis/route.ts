@@ -38,24 +38,25 @@ export async function GET(request: NextRequest) {
       configured: true,
       provider: "2gis",
       proxy: proxyUrl ? "proxy" : "direct",
-      keyMasked: "***" + key.slice(-2),
       status: res.status,
       ok: res.ok,
       response: text.slice(0, 300),
       },
-      200,
+      res.ok ? 200 : 502,
       { "X-Request-Id": requestId }
     );
   } catch (err) {
+    // v2.16.0 (B18): сбой провайдера — ЧЕСТНЫЙ 502 (200 с полем error клиенты
+    // не отличали от успеха); фрагмент ключа из ответа убран (светились последние
+    // 2 символа)
     return json(
       {
         configured: true,
         provider: "2gis",
         proxy: proxyUrl ? "proxy" : "direct",
-        keyMasked: "***" + key.slice(-2),
         error: err instanceof Error ? err.message : String(err),
       },
-      200,
+      502,
       { "X-Request-Id": requestId }
     );
   }

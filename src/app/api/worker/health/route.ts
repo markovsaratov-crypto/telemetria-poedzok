@@ -9,7 +9,6 @@ import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { env } from "@/lib/env";
 import { inc } from "@/lib/metrics";
-import { Prisma } from "@prisma/client";
 
 // GET /api/worker/health
 export async function GET(request: NextRequest) {

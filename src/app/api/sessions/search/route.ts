@@ -13,13 +13,17 @@ export async function GET(request: NextRequest) {
 
     const url = new URL(request.url);
     const q = (url.searchParams.get("q") || "").trim();
-    const limit = Math.min(Number(url.searchParams.get("limit") || 20), 100);
+    // v2.16.0 (B6): ?limit=abc больше НЕ даёт NaN (NaN → take: NaN → 500 от libsql)
+    const limitRaw = Number(url.searchParams.get("limit"));
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), 100) : 20;
 
     if (!q) {
       return json({ sessions: [], query: "" }, 200, { "X-Request-Id": requestId });
     }
 
-    // Поиск по deviceId, notes, tags (case-insensitive contains)
+    // Поиск по deviceId, notes, tags (contains; v2.16.0: LOWER-LIKE — регистр
+    // игнорируется и для кириллицы, matchFields — тем же правилом)
+    const qLower = q.toLowerCase();
     const sessions = await db.session.findMany({
       where: {
         deletedAt: null,
@@ -46,13 +50,13 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    // Подсветка совпадений
+    // Подсветка совпадений (v2.16.0: регистронезависимо — как SQL-фильтр выше)
     const highlighted = sessions.map((s) => {
       const matchFields: string[] = [];
-      if (s.deviceId?.includes(q)) matchFields.push("deviceId");
-      if (s.deviceName?.includes(q)) matchFields.push("deviceName");
-      if (s.notes?.includes(q)) matchFields.push("notes");
-      if (s.tags?.includes(q)) matchFields.push("tags");
+      if (s.deviceId?.toLowerCase().includes(qLower)) matchFields.push("deviceId");
+      if (s.deviceName?.toLowerCase().includes(qLower)) matchFields.push("deviceName");
+      if (s.notes?.toLowerCase().includes(qLower)) matchFields.push("notes");
+      if (s.tags?.toLowerCase().includes(qLower)) matchFields.push("tags");
       return { ...s, matchFields };
     });
 

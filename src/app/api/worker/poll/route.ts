@@ -21,7 +21,19 @@ export async function POST(request: NextRequest) {
     // SQLite не поддерживает RETURNING через Prisma напрямую → используем raw SQL
     // v2.11.0 (АУДИТ C-4): was new Date() → libsql сериализует в ЧИСЛО →
     // lockedAt/updatedAt/scheduledFor-сравнения ломались. Теперь ISO-строка.
+    // v2.16.0 (R6): ПЕРЕД захватом — реклейм зависших running-джобов (60с TTL,
+    // attempts+1, после 10 — dead), тот же паттерн, что и у in-process воркера.
+    // Раньше HTTP-воркер вообще не имел реклейма: джоб, оставшийся 'running' после
+    // смерти воркера, висел в этом статусе навсегда.
     const now = new Date().toISOString();
+    const stuckCutoff = new Date(Date.now() - 60_000).toISOString();
+    await db.$queryRaw<{ id: string }[]>`
+      UPDATE TrafficJob
+      SET status = CASE WHEN attempts >= 9 THEN 'dead' ELSE 'pending' END,
+          attempts = attempts + 1,
+          "lockedBy" = NULL, "lockedAt" = NULL, "updatedAt" = ${now}
+      WHERE status = 'running' AND "lockedAt" < ${stuckCutoff}
+    `;
     const ids = await db.$queryRaw<{ id: string }[]>`
       UPDATE TrafficJob
       SET status = 'running', "lockedBy" = ${workerId}, "lockedAt" = ${now}, "updatedAt" = ${now}

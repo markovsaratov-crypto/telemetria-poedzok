@@ -75,15 +75,21 @@ export async function getSetting(key: string): Promise<string> {
 }
 
 export async function setSetting(key: string, value: string, updatedBy?: string): Promise<void> {
+  await upsertSetting(key, value, updatedBy ?? null);
+  getStore().cache.set(key, { value, updatedAt: Date.now() });
+  logger.info("setting updated", { key, updatedBy });
+}
+
+// v2.16.0 (D-14): ЕДИНЫЙ UPSERT строки Setting — раньше тот же SQL копировался
+// в settings.ts и дважды в ingest-trace.ts (расползание правок при изменении схемы).
+export async function upsertSetting(key: string, value: string, updatedBy: string | null): Promise<void> {
   const now = new Date().toISOString();
   await libsql.execute({
     sql: `INSERT INTO Setting (key, value, updatedAt, updatedBy)
           VALUES (?, ?, ?, ?)
           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt, updatedBy = excluded.updatedBy`,
-    args: [key, value, now, updatedBy ?? null],
+    args: [key, value, now, updatedBy],
   });
-  getStore().cache.set(key, { value, updatedAt: Date.now() });
-  logger.info("setting updated", { key, updatedBy });
 }
 
 export async function ensureSettingsLoaded(): Promise<void> {

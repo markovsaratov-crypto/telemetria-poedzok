@@ -1,11 +1,12 @@
 // src/lib/worker-runtime.ts — In-process Worker (runs inside Next.js via instrumentation.ts).
 import pLimit from "p-limit";
-import { libsql } from "./db";
+import { libsql, toCamel } from "./db"; // v2.16.0: toCamel — единая реализация (была локальная копия)
 import { env } from "./env";
 import { logger } from "./logger";
 import { inc, set } from "./metrics";
 import { routeRequest } from "./routing/chain";
 import { finalizeSession } from "./session-finalize"; // v2.14.0 (Ф3): «жнец» зависших recording-сессий
+import { computeMovingTime, computeActiveTrip } from "./active-trip"; // v2.16.0 (B-10): каноническое активное окно §4.11
 
 // P0-фикс v2.9.10 (Render build failure — финальная версия без костылей):
 //
@@ -55,15 +56,6 @@ interface WorkerRuntime {
   stop: () => void;
 }
 
-function toCamel(row: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(row)) {
-    const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
-    result[camelKey] = value;
-  }
-  return result;
-}
-
 interface JobWithPoints {
   id: string;
   sessionId: string;
@@ -76,10 +68,17 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
   const STUCK_TTL_MS = 60_000;
   const stuckCutoff = new Date(Date.now() - STUCK_TTL_MS).toISOString();
 
-  // Reclaim stuck running jobs
+  // v2.16.0 (R5): Reclaim зависших running-джобов С инкрементом attempts и
+  // «смертью» после 10 неудачных реклеймов — раньше джоб, убивший процесс
+  // (OOM между claim и complete), ретраился КАЖДЫЕ 60 СЕК навечно (attempts
+  // инкрементировался только в completeJob) — вечный цикл внешних вызовов.
   try {
     await libsql.execute({
-      sql: `UPDATE TrafficJob SET status = 'pending', lockedBy = NULL, lockedAt = NULL, updatedAt = ? WHERE status = 'running' AND lockedAt < ?`,
+      sql: `UPDATE TrafficJob
+            SET status = CASE WHEN attempts >= 9 THEN 'dead' ELSE 'pending' END,
+                attempts = attempts + 1,
+                lockedBy = NULL, lockedAt = NULL, updatedAt = ?
+            WHERE status = 'running' AND lockedAt < ?`,
       args: [now, stuckCutoff],
     });
   } catch {}
@@ -114,15 +113,15 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
   }
 
   const ptsRes = await libsql.execute({
-    sql: `SELECT sessionId, lat, lon, speed FROM GpsPoint WHERE sessionId IN (${placeholders}) ORDER BY sessionId, timestamp ASC`,
+    sql: `SELECT sessionId, lat, lon, speed, timestamp FROM GpsPoint WHERE sessionId IN (${placeholders}) ORDER BY sessionId, timestamp ASC`,
     args: sessionIds as any,
   });
-  const pointsMap = new Map<string, Array<{ lat: number; lon: number; speed: number | null }>>();
+  const pointsMap = new Map<string, Array<{ lat: number; lon: number; speed: number | null; timestamp: number; altitude: null; accuracy: null; bearing: null }>>();
   for (const r of ptsRes.rows) {
     const p = r as Record<string, unknown>;
     const sid = String(p.sessionId);
     if (!pointsMap.has(sid)) pointsMap.set(sid, []);
-    pointsMap.get(sid)!.push({ lat: Number(p.lat), lon: Number(p.lon), speed: p.speed != null ? Number(p.speed) : null });
+    pointsMap.get(sid)!.push({ lat: Number(p.lat), lon: Number(p.lon), speed: p.speed != null ? Number(p.speed) : null, timestamp: Number(p.timestamp), altitude: null, accuracy: null, bearing: null });
   }
 
   const jobs: JobWithPoints[] = [];
@@ -133,16 +132,16 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
       continue;
     }
     const allPoints = pointsMap.get(c.sessionId) || [];
-    // Filter: active part = first speed>0 to last speed>0
-    let firstActive = -1, lastActive = -1;
-    for (let i = 0; i < allPoints.length; i++) {
-      if (allPoints[i].speed != null && allPoints[i].speed! > 0) {
-        if (firstActive === -1) firstActive = i;
-        lastActive = i;
-      }
-    }
-    const gpsPoints = firstActive >= 0
-      ? allPoints.slice(firstActive, lastActive + 1).map((p) => ({ lat: p.lat, lon: p.lon }))
+    // v2.16.0 (B-10): активное окно — КАНОНИЧЕСКИЙ §4.11 (state machine из
+    // active-trip.ts), как во всех метриках/UI. Раньше здесь была третья
+    // расходящаяся реализация «first speed>0 … last speed>0» — маршрутная
+    // геометрия снапшотилась другим окном, чем дистанция/длительность.
+    const motion = computeMovingTime(allPoints);
+    const active = computeActiveTrip(allPoints, motion);
+    const gpsPoints = active.hasActiveTrip
+      ? allPoints
+          .filter((p) => p.timestamp >= active.activeStartTime && p.timestamp <= active.activeEndTime)
+          .map((p) => ({ lat: p.lat, lon: p.lon }))
       : allPoints.map((p) => ({ lat: p.lat, lon: p.lon }));
 
     jobs.push({ id: c.id, sessionId: c.sessionId, attempts: c.attempts, session: { id: c.sessionId, deviceId, gpsPoints } });
@@ -275,11 +274,17 @@ async function pollOnce(rt: WorkerRuntime) {
 // размер и обновляет метаданные в БД (fileSize, expiresAt).
 async function pollExportJobs(): Promise<void> {
   const now = new Date().toISOString();
+  // v2.16.0 (R1, КРИТИЧНО): в таблице ExportJob НЕТ колонки updatedAt (см.
+  // prisma/schema.prisma — только createdAt/completedAt). Все три SQL ниже
+  // писали `updatedAt = ?` → «no such column» → claim НАВСЕГДА падал →
+  // экспорт-джобы (>5000 точек) застревали pending до бесконечности — те самые
+  // «вечные 202» из P1-8, только теперь по другой причине. Колонка убрана
+  // из всех трёх statements (даты меняются через completedAt).
   const claim = await libsql.execute({
-    sql: `UPDATE ExportJob SET status = 'running', updatedAt = ?
+    sql: `UPDATE ExportJob SET status = 'running'
           WHERE id IN (SELECT id FROM ExportJob WHERE status = 'pending' ORDER BY createdAt ASC LIMIT 2)
           RETURNING id, sessionId, format, attempts`,
-    args: [now],
+    args: [],
   });
   if (claim.rows.length === 0) return;
 
@@ -316,8 +321,8 @@ async function pollExportJobs(): Promise<void> {
       // в SQLite integer < text → сравнения «истёк/не истёк» ломались).
       const expiresAt = new Date(Date.now() + env().EXPORT_URL_TTL_HOURS * 3600 * 1000).toISOString();
       await libsql.execute({
-        sql: `UPDATE ExportJob SET status = 'completed', fileUrl = ?, fileSize = ?, expiresAt = ?, completedAt = ?, error = NULL, updatedAt = ? WHERE id = ?`,
-        args: [logicalFileRef, Buffer.byteLength(content), expiresAt, now, now, jobId],
+        sql: `UPDATE ExportJob SET status = 'completed', fileUrl = ?, fileSize = ?, expiresAt = ?, completedAt = ?, error = NULL WHERE id = ?`,
+        args: [logicalFileRef, Buffer.byteLength(content), expiresAt, now, jobId],
       });
       inc("export_completed_total", "Exports completed", 1, format);
       logger.info("export job completed", { jobId, sessionId, format, bytes: Buffer.byteLength(content) });
@@ -326,8 +331,8 @@ async function pollExportJobs(): Promise<void> {
       const newAttempts = attempts + 1;
       const nextStatus = newAttempts < 3 ? "pending" : "dead";
       await libsql.execute({
-        sql: `UPDATE ExportJob SET status = ?, attempts = ?, error = ?, updatedAt = ? WHERE id = ?`,
-        args: [nextStatus, newAttempts, msg.slice(0, 500), now, jobId],
+        sql: `UPDATE ExportJob SET status = ?, attempts = ?, error = ? WHERE id = ?`,
+        args: [nextStatus, newAttempts, msg.slice(0, 500), jobId],
       });
       inc("export_failed_total", "Export jobs failed", 1);
       logger.error("export job failed", { jobId, error: msg, attempts: newAttempts });

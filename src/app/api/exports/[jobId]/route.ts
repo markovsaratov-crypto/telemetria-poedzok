@@ -5,9 +5,6 @@ import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { env } from "@/lib/env";
-import { generateExport } from "@/lib/export";
-import { inc } from "@/lib/metrics";
 
 export async function GET(
   request: NextRequest,
@@ -19,10 +16,11 @@ export async function GET(
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
     const { jobId } = await params;
-    const job = await db.exportJob.findUnique({
-      where: { id: jobId },
-      include: { session: { include: { gpsPoints: { orderBy: { timestamp: "asc" } } } } },
-    });
+    // v2.16.0 (I2): poll-роут выбирает ТОЛЬКО поля джоба. Раньше тут был
+    // `include: { session: { include: { gpsPoints } } }` — polling каждые 1,5 с
+    // ПОЛНОСТЬЮ переливал все точки сессии (у 5k-точечного экспорта — 5k строк
+    // на КАЖДЫЙ poll, пока воркер не завершит). Контент генерирует download-роут.
+    const job = await db.exportJob.findUnique({ where: { id: jobId } });
     if (!job) return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
 
     if (job.status !== "completed") {

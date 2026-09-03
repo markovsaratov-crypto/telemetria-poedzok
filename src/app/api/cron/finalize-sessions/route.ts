@@ -1,6 +1,10 @@
 // POST /api/cron/finalize-sessions — финализирует recording-сессии, которые не обновлялись > 60с.
 // SensorLogger шлёт батчи каждые 1с; если батчей нет 60с — запись закончена.
-// Auth: Bearer CRON_SECRET  ИЛИ  ?token=CRON_SECRET
+// Auth: Bearer CRON_SECRET  ИЛИ  ?token=CRON_SECRET (также принимается ADMIN_TOKEN —
+// исторически для ручного запуска админом).
+// v2.16.0 (V1-ingest): ДУБЛИРОВАННАЯ реализация finalizeOne УДАЛЕНА — роут
+// использует общий session-finalize.ts (как инжест и воркер-«жнец»). Раньше
+// здесь была третья расходящаяся копия той же логики с собственным TTL.
 import { NextRequest } from "next/server";
 import { libsql } from "@/lib/db";
 import { extractBearer } from "@/lib/auth";
@@ -8,50 +12,9 @@ import { tokenMatches } from "@/lib/token-check"; // AUDIT B-16: timing-safe с�
 import { env } from "@/lib/env";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { randomUUID } from "crypto";
+import { finalizeSession } from "@/lib/session-finalize";
 
 const STALE_MS = 60_000; // 60с без батча = запись закончена
-
-async function finalizeOne(sessionId: string): Promise<string | null> {
-  const now = new Date().toISOString();
-  await libsql.execute({
-    sql: `UPDATE Session SET status = 'completed', updatedAt = ? WHERE id = ? AND status = 'recording'`,
-    args: [now, sessionId],
-  });
-  // v2.11.0 (АУДИТ C-9): при сбое вставки джоба — находим существующий,
-  // чтобы trafficJobId не указывал на несуществующий джоб
-  const jobId = randomUUID();
-  let ok = true;
-  try {
-    await libsql.execute({
-      sql: `INSERT INTO TrafficJob (id, sessionId, status, priority, attempts, createdAt, updatedAt)
-            VALUES (?, ?, 'pending', 0, 0, ?, ?)`,
-      args: [jobId, sessionId, now, now],
-    });
-  } catch {
-    ok = false;
-  }
-  if (ok) {
-    await libsql.execute({
-      sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
-      args: [jobId, now, sessionId],
-    }).catch(() => null);
-    return jobId;
-  }
-  const existing = await libsql.execute({
-    sql: `SELECT id FROM TrafficJob WHERE sessionId = ? ORDER BY createdAt DESC LIMIT 1`,
-    args: [sessionId],
-  });
-  if (existing.rows.length > 0) {
-    const exId = String((existing.rows[0] as Record<string, unknown>).id);
-    await libsql.execute({
-      sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
-      args: [exId, now, sessionId],
-    }).catch(() => null);
-    return exId;
-  }
-  return null;
-}
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -81,7 +44,7 @@ export async function POST(request: NextRequest) {
     const finalized: string[] = [];
     for (const row of stale.rows) {
       const sessionId = (row as Record<string, unknown>).id as string;
-      await finalizeOne(sessionId);
+      await finalizeSession(sessionId);
       finalized.push(sessionId);
     }
 
@@ -98,8 +61,9 @@ export async function POST(request: NextRequest) {
       requestId,
       error: err instanceof Error ? err.message : String(err),
     });
+    // v2.16.0 (B16): наружу — без деталей (только в логах), как остальные роуты
     return json(
-      { error: "Internal Server Error", message: err instanceof Error ? err.message : String(err) },
+      { error: "Internal Server Error" },
       500,
       { "X-Request-Id": requestId }
     );

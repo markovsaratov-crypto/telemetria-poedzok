@@ -22,18 +22,18 @@
 // валиден для того же tzOffsetMin). Cookie или Bearer API_KEY.
 // Данные — одним JOIN-запросом через libsql.
 import { NextRequest } from "next/server";
-import { db, libsql } from "@/lib/db";
+import { libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { env } from "@/lib/env";
 import { maxSpeedMs, normalizeSessionSpeeds } from "@/lib/kpi";
-import { computeMovingTime, computeActiveTrip, type MethodologyPoint } from "@/lib/active-trip";
-import { computeEcoScore, calibrateEcoScoreBaselinesFromCorpus, type EcoScoreBaselines } from "@/lib/metrics-methodology";
+import { computeMovingTime, computeActiveTrip, type MethodologyPoint, type MotionResult, type ActiveTrip } from "@/lib/active-trip";
+import { computeEcoScore, type EcoScoreBaselines } from "@/lib/metrics-methodology";
+import { getCorpusEcoBaselines } from "@/lib/eco-corpus"; // v2.16.0 (D-11): общая corpus-калибровка со stats-роутом
 import { haversineM } from "@/lib/geo";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
-void db; // db не используется — прямой libsql-запрос ниже
 
 // Уровни бати по накопленным км за всё время (Σ активных дистанций).
 const BATYA_LEVELS: ReadonlyArray<{ minKm: number; title: string }> = [
@@ -113,9 +113,8 @@ function bucketOf(aggs: SessionAgg[]): PeriodBucket {
     if (s.maxSpeedMs != null) maxMs = Math.max(maxMs ?? 0, s.maxSpeedMs);
     if (s.eco != null) {
       // wavg по §4.11 — как период-агрегат Аналитики
-      const w = s.activeSec > 0 ? s.activeSec : 0;
-      ecoWSum += s.eco * w;
-      ecoW += w;
+      ecoWSum += s.eco * s.activeSec;
+      ecoW += s.activeSec;
     }
   }
   return {
@@ -197,34 +196,25 @@ async function computeBatyaStats(tzOffsetMin: number): Promise<BatyaStats> {
     });
   }
 
-  // Проход 1: канонические метрики каждой записи + rates для corpus-калибровки
-  // EcoScore. ВАЖНО (синхронизация с /api/sessions/[id]/stats): корпус-калибровка
-  // там (getCorpusEcoBaselines) считает rates по СЫРЫМ (ненормализованным) точкам
-  // и ПОЛНОЙ дистанции записи (гаверсинус по всем интервалам), а финальный
-  // EcoScore — по нормализованным точкам и АКТИВНОЙ дистанции. Реплицируем
-  // оба прохода дословно, чтобы базлайны (и итоговые баллы) совпали с UI.
+  // v2.16.0 (D-11): corpus-калибровка EcoScore — ОБЩИЙ модуль eco-corpus.ts
+  // со stats-роутом (один JOIN, кэш 5 минут, коалесценция параллельных вызовов).
+  // Раньше здесь была «дословная репликация» того же прохода — второй полный
+  // скан всех точек на каждый холодный кэш.
+  const baselines: EcoScoreBaselines = await getCorpusEcoBaselines();
+
   const sids: string[] = [];
-  const meta: Array<{ startTimeMs: number; endTimeMs: number; points: MethodologyPoint[] }> = [];
+  const meta: Array<{ startTimeMs: number; endTimeMs: number; points: MethodologyPoint[]; motion: MotionResult; active: ActiveTrip }> = [];
   const distArr: number[] = [];
   const activeArr: number[] = [];
   const durArr: number[] = [];
   const movingArr: number[] = [];
   const maxSpeedArr: Array<number | null> = [];
-  const rates: Array<{ braking: number; accel: number; jerk: number } | null> = [];
 
   for (const [sid, { startTimeMs, endTimeMs, points }] of bySession) {
     sids.push(sid);
-    // Сырой корпус-проход (как getCorpusEcoBaselines): без normalizeSessionSpeeds,
-    // дистанция — по ВСЕМ интервалам записи
-    let rawDistM = 0;
-    for (let i = 1; i < points.length; i++) {
-      rawDistM += haversineM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
-    }
-    const rawActive = computeActiveTrip(points, computeMovingTime(points));
-    const ecoRaw = computeEcoScore(points, rawDistM, rawActive);
-
     // Финальный проход (как основной путь stats-роута): нормализованные точки,
-    // дистанция — только активное окно
+    // дистанция — только активное окно. motion/active кешируются в meta —
+    // v2.16.0 (I7): раньше «проход 2» пересчитывал их ЕЩЁ РАЗ (третий раз на сессию).
     const norm = normalizeSessionSpeeds(points);
     const motion = computeMovingTime(norm);
     const activeTrip = computeActiveTrip(norm, motion);
@@ -240,36 +230,23 @@ async function computeBatyaStats(tzOffsetMin: number): Promise<BatyaStats> {
         distM += haversineM(prev.lat, prev.lon, p.lat, p.lon);
       }
     }
-    meta.push({ startTimeMs, endTimeMs: end, points: norm });
+    meta.push({ startTimeMs, endTimeMs: end, points: norm, motion, active: activeTrip });
     distArr.push(distM);
     activeArr.push(hasActive ? activeTrip.activeDuration : 0);
     durArr.push(durationSec);
     movingArr.push(motion.movingTime);
     maxSpeedArr.push(norm.length >= 5 ? maxSpeedMs(norm) : null);
-    rates.push(
-      ecoRaw.value != null
-        ? { braking: ecoRaw.brakingRate, accel: ecoRaw.accelRate, jerk: ecoRaw.jerkRate }
-        : null
-    );
   }
 
-  // Калибровка: медиана по корпусу (env ECO_SCORE_CAP_BASELINE переопределяет;
-  // <5 сессий с eco → DEFAULT_BASELINES — то же поведение, что в stats-роуте).
-  const baselines: EcoScoreBaselines = calibrateEcoScoreBaselinesFromCorpus(
-    rates.filter((r): r is { braking: number; accel: number; jerk: number } => r != null)
-  );
-
-  // Проход 2: финальный EcoScore с калиброванными базлайнами → SessionAgg.
+  // Проход 2 (v2.16.0 I7): финальный EcoScore с калиброванными базлайнами —
+  // БЕЗ пересчёта motion/active (из meta).
   const aggs: SessionAgg[] = meta.map((m, idx) => {
-    const norm = m.points;
-    const motion = computeMovingTime(norm);
-    const activeTrip = computeActiveTrip(norm, motion);
-    const eco = computeEcoScore(norm, distArr[idx], activeTrip, baselines);
+    const eco = computeEcoScore(m.points, distArr[idx], m.active, baselines);
     return {
       id: sids[idx],
       startTimeMs: m.startTimeMs,
       endTimeMs: m.endTimeMs,
-      points: norm.length,
+      points: m.points.length,
       distanceM: distArr[idx],
       durationSec: durArr[idx],
       activeSec: activeArr[idx],
@@ -279,13 +256,12 @@ async function computeBatyaStats(tzOffsetMin: number): Promise<BatyaStats> {
     };
   });
 
-  // Границы периодов. «Сегодня» — в tz клиента: сдвигаем wall-clock, берём
-  // локальную полночь, возвращаем в UTC-мс (tzOffsetMin = getTimezoneOffset).
+  // Границы периодов. «Сегодня» — в tz клиента: v2.16.0 (B19) — ЧИСТАЯ
+  // UTC-арифметика (floor дня), без new Date().setHours — он зависит от
+  // СЕРВЕРНОГО пояса и на не-UTC хосте сместил бы полночь.
   const now = Date.now();
   const tzMs = tzOffsetMin * 60_000;
-  const localNow = new Date(now - tzMs);
-  localNow.setHours(0, 0, 0, 0);
-  const todayStartMs = localNow.getTime() + tzMs;
+  const todayStartMs = Math.floor((now - tzMs) / 86_400_000) * 86_400_000 + tzMs;
   const d7StartMs = now - 7 * 24 * 3_600_000;
   const d30StartMs = now - 30 * 24 * 3_600_000;
 

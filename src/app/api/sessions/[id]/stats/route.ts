@@ -7,7 +7,8 @@ import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { computeMethodologyMetrics, calibrateEcoScoreBaselinesFromCorpus, type EcoScoreBaselines } from "@/lib/metrics-methodology";
+import { computeMethodologyMetrics } from "@/lib/metrics-methodology";
+import { getCorpusEcoBaselines } from "@/lib/eco-corpus"; // v2.16.0 (I1): общая corpus-калибровка (один JOIN вместо N+1)
 import { computeMovingTime, computeActiveTrip } from "@/lib/active-trip";
 import { avgSpeedMs, meanPointSpeedMs, maxSpeedMs, normalizeSessionSpeeds } from "@/lib/kpi"; // P2-13: единый источник KPI
 import { haversineM } from "@/lib/geo"; // P2-14: канонический гаверсинус
@@ -51,17 +52,18 @@ async function computePlanFact(
     if (res.rows.length === 0) return empty;
     const row = res.rows[0] as Record<string, unknown>;
     if (!row.result) return empty;
-    let parsed: any;
+    let parsed: unknown;
     try { parsed = JSON.parse(String(row.result)); } catch { return empty; }
     if (!parsed || typeof parsed !== "object") return empty;
-    const provider = parsed.provider ? String(parsed.provider) : null;
+    const plan = parsed as Record<string, unknown>; // v2.16.0 (V5): вместо any
+    const provider = plan.provider ? String(plan.provider) : null;
 
     // План: дистанция провайдера — всегда плановая (геометрия маршрута).
     // Время: для OSRM — свободный поток (план); для 2ГИС total_duration включает пробки →
     // план по времени считаем по базовой линии гаверсинус/40 км/ч (§3.2), трафик — от 2ГИС.
-    const distM = Number(parsed.distanceM) || null;
-    const durS = Number(parsed.durationSec) || null;
-    const trafficFetched = !!parsed.trafficFetched;
+    const distM = Number(plan.distanceM) || null;
+    const durS = Number(plan.durationSec) || null;
+    const trafficFetched = !!plan.trafficFetched;
     const planDistanceM = distM;
     let planDurationSec = trafficFetched ? null : durS;
     let trafficDurationSec = trafficFetched ? durS : null;
@@ -69,8 +71,8 @@ async function computePlanFact(
 
     if (trafficFetched && durS && distM) {
       const direct =
-        Array.isArray(parsed.segments) && parsed.segments.length >= 2
-          ? haversineM(parsed.segments[0].lat, parsed.segments[0].lon, parsed.segments[parsed.segments.length - 1].lat, parsed.segments[parsed.segments.length - 1].lon)
+        Array.isArray(plan.segments) && (plan.segments as Array<{ lat: number; lon: number }>).length >= 2
+          ? haversineM((plan.segments as Array<{ lat: number; lon: number }>)[0].lat, (plan.segments as Array<{ lat: number; lon: number }>)[0].lon, (plan.segments as Array<{ lat: number; lon: number }>)[(plan.segments as Array<{ lat: number; lon: number }>).length - 1].lat, (plan.segments as Array<{ lat: number; lon: number }>)[(plan.segments as Array<{ lat: number; lon: number }>).length - 1].lon)
           : null;
       if (direct && direct > 1) {
         const baselineDur = Math.round((direct / 1000 / 40) * 3600); // гаверсинус @ 40 км/ч
@@ -111,72 +113,10 @@ async function computePlanFact(
   }
 }
 
-const EARTH_R = 6371000; // (оставлено для совместимости сигнатур; расчёт — в metrics-methodology)
-void EARTH_R;
-
-// ——— v2.10.0 R6.1: corpus-calibrated CAP baselines (§7.3) ———
-// Iterate all non-deleted sessions once, compute braking/accel/jerk rates per session,
-// take median as baseline for EcoScore penalty formula. Cached for CORPUS_CACHE_TTL_MS.
-// Production-correct: avoids EcoScore=0 on noisy synthetic CSV data (default baselines
-// 0.5/0.4/0.3 are calibrated for high-quality real GPS data).
-const CORPUS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
-let _corpusCache: { baselines: EcoScoreBaselines; ts: number } | null = null;
-
-async function getCorpusEcoBaselines(): Promise<EcoScoreBaselines> {
-  if (_corpusCache && Date.now() - _corpusCache.ts < CORPUS_CACHE_TTL_MS) {
-    return _corpusCache.baselines;
-  }
-  try {
-    // Get all non-deleted sessions with their points
-    const sessions = await libsql.execute({
-      sql: `SELECT s.id, s.startTime, s.endTime FROM Session s WHERE s.deletedAt IS NULL ORDER BY s.startTime DESC`,
-    });
-    const rates: { braking: number; accel: number; jerk: number }[] = [];
-    for (const row of sessions.rows) {
-      const sid = row.id as string;
-      const pts = await libsql.execute({
-        sql: "SELECT lat, lon, timestamp, speed, bearing, altitude, accuracy FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC",
-        args: [sid],
-      });
-      const points = pts.rows.map((p: Record<string, unknown>) => ({
-        lat: p.lat as number,
-        lon: p.lon as number,
-        timestamp: Number(p.timestamp),
-        speed: p.speed == null ? null : (p.speed as number),
-        bearing: p.bearing == null ? null : (p.bearing as number),
-        altitude: p.altitude == null ? null : (p.altitude as number),
-        // v2.10.0 R6.1: accuracy field is required by MethodologyPoint interface; GpsPoint
-        // table may not have it populated for legacy rows → default null.
-        accuracy: (p.accuracy as number | undefined) ?? null,
-      }));
-      if (points.length < 60) continue;
-      const startTime = Number(row.startTime);
-      const endTime = row.endTime ? Number(row.endTime) : points[points.length - 1].timestamp;
-      const durationSec = Math.max(0, (endTime - startTime) / 1000);
-      // Distance via haversine
-      let distance = 0;
-      for (let i = 1; i < points.length; i++) {
-        const R = 6371000;
-        const dLat = ((points[i].lat - points[i - 1].lat) * Math.PI) / 180;
-        const dLon = ((points[i].lon - points[i - 1].lon) * Math.PI) / 180;
-        const a = Math.sin(dLat / 2) ** 2 + Math.cos((points[i - 1].lat * Math.PI) / 180) * Math.cos((points[i].lat * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
-        distance += 2 * R * Math.asin(Math.sqrt(a));
-      }
-      const m = computeMethodologyMetrics(points, distance, durationSec);
-      if (m.ecoScore.value == null) continue;
-      rates.push({ braking: m.ecoScore.brakingRate, accel: m.ecoScore.accelRate, jerk: m.ecoScore.jerkRate });
-    }
-    const baselines = calibrateEcoScoreBaselinesFromCorpus(rates);
-    _corpusCache = { baselines, ts: Date.now() };
-    return baselines;
-  } catch (err) {
-    logger.warn("corpus baseline calibration failed, using defaults", {
-      requestId: "corpus",
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return calibrateEcoScoreBaselinesFromCorpus([]);
-  }
-}
+// ——— v2.16.0: corpus-калибровка CAP baselines (§7.3) — ВЫНЕСЕНА в общий ——
+// lib/eco-corpus.ts (один JOIN вместо N+1 построчных выборок, кэш 5 минут общий
+// с /api/stats/batya). Локальная копия getCorpusEcoBaselines с N+1-проходом
+// (одна сессия = один раундтрип за всеми её точками) удалена.
 
 // ——— v2.9.3: спидограмма — даунсемпл GPS-точек для графика скорость-время ———
 // v2.9.4: сэмпл расширен полями alt (высотный профиль) и lat/lng (связка карта↔график).

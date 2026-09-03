@@ -31,7 +31,8 @@
 
 import { env } from "./env";
 import { haversineM } from "./geo";
-import { medianSmooth3, isUsableSpeedPoint } from "./kpi"; // v2.12.0 (D-6): медиан-фильтр для harsh-детекции
+import { medianSmooth3, isUsableSpeedPoint, medianOf } from "./kpi"; // v2.12.0 (D-6): медиан-фильтр; v2.16.0: единая median
+import { mulberry32 } from "./utils"; // v2.16.0 (D-7): единый PRNG (была копия в v4-utils)
 import {
   computeMovingTime,
   computeActiveTrip,
@@ -40,9 +41,8 @@ import {
   type ActiveTrip,
 } from "./active-trip";
 
-// Реэкспорт для обратной совместимости с v2.7 кодом
-export { haversineM };
-export type { MethodologyPoint, MotionResult, ActiveTrip, MotionState } from "./active-trip";
+// v2.16.0: мёртвые реэкспорты (haversineM/типы) убраны — все потребители импортируют
+// напрямую из geo.ts/active-trip.ts; двойные пути импорта расползались по коду.
 
 // === Константы (методология v2.9) ===
 
@@ -63,10 +63,7 @@ const SPEED_MAX_PLAUSIBLE_KMH = 200;
 function median(values: number[]): number {
   if (values.length === 0) return NaN;
   const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 !== 0
-    ? sorted[mid]
-    : (sorted[mid - 1] + sorted[mid]) / 2;
+  return medianOf(sorted); // v2.16.0: единая реализация (kpi.ts)
 }
 
 function percentile(sortedAsc: number[], p: number): number {
@@ -134,16 +131,20 @@ export function speedDistribution(points: MethodologyPoint[], activeTrip?: Activ
 /**
  * §5.4 TimeInTraffic — Σ dt где 0 < speed < 10 км/ч в активной части.
  * v2.9: фильтр по состоянию moving (через state machine), не по speed[i] > threshold.
+ * v2.16.0: O(n) вместо O(n²) — индекс точки предвычисляется картой ссылок
+ * (раньше points.indexOf(activePts[i]) сканировал весь ряд на КАЖДОМ интервале:
+ * 3k точек ≈ 9M сканов ×2 метрики на самом горячем стейт-пути).
  */
 export function timeInTraffic(points: MethodologyPoint[], motion?: MotionResult, activeTrip?: ActiveTrip): number {
   let total = 0;
   const activePts = filterActivePoints(points, activeTrip);
+  const origIdx = originalIndexMap(points, activePts);
   for (let i = 1; i < activePts.length; i++) {
     const dtSec = (activePts[i].timestamp - activePts[i - 1].timestamp) / 1000;
     if (dtSec <= 0 || dtSec > 30) continue;
     const sp = activePts[i].speed;
     // В v2.9: только если интервал в состоянии moving (не idle, не gap)
-    const stateIdx = points.indexOf(activePts[i]) - 1;
+    const stateIdx = (origIdx.get(activePts[i]) ?? i) - 1;
     const state = motion?.states[stateIdx];
     if (state === "idle" || state === "gap") continue;
     if (sp != null && sp > 0 && sp < KMH_10) {
@@ -155,15 +156,16 @@ export function timeInTraffic(points: MethodologyPoint[], motion?: MotionResult,
 
 /**
  * §5.5 TimeAtCruise — Σ dt где speed > 60 км/ч в активной части.
- * v2.9: фильтр по состоянию moving.
+ * v2.9: фильтр по состоянию moving. v2.16.0: O(n) — см. timeInTraffic.
  */
 export function timeAtCruise(points: MethodologyPoint[], motion?: MotionResult, activeTrip?: ActiveTrip): number {
   let total = 0;
   const activePts = filterActivePoints(points, activeTrip);
+  const origIdx = originalIndexMap(points, activePts);
   for (let i = 1; i < activePts.length; i++) {
     const dtSec = (activePts[i].timestamp - activePts[i - 1].timestamp) / 1000;
     if (dtSec <= 0 || dtSec > 30) continue;
-    const stateIdx = points.indexOf(activePts[i]) - 1;
+    const stateIdx = (origIdx.get(activePts[i]) ?? i) - 1;
     const state = motion?.states[stateIdx];
     if (state === "idle" || state === "gap") continue;
     const sp = activePts[i].speed;
@@ -172,6 +174,12 @@ export function timeAtCruise(points: MethodologyPoint[], motion?: MotionResult, 
     }
   }
   return Math.round(total * 10) / 10;
+}
+
+// v2.16.0: карта «ссылка на точку → индекс в исходном ряду» (O(n) одним проходом).
+// filterActivePoints возвращает те же объекты-ссылки, поэтому Map по identity корректен.
+function originalIndexMap(points: MethodologyPoint[], _activePts: MethodologyPoint[]): Map<MethodologyPoint, number> {
+  return new Map(points.map((p, i) => [p, i]));
 }
 
 /**
@@ -775,17 +783,6 @@ export interface RouteTrendResult {
   rating: "improving" | "stable" | "degrading" | "insufficient_data";
   sampleSize: number;
   method: "exact" | "bootstrap" | "none";
-}
-
-function mulberry32(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 function fnv1a(str: string): number {

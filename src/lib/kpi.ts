@@ -80,6 +80,21 @@ export function median3(a: number, b: number, c: number): number {
   return a + b + c - Math.min(a, b, c) - Math.max(a, b, c);
 }
 
+/** v2.16.0: честная медиана числового ряда (чётная длина — среднее двух центральных).
+ *  Единственная реализация для kpi/metrics-methodology — раньше чётные ряды
+ *  в normalizeSessionSpeeds брали верхний центральный элемент (смещение вверх). */
+export function medianOf(sortedAsc: number[]): number {
+  const n = sortedAsc.length;
+  if (n === 0) return NaN;
+  const mid = Math.floor(n / 2);
+  return n % 2 !== 0 ? sortedAsc[mid] : (sortedAsc[mid - 1] + sortedAsc[mid]) / 2;
+}
+
+// v2.16.0: порог «резкости» §7.1/§7.2 = 10 км/ч/с (2,78 м/с²) — ЕДИНСТВЕННОЕ
+// определение для events/track-роутов и конвейера методологии (раньше 3 копии
+// константы 10/3.6 жили в трёх файлах и могли разъехаться).
+export const HARSH_THRESHOLD_MS2 = 10 / 3.6;
+
 export function medianSmooth3(speeds: Array<number | null>): Array<number | null> {
   const out: Array<number | null> = speeds.slice();
   for (let i = 0; i < speeds.length; i++) {
@@ -206,7 +221,7 @@ export function normalizeSessionSpeeds<P extends NormalizablePoint>(points: P[])
   }
   if (usable.length === 0) return points; // нет годных записанных — метрики и так геометрические
   usable.sort((a, b) => a - b);
-  const median = usable[Math.floor(usable.length / 2)];
+  const median = medianOf(usable); // v2.16.0: честная медиана (чётные ряды — среднее центров)
 
   // Критерий «глобально не согласованы»: заметное движение есть (geoAvg > 2 м/с ≈ 7 км/ч),
   // а медиана записанных скоростей резко ниже геометрии.

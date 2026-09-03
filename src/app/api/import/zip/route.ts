@@ -134,37 +134,41 @@ export async function POST(request: NextRequest) {
       return json({ error: "No valid GPS points found" }, 400, { "X-Request-Id": requestId });
     }
 
-    // Sort + filter gaps
+    // Sort. v2.16.0 (B13): «gap-фильтр» УДАЛЁН — раньше он выбрасывал РОВНО
+    // ОДНУ точку после каждой паузы >30с (сравнение шло с предыдущей СЫРОЙ
+    // точкой, а не с последней принятой): импорт терял реальные точки-возобновления.
+    // Разрывы корректно детектируются в метриках (state machine §4.6), а не на входе.
     points.sort((a, b) => a.timestamp - b.timestamp);
-    const filtered: typeof points = [points[0]];
-    for (let i = 1; i < points.length; i++) {
-      if (points[i].timestamp - points[i - 1].timestamp <= 30000) filtered.push(points[i]);
-    }
+    const filtered = points;
 
     const startTime = new Date(filtered[0].timestamp);
     const endTime = new Date(filtered[filtered.length - 1].timestamp);
     const clientId = randomUUID();
 
-    // Create session
-    const session = await db.session.create({
-      data: { deviceId, clientId, deviceName, startTime, endTime, pointCount: filtered.length, payloadBytes: fileBuffer.length, status: "completed" },
-    });
-
-    // Insert GPS points — v2.11.0 (АУДИТ C-16): многорядный INSERT чанками по 50
-    // (было по одному INSERT на точку — последовательные раундтрипы к Turso).
-    for (let i = 0; i < filtered.length; i += 50) {
-      const chunk = filtered.slice(i, i + 50);
-      const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
-      const args = chunk.flatMap((p) => [
-        randomUUID(), session.id, p.lat, p.lon, p.speed, p.altitude, p.accuracy, BigInt(p.timestamp), p.bearing,
-      ]);
-      await libsql.execute({
-        sql: `INSERT INTO GpsPoint (id, sessionId, lat, lon, speed, altitude, accuracy, timestamp, bearing) VALUES ${placeholders}`,
-        args: args as never[],
+    // v2.16.0 (B12): сессия + точки + джоб — АТОМАРНО в одной транзакции
+    // (как в CSV-импорте). Раньше сбой между create-сессии и вставкой чанка
+    // оставлял «висячую» сессию без точек. tx.gpsPoint.createMany внутри
+    // транзакции теперь чанкует многорядными INSERT (<999 плейсхолдеров).
+    const session = await db.$transaction(async (tx: any) => {
+      const s = await tx.session.create({
+        data: { deviceId, clientId, deviceName, startTime, endTime, pointCount: filtered.length, payloadBytes: fileBuffer.length, status: "completed" },
       });
-    }
-
-    await db.trafficJob.create({ data: { sessionId: session.id, status: "pending" } });
+      await tx.gpsPoint.createMany({
+        data: filtered.map((p) => ({
+          sessionId: s.id,
+          lat: p.lat,
+          lon: p.lon,
+          speed: p.speed,
+          altitude: p.altitude,
+          accuracy: p.accuracy,
+          bearing: p.bearing,
+          timestamp: BigInt(p.timestamp),
+        })),
+      });
+      const job = await tx.trafficJob.create({ data: { sessionId: s.id, status: "pending" } });
+      await tx.session.update({ where: { id: s.id }, data: { trafficJobId: job.id } });
+      return s;
+    });
     await writeAudit({ action: "session.import", targetId: session.id, targetType: "Session", actorType: "user", actorId: "owner", sessionId: session.id, metadata: { source: "zip", fileName: file.name, pointCount: filtered.length, deviceName } });
     inc("ingest_total", "Total ingest requests", 1, "zip");
     logger.info("ZIP import success", { requestId, sessionId: session.id, points: filtered.length, deviceName });

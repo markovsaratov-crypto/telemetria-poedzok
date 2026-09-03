@@ -44,7 +44,6 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
   const e = env();
   if (pathname === "/api/ingest" || pathname.startsWith("/api/ingest/")) return { limit: e.RATE_LIMIT_MAX_INGEST, windowSec: 60, scope: "ingest" };
   if (pathname === "/api/auth/login") return { limit: e.RATE_LIMIT_MAX_AUTH, windowSec: 60, scope: "auth:login" };
-  if (pathname === "/api/plan") return { limit: e.RATE_LIMIT_MAX_PLAN, windowSec: 60, scope: "plan" };
   // v2.10.7: «тяжёлый» лимит 1/час — только для ДОРОГИХ мутаций (POST create/restore).
   // GET /api/admin/backup — лёгкий список (SELECT), раньше попадал в тот же бакет 1/час:
   // повторное открытие вкладки админки в течение часа → 429 «Слишком много запросов»
@@ -59,7 +58,8 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
     return { limit: e.RATE_LIMIT_MAX_ADMIN, windowSec: 3600, scope: "admin:heavy" };
   }
   if (pathname === "/api/admin/requeue") return { limit: e.RATE_LIMIT_MAX_REQUEUE, windowSec: 60, scope: "admin:requeue" }; // P1-11: спека §7.3 — 10/мин
-  if (pathname === "/api/audit") return { limit: e.RATE_LIMIT_MAX_AUDIT, windowSec: 60, scope: "audit" };
+  // v2.16.0: скоп /api/audit и /api/plan удалены вместе с мёртвыми роутами
+  // (v2.16.0: 0 потребителей, см. changelog)
   // v2.14.1: «read»-скоп — GET-чтения собственного UI. Открытие вкладок «Аналитика»
   // (период-агрегат: stats+events+track по ≤30 сессиям) и «Поездки» (статы каждой записи
   // группы + геокоды) — до ~90 запросов всплеском; вместе с ретраями react-query они
@@ -69,15 +69,20 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
   // семафором api-client (6 GET), так что серверная память под контролем.
   // Мутации и прочие роуты — в default-скопе как было.
   if (
-    method === "GET" &&
-    (pathname === "/api/sessions" ||
-      SESSION_STATS_RE.test(pathname) ||
-      SESSION_EVENTS_RE.test(pathname) ||
-      SESSION_TRACK_RE.test(pathname) ||
-      // v2.15.0: батя-статс — дешёвый GET с 5-мин кэшем (первый холодный проход
-      // сканирует точки, но не чаще раза в 5 минут)
-      pathname === "/api/stats/batya" ||
-      pathname === "/api/geocode/reverse")
+    (method === "GET" &&
+      (pathname === "/api/sessions" ||
+        SESSION_STATS_RE.test(pathname) ||
+        SESSION_EVENTS_RE.test(pathname) ||
+        SESSION_TRACK_RE.test(pathname) ||
+        // v2.15.0: батя-статс — дешёвый GET с 5-мин кэшем (первый холодный проход
+        // сканирует точки, но не чаще раза в 5 минут)
+        pathname === "/api/stats/batya" ||
+        pathname === "/api/geocode/reverse")) ||
+    // v2.16.0 (S1): bulk-ЧТЕНИЯ POST-ом — в read-скопе. /api/sessions/batch
+    // (пачка записей для «Поездок») — чтение по определению, но падало в
+    // default 60/мин: ровно тот класс 429-шторма, ради которого read-скоп
+    // вводился в v2.14.1.
+    (method === "POST" && pathname === "/api/sessions/batch")
   ) {
     return { limit: e.RATE_LIMIT_MAX_READ, windowSec: 60, scope: "read" };
   }
@@ -93,9 +98,11 @@ function rateLimitKey(scope: string, request: NextRequest): string {
     return rlKey(scope, ip, tokenPart);
   }
   if (scope === "auth:login") {
+    // v2.16.0: логин — ВСЕГДА ключ по IP (ротация фейковых Bearer не должна
+    // размывать brute-force-лимит)
     return rlKey(scope, ip);
   }
-  if (scope === "plan" || scope === "audit" || scope === "admin:heavy" || scope === "admin:requeue") {
+  if (scope === "admin:heavy" || scope === "admin:requeue") {
     const auth = request.headers.get("authorization") || "";
     const bearer = bearerToken(auth);
     if (bearer) {

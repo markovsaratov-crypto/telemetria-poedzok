@@ -7,6 +7,7 @@ import { json } from "./http-utils";
 import { haversineM } from "./geo";
 import { computeMovingTime, computeActiveTrip, type MethodologyPoint } from "./active-trip";
 import { maxSpeedMs, normalizeSessionSpeeds } from "./kpi";
+import { tokenMatches } from "./token-check"; // v2.16.0 (D-16): timing-safe сверка сигнатуры
 
 export const SHARE_DEFAULT_TTL_HOURS = 168; // 7 дней
 export const SHARE_MAX_TTL_HOURS = 8760; // 1 год
@@ -28,9 +29,9 @@ export function verifyShareToken(token: string): { sessionId: string; expiresAt:
   if (!sessionId || !exp36 || !sig) return null;
   if (!/^[0-9a-f]{32}$/.test(sig)) return null;
   const expected = sign(sessionId, exp36);
-  let diff = 0;
-  for (let i = 0; i < sig.length; i++) diff |= sig.charCodeAt(i) ^ expected.charCodeAt(i);
-  if (diff !== 0) return null;
+  // v2.16.0 (D-16): timing-safe сверка через token-check (раньше — самодельный
+  // XOR-цикл, дублирующий ту же логику)
+  if (!tokenMatches(sig, expected)) return null;
   const expiresAt = parseInt(exp36, 36);
   if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) return null;
   return { sessionId, expiresAt };

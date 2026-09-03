@@ -11,6 +11,17 @@
 // v2.14.0 (Ф2): живое обновление — useSessions опрашивает сервер каждые 30с
 // при активной вкладке; у идущей записи статы обновляются каждые 15с
 // (useSessionStats {live}); чип «идёт запись» пульсирует (chip-live).
+//
+// v2.15.0 (sync): параметры склеенной поездки синхронизированы с «Аналитикой» —
+// те же формулы, что в период-агрегате (v4-hooks.ts):
+//   длительность = Σ длительностей записей (§4.1) — как KPI «Длительность»/«всего»;
+//   «в поездке» = Σ активных частей (§4.11) — как «в поездках» в шапке;
+//   ср. скорость = Σ дистанций / Σ активных (§4.3 + §4.11, FIX-C1);
+//   EcoScore = взвешенное среднее по активной длительности (wavg).
+// Раньше карточка показывала span «от старта первой до конца последней» (паузы
+// между записями раздували «2 ч» до «4 ч 51 мин») и ср. = Σдист/Σдвижения —
+// цифры расходились с «Аналитикой» за тот же день. Span остался отдельной
+// строкой «От старта до финиша».
 
 "use client";
 
@@ -257,15 +268,18 @@ function TripsSummary({
   // accumulates totals in a ref map and pushes the aggregate up via onAgg.
   const [agg, setAgg] = React.useState<{
     totalDurMin: number;
+    // v2.15.0 (sync): Σ активных частей (§4.11) — «в поездках», как в шапке Аналитики
+    totalActiveMin: number;
     totalDistKm: number;
-    ecoSum: number;
-    ecoCount: number;
+    // v2.15.0 (sync): EcoScore wavg по активной длительности (как период-агрегат)
+    ecoWSum: number;
+    ecoW: number;
     // v2.12.0 (D-4): сколько сессий уже посчитано — пока не все, сводка помечена
     // «считаем…» (раньше частичные суммы выглядели как финальные и «росли» на глазах)
     loadedCount: number;
-  }>({ totalDurMin: 0, totalDistKm: 0, ecoSum: 0, ecoCount: 0, loadedCount: 0 });
+  }>({ totalDurMin: 0, totalActiveMin: 0, totalDistKm: 0, ecoWSum: 0, ecoW: 0, loadedCount: 0 });
 
-  const avgEco = agg.ecoCount > 0 ? Math.round(agg.ecoSum / agg.ecoCount) : null;
+  const avgEco = agg.ecoW > 0 ? Math.max(0, Math.min(100, Math.round(agg.ecoWSum / agg.ecoW))) : null;
   const computing = agg.loadedCount < list.length;
 
   return (
@@ -302,8 +316,18 @@ function TripsSummary({
             <span>км всего</span>
           </div>
           <div>
-            {/* v2.12.0 (округления): единый формат длительности «5 ч 7 мин» */}
-            <b>{agg.totalDurMin > 0 ? fmtDurMin(agg.totalDurMin) : "—"}</b>
+            {/* v2.15.0 (sync): «в поездках» = Σ активных частей записей (§4.11) —
+                та же метрика, что «в поездках» в шапке Аналитики. Раньше здесь
+                была Σ полных длительностей (§4.1): подпись обещала активное
+                время, а число содержало стоянки-хвосты. Fallback на Σ записей —
+                когда активной части нет ни у одной записи. */}
+            <b>
+              {agg.totalActiveMin > 0
+                ? fmtDurMin(agg.totalActiveMin)
+                : agg.totalDurMin > 0
+                  ? fmtDurMin(agg.totalDurMin)
+                  : "—"}
+            </b>
             <span>в поездках</span>
           </div>
           <div>
@@ -330,9 +354,12 @@ function SummaryAggregator({
   list: SessionListItem[];
   onAgg: (a: {
     totalDurMin: number;
+    // v2.15.0 (sync): Σ активных частей (§4.11) — «в поездках» как в Аналитике
+    totalActiveMin: number;
     totalDistKm: number;
-    ecoSum: number;
-    ecoCount: number;
+    // v2.15.0 (sync): EcoScore wavg по активной длительности (как период-агрегат)
+    ecoWSum: number;
+    ecoW: number;
     loadedCount: number;
   }) => void;
 }) {
@@ -346,21 +373,27 @@ function SummaryAggregator({
     (id: string, stats: SessionStats) => {
       loadedRef.current.set(id, stats);
       let totalDurMin = 0;
+      // v2.15.0 (sync): Σ активных частей (§4.11)
+      let totalActiveMin = 0;
       let totalDistKm = 0;
-      let ecoSum = 0;
-      let ecoCount = 0;
+      // v2.15.0 (sync): EcoScore — взвешенное среднее по активной длительности
+      let ecoWSum = 0;
+      let ecoW = 0;
       for (const v of loadedRef.current.values()) {
         totalDurMin += (v.duration ?? 0) / 60;
+        const at = v.methodology?.activeTrip;
+        if (at?.hasActiveTrip) totalActiveMin += at.activeDuration / 60;
         totalDistKm += (v.distance ?? 0) / 1000;
         const ecoVal = v.methodology?.ecoScore?.value;
         if (ecoVal != null && Number.isFinite(ecoVal)) {
-          ecoSum += ecoVal;
-          ecoCount++;
+          const w = at?.hasActiveTrip ? Math.max(0, at.activeDuration) : 0;
+          ecoWSum += ecoVal * w;
+          ecoW += w;
         }
       }
       // v2.12.0 (D-4): передаём и число посчитанных сессий — сводка честно
       // помечает незавершённый расчёт
-      onAgg({ totalDurMin, totalDistKm, ecoSum, ecoCount, loadedCount: loadedRef.current.size });
+      onAgg({ totalDurMin, totalActiveMin, totalDistKm, ecoWSum, ecoW, loadedCount: loadedRef.current.size });
     },
     [onAgg]
   );
@@ -512,6 +545,8 @@ interface GroupAgg {
   sumMovingSec: number;
   sumIdleSec: number;
   sumDurSec: number;
+  // v2.15.0 (sync): Σ активных частей записей (§4.11) — «в поездке», как в Аналитике
+  sumActiveSec: number;
   maxSpeedMs: number | null;
   ecoAvg: number | null;
 }
@@ -546,11 +581,15 @@ function GroupedTripCard({
   const computing = agg == null || agg.loadedCount < sessions.length;
   const totalPoints =
     sessions.reduce((s, x) => s + (x.pointCountActual ?? x.pointCount ?? 0), 0);
+  // v2.15.0 (sync): длительность в подзаголовке = Σ длительностей записей (§4.1) —
+  // тот же показатель, что KPI «Длительность» и «всего» в шапке Аналитики.
+  // Раньше показывался span (от старта первой записи до конца последней) —
+  // паузы между записями раздували «2 ч» до «4 ч 51 мин».
   const sub = computing
     ? `${sessions.length} ${pluralRu(sessions.length, ["запись", "записи", "записей"])} · считаем…`
     : agg && (agg.totalDistanceM > 0 || agg.sumMovingSec > 0)
-      ? `${(agg.totalDistanceM / 1000).toFixed(1).replace(".", ",")} км · ${fmtDurMin(agg.spanSec / 60)} · ${fmtNumber(totalPoints)} ${pluralRu(totalPoints, ["точка", "точки", "точек"])}`
-      : `${fmtNumber(totalPoints)} ${pluralRu(totalPoints, ["точка", "точки", "точек"])} · нет данных о движении · ${agg ? fmtDurMin(agg.spanSec / 60) : "—"}`;
+      ? `${(agg.totalDistanceM / 1000).toFixed(1).replace(".", ",")} км · ${fmtDurMin(agg.sumDurSec / 60)} · ${fmtNumber(totalPoints)} ${pluralRu(totalPoints, ["точка", "точки", "точек"])}`
+      : `${fmtNumber(totalPoints)} ${pluralRu(totalPoints, ["точка", "точки", "точек"])} · нет данных о движении · ${agg ? fmtDurMin(agg.sumDurSec / 60) : "—"}`;
 
   const title =
     destShort != null ? (
@@ -646,22 +685,29 @@ function GroupStatsAggregator({
       let sumMovingSec = 0;
       let sumIdleSec = 0;
       let sumDurSec = 0;
+      // v2.15.0 (sync): Σ активных частей (§4.11)
+      let sumActiveSec = 0;
       let maxSpeedMs: number | null = null;
-      let ecoSum = 0;
-      let ecoCount = 0;
+      // v2.15.0 (sync): EcoScore — взвешенное среднее по активной длительности,
+      // как период-агрегат Аналитики (wavg); записи без активной части не весят
+      let ecoWSum = 0;
+      let ecoW = 0;
       for (const v of statsRef.current.values()) {
         totalPoints += v.pointCount ?? 0;
         totalDistanceM += v.distance ?? 0;
         sumMovingSec += v.movingTime ?? 0;
         sumIdleSec += v.idleTime ?? 0;
         sumDurSec += v.duration ?? 0;
+        const at = v.methodology?.activeTrip;
+        if (at?.hasActiveTrip) sumActiveSec += at.activeDuration;
         if (v.maxSpeed != null) {
           maxSpeedMs = Math.max(maxSpeedMs ?? 0, v.maxSpeed);
         }
         const ecoVal = v.methodology?.ecoScore?.value;
         if (ecoVal != null && Number.isFinite(ecoVal)) {
-          ecoSum += ecoVal;
-          ecoCount++;
+          const w = at?.hasActiveTrip ? Math.max(0, at.activeDuration) : 0;
+          ecoWSum += ecoVal * w;
+          ecoW += w;
         }
       }
       onAgg({
@@ -672,8 +718,9 @@ function GroupStatsAggregator({
         sumMovingSec,
         sumIdleSec,
         sumDurSec,
+        sumActiveSec,
         maxSpeedMs,
-        ecoAvg: ecoCount > 0 ? Math.max(0, Math.min(100, Math.round(ecoSum / ecoCount))) : null,
+        ecoAvg: ecoW > 0 ? Math.max(0, Math.min(100, Math.round(ecoWSum / ecoW))) : null,
       });
     },
     [sessions, onAgg]
@@ -728,8 +775,11 @@ function GroupedTripBody({
       })
     : null;
 
-  // Ср. скорость поездки: Σ дистанция / Σ время в движении (§4.3 по активной части)
-  const avgKmh = agg.sumMovingSec > 0 ? (agg.totalDistanceM / agg.sumMovingSec) * 3.6 : null;
+  // v2.15.0 (sync): ср. скорость = Σ дистанций / Σ активных длительностей (§4.3 + §4.11,
+  // FIX-C1) — ровно как период-агрегат Аналитики (fallback на Σ длительностей для legacy).
+  // Раньше делилось на Σ времени в движении — расходилось с Аналитикой.
+  const avgBaseSec = agg.sumActiveSec > 0 ? agg.sumActiveSec : agg.sumDurSec;
+  const avgKmh = agg.totalDistanceM > 0 && avgBaseSec > 0 ? (agg.totalDistanceM / avgBaseSec) * 3.6 : null;
   const maxKmh = agg.maxSpeedMs != null ? agg.maxSpeedMs * 3.6 : null;
   // Паузы МЕЖДУ записями (стоянки внутри записей уже в idleTime)
   const pausesSec = Math.max(0, agg.spanSec - agg.sumDurSec);
@@ -766,13 +816,18 @@ function GroupedTripBody({
           label="Дистанция"
         />
         <Stat
-          value={computing ? "…" : fmtDurMin(agg.spanSec / 60)}
-          tip="От начала первой записи до конца последней — включая паузы между записями (Ф1: записи склеены, паузы < 10 мин)"
+          value={computing ? "…" : fmtDurMin(agg.sumDurSec / 60)}
+          tip="Σ длительностей записей (§4.1): от первой до последней точки каждой записи, включая стоянки-хвосты. Синхронизировано с KPI «Длительность» и «всего» в Аналитике"
           label="Длительность"
         />
         <Stat
+          value={computing ? "…" : fmtDurMin(agg.sumActiveSec / 60)}
+          tip="Σ активных частей поездки (§4.11): от начала до конца движения, включая светофоры и пробки. Синхронизировано с «в поездках» в шапке Аналитики"
+          label="В поездке"
+        />
+        <Stat
           value={avgKmh != null ? `${avgKmh.toFixed(1).replace(".", ",")} км/ч` : "—"}
-          tip="Средняя скорость активных частей (§4.3): суммарная дистанция / суммарное время в движении"
+          tip="Средняя скорость (§4.3, FIX-C1): Σ дистанций / Σ активных длительностей — как в Аналитике: светофоры и пробки в знаменателе, хвосты-стоянки отброшены"
           label="Ср. скорость"
         />
         <Stat
@@ -795,6 +850,11 @@ function GroupedTripBody({
           tip="Паузы МЕЖДУ записями: логгер приостанавливался (iOS), сервер начинал новую запись — теперь они склеены в одну поездку (Ф1, v2.14.0)"
           label="Паузы между записями"
         />
+        <Stat
+          value={computing ? "…" : fmtDurMin(agg.spanSec / 60)}
+          tip="От начала первой записи до конца последней, включая паузы между записями и стоянки-хвосты (v2.14.0 это была «Длительность» карточки)"
+          label="От старта до финиша"
+        />
       </div>
       {/* Ф1: раскладка поездки на записи */}
       <div className="frag-head">
@@ -807,8 +867,9 @@ function GroupedTripBody({
       <div className="t-ev">
         Записи склеены автоматически: паузы между ними меньше 10 минут, сервер
         режет запись на сессии при разрыве данных &gt;60 сек (iOS приостанавливает
-        логгер при блокировке экрана). Аналитика по-прежнему считает каждую
-        запись отдельно.
+        логгер при блокировке экрана). Параметры карточки — дистанция, длительность,
+        «в поездке», скорость, EcoScore — считаются теми же формулами §4.1/§4.3/§4.11,
+        что и «Аналитика»: суммы по записям этой поездки совпадают с её цифрами.
       </div>
     </div>
   );

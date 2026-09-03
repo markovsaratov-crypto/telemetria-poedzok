@@ -74,6 +74,9 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
       SESSION_STATS_RE.test(pathname) ||
       SESSION_EVENTS_RE.test(pathname) ||
       SESSION_TRACK_RE.test(pathname) ||
+      // v2.15.0: батя-статс — дешёвый GET с 5-мин кэшем (первый холодный проход
+      // сканирует точки, но не чаще раза в 5 минут)
+      pathname === "/api/stats/batya" ||
       pathname === "/api/geocode/reverse")
   ) {
     return { limit: e.RATE_LIMIT_MAX_READ, windowSec: 60, scope: "read" };

@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { useV4Tipbox, bindTips } from "./use-v4-tipbox";
 import { type PeriodKey } from "@/lib/v4-utils";
-import { useSessions, useReverseGeocode } from "@/lib/hooks";
+import { useSessions, useSessionsStatsBatch, useReverseGeocode } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
@@ -158,6 +158,12 @@ export function TelematikaLayout(props: LayoutProps) {
   // Live sessions list for trip-filter dropdown.
   const sessions = useSessions({ limit: 50 });
   const sessionsList = sessions.data?.sessions ?? [];
+
+  // v2.17.2 (батч-статс): префетч статов всех записей на КОРНЕ лейаута —
+  // любая вкладка прогревает один GET /api/stats/batch в фоне; клик в
+  // «Поездки» после загрузки любой вкладки = мгновенный рендер из кэша
+  // (тот же queryKey ["stats-batch", idsKey], что и в TripsView — дедуп).
+  useSessionsStatsBatch(sessionsList.map((s) => s.id));
 
   React.useEffect(() => setMounted(true), []);
 

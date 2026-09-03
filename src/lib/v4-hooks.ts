@@ -10,14 +10,14 @@
 "use client";
 
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
   type TrackResponse,
   type EventsResponse,
   type SessionListItem,
 } from "./api-client";
-import { useSessions, fetchSessionsStatsBatch, type SessionStats } from "./hooks";
+import { useSessions, fetchSessionsStatsBatch, seedSessionsStatsFromBatch, type SessionStats } from "./hooks";
 import { type PeriodKey } from "./v4-utils";
 
 // /api/stats/speed-record — §4.5 MaxSpeedAllTime (v2.13.0 Ф1).
@@ -446,6 +446,7 @@ function aggregateTrack(items: TrackResponse[]): TrackResponse {
 // Возвращает { data: PeriodAggregate | null, trips, isLoading, isError }.
 export function usePeriodStats(period: PeriodKey) {
   const sessions = useSessions({ limit: 50 });
+  const qc = useQueryClient();
   const list = sessions.data?.sessions ?? [];
   const inPeriod = useMemo(() => sessionsInPeriod(list, period), [list, period]);
   const ids = useMemo(() => inPeriod.map((s) => s.id), [inPeriod]);
@@ -459,12 +460,23 @@ export function usePeriodStats(period: PeriodKey) {
       // v2.17.0 (батч-статс): статы периода — ОДНИМ запросом /api/stats/batch
       // вместо ≤30 параллельных /api/sessions/[id]/stats (самая тяжёлая нога
       // период-агрегата: полный конвейер + спидограмма по каждой сессии).
-      // Запрошенные, но отсутствующие в ответе, добираем по одному (missing).
+      // v2.17.2: через qc.fetchQuery с тем же ключом ["stats-batch", idsKey],
+      // что лейаут-префетч и «Поездки» — параллельные потребели дедуплицируются
+      // в один HTTP-запрос, результат остаётся в кэше; ответ просеивается в
+      // per-session кэш (seedSessionsStatsFromBatch) — «Поездки» после
+      // аналитики рендерятся мгновенно. Запрошенные, но отсутствующие в
+      // ответе, добираются по одному (missing).
+      const cappedKey = Array.from(new Set(capped)).sort().join(",");
       const [batch, eventsArr, trackArr] = await Promise.all([
-        fetchSessionsStatsBatch(capped),
+        qc.fetchQuery({
+          queryKey: ["stats-batch", cappedKey],
+          queryFn: () => fetchSessionsStatsBatch(capped),
+          staleTime: 30_000,
+        }),
         Promise.all(capped.map((id) => api.get<EventsResponse>(`/api/sessions/${id}/events`))),
         Promise.all(capped.map((id) => api.get<TrackResponse>(`/api/sessions/${id}/track`))),
       ]);
+      seedSessionsStatsFromBatch(qc, batch.stats);
       const fallbackIds = batch.missing;
       const fallbackStats = fallbackIds.length
         ? await Promise.all(

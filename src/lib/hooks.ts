@@ -3,6 +3,7 @@
 
 "use client";
 
+import { useEffect } from "react";
 import {
   useQuery,
   useMutation,
@@ -347,19 +348,96 @@ export interface SessionStats {
 }
 
 export function useSessionStats(id: string | null, opts?: { live?: boolean }) {
+  // v2.17.0: пока id «покрыт» свежим батчем (/api/stats/batch просеял статы в
+  // кэш этим же ключом) — по сети не ходим: ни на холодной загрузке, ни при
+  // перемонтировании вкладки шторм из N запросов не воспроизводится. Живые
+  // записи — исключение: их статы обновляются интервалом 15с (Ф2).
+  const covered =
+    id != null &&
+    !opts?.live &&
+    Date.now() - (statsBatchCover.get(id) ?? Number.NEGATIVE_INFINITY) < STATS_BATCH_COVER_MS;
   return useQuery({
     queryKey: ["session-stats", id],
     queryFn: () => {
       if (!id) return null;
       return api.get<SessionStats>(`/api/sessions/${id}/stats`);
     },
-    enabled: !!id,
+    enabled: !!id && !covered,
     staleTime: 30_000,
     // v2.14.0 (Ф2): для идущей записи — обновление стат каждые 15с
     // (раскрывая живую карточку, видно как растут точки/дистанция;
     // для завершённых записей ничего не меняется — интервал не ставится)
     refetchInterval: opts?.live ? 15_000 : undefined,
   });
+}
+
+// ===== v2.17.0: батч-статс (GET /api/stats/batch?ids=…) =====
+// Один запрос вместо N× /api/sessions/[id]/stats. Ответ — идентичный формат
+// SessionStats, поэтому результат «просеивается» в кэш по тем же ключам
+// ["session-stats", id], что использует useSessionStats, — все существующие
+// потребители (карточки «Поездок», агрегаторы, детальный просмотр) получают
+// данные мгновенно, без своего запроса.
+export interface StatsBatchResponse {
+  stats: SessionStats[];
+  /** id, которых нет / они удалены — клиент может добрать их по одному */
+  missing: string[];
+}
+
+const STATS_BATCH_MAX_IDS = 50; // лимит роута
+const STATS_BATCH_COVER_MS = 5 * 60_000; // «покрытие» per-session кэша батчем
+/** id → timestamp последнего успешного посева из батча */
+const statsBatchCover = new Map<string, number>();
+
+/** Плоская функция — используется и хуком, и queryFn usePeriodStats. */
+export async function fetchSessionsStatsBatch(ids: string[]): Promise<StatsBatchResponse> {
+  const uniq = Array.from(new Set(ids.filter(Boolean)));
+  if (uniq.length === 0) return { stats: [], missing: [] };
+  // чанки по 50 — лимит роута; на практике список ≤50 и период ≤30 — один запрос
+  const chunks: string[][] = [];
+  for (let i = 0; i < uniq.length; i += STATS_BATCH_MAX_IDS) {
+    chunks.push(uniq.slice(i, i + STATS_BATCH_MAX_IDS));
+  }
+  const parts = await Promise.all(
+    chunks.map((c) => api.get<StatsBatchResponse>("/api/stats/batch", { ids: c.join(",") }))
+  );
+  return {
+    stats: parts.flatMap((p) => p.stats),
+    missing: parts.flatMap((p) => p.missing),
+  };
+}
+
+/**
+ * Батч-загрузка статов списка сессий + сидинг пер-сессионного кэша.
+ * Ставится в корне вкладки («Поездки») рядом со списком сессий: один ключ
+ * на множество id → один запрос на множество карточек.
+ */
+export function useSessionsStatsBatch(ids: string[]) {
+  const qc = useQueryClient();
+  // строковый ключ стабилен независимо от identity массива на каждом рендере
+  const idsKey = Array.from(new Set(ids.filter(Boolean))).sort().join(",");
+
+  const query = useQuery({
+    queryKey: ["stats-batch", idsKey],
+    queryFn: () => fetchSessionsStatsBatch(idsKey ? idsKey.split(",") : []),
+    enabled: idsKey !== "",
+    staleTime: 30_000,
+    retry: 1,
+  });
+
+  // v2.17.0: «просеивание» ответа в кэш per-session ключей + отметка покрытия.
+  // Сеем только после успешного ответа — при сбое батча пер-сессионные хуки
+  // работают как раньше (каждый сам за себя).
+  useEffect(() => {
+    const stats = query.data?.stats;
+    if (!stats || stats.length === 0) return;
+    const now = Date.now();
+    for (const s of stats) {
+      qc.setQueryData(["session-stats", s.sessionId], s);
+      statsBatchCover.set(s.sessionId, now);
+    }
+  }, [query.data, qc]);
+
+  return query;
 }
 
 // ===== Batch sessions (for compare) =====

@@ -77,6 +77,9 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
         // v2.15.0: батя-статс — дешёвый GET с 5-мин кэшем (первый холодный проход
         // сканирует точки, но не чаще раза в 5 минут)
         pathname === "/api/stats/batya" ||
+        // v2.17.0: батч-статс — пакует до 50 per-session запросов в один GET
+        // (замена «шторма» /api/sessions/[id]/stats при открытии «Поездок»)
+        pathname === "/api/stats/batch" ||
         pathname === "/api/geocode/reverse")) ||
     // v2.16.0 (S1): bulk-ЧТЕНИЯ POST-ом — в read-скопе. /api/sessions/batch
     // (пачка записей для «Поездок») — чтение по определению, но падало в

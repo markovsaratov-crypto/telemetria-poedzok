@@ -26,7 +26,7 @@
 "use client";
 
 import * as React from "react";
-import { useSessions, useSessionStats, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
+import { useSessions, useSessionStats, useSessionsStatsBatch, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
 import { ecoCls, ecoLab } from "@/lib/v4-utils";
 import { fmtSecFull, fmtDurMin, fmtNumber, pluralRu } from "@/lib/format";
@@ -84,6 +84,24 @@ export function TripsView({ onGoAdmin }: { onGoAdmin?: () => void }) {
   const isError = sessions.isError;
   // v2.14.0 (Ф1): группы-поездки — мемо, чтобы не пересчитывать на каждый рендер
   const groups = React.useMemo(() => groupIntoTrips(list), [list]);
+
+  // v2.17.0 (батч-статс): статы ВСЕХ записей вкладки — одним GET /api/stats/batch
+  // (вместо N× /api/sessions/[id]/stats, что на проде давало 40–60 с полной
+  // загрузки). Ответ просеивается в кэш ["session-stats", id] (хук внутри),
+  // карточки/агрегаторы читают его без собственных запросов (coverage в
+  // useSessionStats). Пока первый батч в полёте — держим скелетон; сбой или
+  // 15-секундный watchdog → рендерим карточки как раньше (поштучная загрузка).
+  const ids = React.useMemo(() => list.map((s) => s.id), [list]);
+  const statsBatch = useSessionsStatsBatch(ids);
+  const [batchWatchdog, setBatchWatchdog] = React.useState(false);
+  React.useEffect(() => {
+    setBatchWatchdog(false);
+    if (statsBatch.data != null || statsBatch.isError) return;
+    const t = window.setTimeout(() => setBatchWatchdog(true), 15_000);
+    return () => window.clearTimeout(t);
+  }, [statsBatch.data, statsBatch.isError]);
+  const waitingForStats =
+    ids.length > 0 && statsBatch.data == null && !statsBatch.isError && !batchWatchdog;
   // Рефреш показателя «свежести» раз в минуту (чтобы часы без перезагрузки обновлялись)
   const [, setTick] = React.useState(0);
   React.useEffect(() => {
@@ -97,7 +115,9 @@ export function TripsView({ onGoAdmin }: { onGoAdmin?: () => void }) {
         <div className="card" style={{ padding: "20px", color: "var(--red)", fontSize: 13 }}>
           Не удалось загрузить список поездок. Попробуйте обновить страницу.
         </div>
-      ) : isLoading ? (
+      ) : isLoading || waitingForStats ? (
+        // v2.17.0: waitingForStats — статы едут одним батч-запросом; скелетон
+        // держим до его завершения (или watchdog 15с → карточки грузятся сами)
         <TripsSkeleton />
       ) : list.length === 0 ? (
         <div

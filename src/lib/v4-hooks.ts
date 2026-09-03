@@ -17,7 +17,7 @@ import {
   type EventsResponse,
   type SessionListItem,
 } from "./api-client";
-import { useSessions, type SessionStats } from "./hooks";
+import { useSessions, fetchSessionsStatsBatch, type SessionStats } from "./hooks";
 import { type PeriodKey } from "./v4-utils";
 
 // /api/stats/speed-record — §4.5 MaxSpeedAllTime (v2.13.0 Ф1).
@@ -456,12 +456,27 @@ export function usePeriodStats(period: PeriodKey) {
     queryFn: async () => {
       if (!ids.length) return null;
       const capped = ids.slice(0, MAX_PERIOD_SESSIONS);
-      const [statsArr, eventsArr, trackArr] = await Promise.all([
-        Promise.all(capped.map((id) => api.get<SessionStats>(`/api/sessions/${id}/stats`))),
+      // v2.17.0 (батч-статс): статы периода — ОДНИМ запросом /api/stats/batch
+      // вместо ≤30 параллельных /api/sessions/[id]/stats (самая тяжёлая нога
+      // период-агрегата: полный конвейер + спидограмма по каждой сессии).
+      // Запрошенные, но отсутствующие в ответе, добираем по одному (missing).
+      const [batch, eventsArr, trackArr] = await Promise.all([
+        fetchSessionsStatsBatch(capped),
         Promise.all(capped.map((id) => api.get<EventsResponse>(`/api/sessions/${id}/events`))),
         Promise.all(capped.map((id) => api.get<TrackResponse>(`/api/sessions/${id}/track`))),
       ]);
-      const okStats = statsArr.filter(Boolean);
+      const fallbackIds = batch.missing;
+      const fallbackStats = fallbackIds.length
+        ? await Promise.all(
+            fallbackIds.map((id) =>
+              api.get<SessionStats>(`/api/sessions/${id}/stats`).catch(() => null)
+            )
+          )
+        : [];
+      const okStats = [
+        ...batch.stats,
+        ...fallbackStats.filter((s): s is SessionStats => s != null),
+      ];
       const okEvents = eventsArr.filter(Boolean);
       const okTracks = trackArr.filter((t) => t && (t.points?.length ?? 0) > 0);
       if (!okStats.length) return null;

@@ -64,12 +64,13 @@ import { ZipImport } from "@/components/zip-import";
 
 // Версии документов (v2.14.0): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
 // При следующем релизе доков обновить здесь + строки изменений ниже + шапки файлов в docs/
-// (методология не менялась с v2.10.4 — prev у неё остаётся v2.9).
 const DOCS = {
-  methodology: "v2.10.4 · 31.08",
-  methodologyPrev: "v2.9 · 29.08",
-  spec: "v2.18.0 · 04.09",
-  specPrev: "v2.17.2 · 04.09",
+  // v2.19.0: синхронизировано с фактическими docs/METHODOLOGY.md и docs/ADMIN_SPEC.md
+  // (раньше methodology висел на v2.10.4 с 31.08 — рассинхрон поверхностей)
+  methodology: "v2.19.0 · 04.09",
+  methodologyPrev: "v2.10.4 · 31.08",
+  spec: "v2.19.0 · 04.09",
+  specPrev: "v2.18.0 · 04.09",
 } as const;
 
 export function AdminViewV4() {
@@ -306,6 +307,19 @@ function A1ParamsBlock() {
                 не сериализуем (0 потребителей), мёртвый код удалён: <s>GET [id]/share</s>,
                 <s>/api/stats/batya</s>, <s>cache.ts+RouteCache</s>, <s>perDay</s>, 4 env-поля.
                 Цифры и формулы метрик не менялись.
+              </li>
+              <li>
+                <b className="c-plum">спека v2.19.0</b> производительность + типизация + синхронизация
+                доков: <b>GET /api/events/batch</b> и <b>GET /api/track/batch</b> — события/треки
+                периода одним запросом каждый (<s>2×N поштучных под семафором 6</s>; единые конвейеры
+                session-events.ts / session-track.ts с одиночными роутами, QA 30/30 deep-equality);
+                точка батчей — <b>чанки 8 id параллельно</b> вместо одного LEFT JOIN 25k строк
+                (<s>холодный батч ~10–22 с</s>; стенд: 28 сессий — 0,25 с); серверный <b>TTL-кэш 30с</b>
+                на все три батч-роута (X-Cache: ttl на хитах; вкладки/устройства делят результат);
+                <b>noImplicitAny: true</b> — последние any убраны (zip tx, 2ГИС-пути, worker-runtime);
+                рендер-версия/методология/OPERATIONS-спека синхронизированы с package.json 2.19.0;
+                render.yaml APP_VERSION <s>2.17.1</s> → 2.19.0; GitHub draft-релиз код-бекап
+                (долг с v2.15.0). Цифры не менялись.
               </li>
               <li>
                 <b className="c-plum">спека v2.17.0</b> батч-статс: <b>GET /api/stats/batch?ids=</b> — статистика

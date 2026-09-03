@@ -93,8 +93,10 @@ async function route2Gis(
       // R5.1: 2ГИС может вернуть outcoming_path как объект (один путь) ИЛИ
       // как массив путей — нормализуем в массив, иначе `for of` упадёт с
       // "X is not iterable" на реально полученном ответе.
+      // v2.19.0: типизировано (было `any[]`)
       const rawPaths = m.outcoming_path;
-      const paths: any[] = Array.isArray(rawPaths)
+      type DgisPath = { distance?: unknown; duration?: unknown; geometry?: Array<{ selection?: string }> };
+      const paths: DgisPath[] = Array.isArray(rawPaths)
         ? rawPaths
         : rawPaths
           ? [rawPaths]

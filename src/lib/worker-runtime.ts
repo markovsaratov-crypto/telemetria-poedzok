@@ -4,7 +4,7 @@ import { libsql, toCamel } from "./db"; // v2.16.0: toCamel — единая р�
 import { env } from "./env";
 import { logger } from "./logger";
 import { inc, set } from "./metrics";
-import { routeRequest } from "./routing/chain";
+import { routeRequest, type RouteResult } from "./routing/chain";
 import { finalizeSession } from "./session-finalize"; // v2.14.0 (Ф3): «жнец» зависших recording-сессий
 import { computeMovingTime, computeActiveTrip } from "./active-trip"; // v2.16.0 (B-10): каноническое активное окно §4.11
 import { getCorpusEcoBaselines } from "./eco-corpus"; // v2.17.1: фоновый прогрев corpus-калибровки
@@ -105,7 +105,7 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
 
   const sessionsRes = await libsql.execute({
     sql: `SELECT id, deviceId FROM Session WHERE id IN (${placeholders})`,
-    args: sessionIds as any,
+    args: sessionIds, // v2.19.0: string[] — валидные InValue (было `as any`)
   });
   const sessionMap = new Map<string, string>();
   for (const r of sessionsRes.rows) {
@@ -115,7 +115,7 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
 
   const ptsRes = await libsql.execute({
     sql: `SELECT sessionId, lat, lon, speed, timestamp FROM GpsPoint WHERE sessionId IN (${placeholders}) ORDER BY sessionId, timestamp ASC`,
-    args: sessionIds as any,
+    args: sessionIds, // v2.19.0: string[] — валидные InValue (было `as any`)
   });
   const pointsMap = new Map<string, Array<{ lat: number; lon: number; speed: number | null; timestamp: number; altitude: null; accuracy: null; bearing: null }>>();
   for (const r of ptsRes.rows) {
@@ -150,7 +150,8 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
   return jobs;
 }
 
-async function completeJob(jobId: string, status: "completed" | "failed", result: any, errorMsg: string | null, attempts: number, requestId: string) {
+// v2.19.0: result — честный RouteResult из routing/chain (было `any`)
+async function completeJob(jobId: string, status: "completed" | "failed", result: RouteResult | null, errorMsg: string | null, attempts: number, requestId: string) {
   const now = new Date().toISOString();
   const newAttempts = attempts + 1;
   let finalStatus: string = status;
@@ -201,7 +202,7 @@ async function processOneJob(job: JobWithPoints, parentRequestId: string) {
   const end = points[points.length - 1];
   logger.info("job started", { requestId, parentRequestId, jobId: job.id, sessionId: job.sessionId, points: points.length });
   try {
-    const result = await Promise.race<any>([
+    const result = await Promise.race<RouteResult | null>([
       routeRequest(start.lat, start.lon, end.lat, end.lon),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("routeRequest timeout 15s")), 15000)),
     ]);

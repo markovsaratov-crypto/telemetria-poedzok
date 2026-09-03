@@ -506,7 +506,10 @@ export const db = {
     // Теперь — многорядный INSERT чанками по 50 строк (450 плейсхолдеров <
     // лимита SQLite 999 переменных).
     async createMany(args: { data: Array<Record<string, unknown>> }) {
-      const items = args.data.map((item) => ({ id: crypto.randomUUID(), ...pruneUndefined(item) }));
+      // v2.19.0: явный Record<string,unknown> — spread Record-типа в объектный
+      // литерал схлопывался до {id:string}, индексация item[c] падала (TS7053,
+      // была спрятана noImplicitAny:false)
+      const items: Array<Record<string, unknown>> = args.data.map((item) => ({ id: crypto.randomUUID(), ...pruneUndefined(item) }));
       if (items.length === 0) return { count: 0 };
       // Колонки — по ключам первой строки; отсутствующие в остальных → NULL
       const cols = Object.keys(items[0]);
@@ -808,7 +811,7 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
           // последовательных execute внутри транзакции)
           requireStamps("createMany");
           if (args.data.length === 0) return { count: 0 };
-          const items = args.data.map((item) => ({ id: crypto.randomUUID(), ...pruneUndefined(item) }));
+          const items: Array<Record<string, unknown>> = args.data.map((item) => ({ id: crypto.randomUUID(), ...pruneUndefined(item) }));
           const cols = Object.keys(items[0]);
           const ph = `(${cols.map(() => "?").join(", ")})`;
           const CH = Math.max(1, Math.floor(900 / cols.length));

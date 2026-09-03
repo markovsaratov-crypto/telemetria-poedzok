@@ -161,7 +161,8 @@ export async function POST(request: NextRequest) {
     // (как в CSV-импорте). Раньше сбой между create-сессии и вставкой чанка
     // оставлял «висячую» сессию без точек. tx.gpsPoint.createMany внутри
     // транзакции теперь чанкует многорядными INSERT (<999 плейсхолдеров).
-    const session = await db.$transaction(async (tx: any) => {
+    // v2.19.0: tx — честный DbTx (выводится сигнатурой $transaction; было `: any`)
+    const session = await db.$transaction(async (tx) => {
       const s = await tx.session.create({
         data: { deviceId, clientId, deviceName, startTime, endTime, pointCount: filtered.length, payloadBytes: fileBuffer.length, status: "completed" },
       });
@@ -178,12 +179,15 @@ export async function POST(request: NextRequest) {
         })),
       });
       const job = await tx.trafficJob.create({ data: { sessionId: s.id, status: "pending" } });
-      await tx.session.update({ where: { id: s.id }, data: { trafficJobId: job.id } });
+      // v2.19.0: id из TxModelApi — unknown → честный string
+      await tx.session.update({ where: { id: String(s.id) }, data: { trafficJobId: String(job.id) } });
       return s;
     });
-    await writeAudit({ action: "session.import", targetId: session.id, targetType: "Session", actorType: "user", actorId: "owner", sessionId: session.id, metadata: { source: "zip", fileName: file.name, pointCount: filtered.length, deviceName } });
+    // v2.19.0: noImplicitAny — id транзакционного результата unknown → String()
+    const sessionId = String(session.id);
+    await writeAudit({ action: "session.import", targetId: sessionId, targetType: "Session", actorType: "user", actorId: "owner", sessionId, metadata: { source: "zip", fileName: file.name, pointCount: filtered.length, deviceName } });
     inc("ingest_total", "Total ingest requests", 1, "zip");
-    logger.info("ZIP import success", { requestId, sessionId: session.id, points: filtered.length, deviceName });
+    logger.info("ZIP import success", { requestId, sessionId, points: filtered.length, deviceName });
 
     return json({ imported: 1, sessionId: session.id, deviceId, deviceName, pointCount: filtered.length, startTime: startTime.toISOString(), endTime: endTime.toISOString() }, 200, { "X-Request-Id": requestId });
   } catch (err) {

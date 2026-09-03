@@ -306,7 +306,7 @@ const CORS_HEADERS: Record<string, string> = {
 
 const server = Bun.serve({
   port: PORT,
-  async fetch(req) {
+  async fetch(req: Request) { // v2.19.0: noImplicitAny — явный тип (Bun-типы не в lib)
     const url = new URL(req.url);
 
     // CORS preflight

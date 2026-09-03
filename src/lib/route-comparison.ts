@@ -3,6 +3,7 @@
 // агрегаты по ActiveDuration (§4.11), фильтр SessionReliability ≥ 0.6 (§10.1),
 // Theil-Sen-тренд (§10.5), HotspotSegments P75 < 0.5 (§10.6).
 import { libsql } from "./db";
+import { pluralRu } from "./format"; // v2.16.0 (D-12): единая плюрализация
 import { computeActiveTrip, computeMovingTime, type MethodologyPoint, type ActiveTrip, type MotionResult } from "./active-trip";
 import {
   computeRouteTrendTheilSen,
@@ -54,13 +55,18 @@ const RELIABILITY_FLOOR = 0.6; // §10.1: в агрегат входят тол�
 // аргументы-числа в libsql-фильтрах теряют строки (integer < text).
 export type RoutePeriod = "today" | "week" | "d30" | "all";
 
-export function routePeriodSinceIso(period: string | null): string | null {
+export function routePeriodSinceIso(period: string | null, tzOffsetMin?: number): string | null {
   const now = Date.now();
   let since: number | null = null;
   switch (period) {
     case "today": {
-      const d = new Date(now);
-      since = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+      // v2.16.0 (B-4): полночь — в ЧАСОВОМ ПОЯСЕ КЛИЕНТА (tzOffsetMin, как
+      // Date#getTimezoneOffset; 0 = UTC по умолчанию), ЧИСТАЯ UTC-арифметика.
+      // Раньше new Date(y,m,d) брал СЕРВЕРНЫЙ пояс: на UTC-хостинге «сегодня»
+      // для МСК начиналось в 03:00 — период-фильтр route-агрегатов расходился
+      // с /api/stats и «батя-статс», которые считают в поясе клиента.
+      const tzMs = (tzOffsetMin ?? 0) * 60_000;
+      since = Math.floor((now - tzMs) / 86_400_000) * 86_400_000 + tzMs;
       break;
     }
     case "week":
@@ -527,7 +533,7 @@ export async function groupRouteGpx(routeHash: string): Promise<string | null> {
   const stats = routeDurationStats(sessions);
   const avgKm = sessions.reduce((a, s) => a + s.distanceM, 0) / sessions.length / 1000;
   const name = `route ${routeHash}`;
-  const desc = `Канонический маршрут группы routeHash ${routeHash}: ${sessions.length} поездк(и/а), ` +
+  const desc = `Канонический маршрут группы routeHash ${routeHash}: ${sessions.length} ${pluralRu(sessions.length, ["поездка", "поездки", "поездок"])}, ` +
     `ср. ActiveDuration ${stats.avg ?? "—"}с, ср. дистанция ${avgKm.toFixed(1)} км (методология §10.0)`;
   const trkpts = polyline
     .map((p) => `      <trkpt lat="${p.lat.toFixed(6)}" lon="${p.lon.toFixed(6)}"></trkpt>`)

@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
         inc("auth_login_failed_total", "Auth login failures", 1);
         logger.warn("Login failed (multi-user bad creds)", { requestId, email });
         return NextResponse.json(
-          { error: "Invalid credentials" },
+          { error: "Неверный email или пароль" },
           { status: 401, headers: { "X-Request-Id": requestId } }
         );
       }
@@ -65,7 +65,7 @@ export async function POST(request: NextRequest) {
       inc("auth_login_failed_total", "Auth login failures", 1);
       logger.warn("Login failed (bad password)", { requestId });
       return NextResponse.json(
-        { error: "Invalid credentials" },
+        { error: "Неверный email или пароль" },
         { status: 401, headers: { "X-Request-Id": requestId } }
       );
     }

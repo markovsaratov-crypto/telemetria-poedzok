@@ -8,6 +8,7 @@ import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { getRateLimiterStats } from "@/lib/rate-limit";
 import { circuitStatus } from "@/lib/routing/circuit-breaker";
+import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
 
@@ -21,11 +22,13 @@ export async function GET(request: NextRequest) {
     });
   }
   try {
-    // Обновляем gauge-метрики
-    const sessionCount = await db.session.count({ where: { deletedAt: null } });
-    const trafficJobPending = await db.trafficJob.count({ where: { status: "pending" } });
-    const trafficJobRunning = await db.trafficJob.count({ where: { status: "running" } });
-    const trafficJobFailed = await db.trafficJob.count({ where: { status: "failed" } });
+    // Обновляем gauge-метрики (v2.16.0 (I5): 4 счётчика — параллельно)
+    const [sessionCount, trafficJobPending, trafficJobRunning, trafficJobFailed] = await Promise.all([
+      db.session.count({ where: { deletedAt: null } }),
+      db.trafficJob.count({ where: { status: "pending" } }),
+      db.trafficJob.count({ where: { status: "running" } }),
+      db.trafficJob.count({ where: { status: "failed" } }),
+    ]);
     set("sessions_active_total", sessionCount, "Active sessions");
     set("traffic_job_pending_total", trafficJobPending, "Pending traffic jobs");
     set("traffic_job_running_total", trafficJobRunning, "Running traffic jobs");
@@ -41,7 +44,10 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (err) {
-    return new Response(`# error: ${err instanceof Error ? err.message : String(err)}\n`, {
+    // v2.16.0 (B15): наружу — generic-текст (детали — в логи; err.message мог
+    // светить внутренности БД)
+    logger.error("metrics route failed", { requestId, error: err instanceof Error ? err.message : String(err) });
+    return new Response("# error: internal server error\n", {
       status: 500,
       headers: { "Content-Type": "text/plain" },
     });

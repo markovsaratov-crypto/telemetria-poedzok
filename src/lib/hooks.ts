@@ -13,14 +13,11 @@ import {
   api,
   type SessionListItem,
   type SessionDetail,
-  type RouteItem,
-  type AuditLogItem,
   type BackupItem,
   type HealthResponse,
   type ExportSyncResponse,
   type ExportAsyncResponse,
   type ExportPollResponse,
-  type PlanResponse,
 } from "./api-client";
 // v2.9.9: офлайн-снимок статистики для PWA-заглушки (public/offline.html)
 import { saveOfflineSummary } from "./offline-summary";
@@ -136,9 +133,10 @@ export interface StatsResponse {
 
 export function useStats() {
   return useQuery({
-    queryKey: ["stats"],
+    queryKey: ["stats", new Date().getTimezoneOffset()],
     queryFn: async () => {
-      const data = await api.get<StatsResponse>("/api/stats");
+      // v2.16.0 (B-7): ?tzOffsetMin — «сегодня» в поясе клиента (как у батя-статс)
+      const data = await api.get<StatsResponse>(`/api/stats?tzOffsetMin=${new Date().getTimezoneOffset()}`);
       // v2.9.9: офлайн-снимок — обновляем после каждого успешного запроса
       saveOfflineSummary({
         version: data.version,
@@ -443,22 +441,6 @@ export function useUpdateSessionNotes() {
 }
 
 // ===== Bulk delete =====
-export function useBulkDeleteSessions() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (ids: string[]) =>
-      api.post<{ deleted: number; errors: string[] }>("/api/sessions/bulk-delete", { ids }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["sessions"] });
-      qc.invalidateQueries({ queryKey: ["stats"] });
-      qc.invalidateQueries({ queryKey: ["audit"] });
-      qc.invalidateQueries({ queryKey: ["device-stats"] });
-      qc.invalidateQueries({ queryKey: ["tags-stats"] });
-    },
-  });
-}
-
-// ===== Session share =====
 export interface ShareResult {
   token: string;
   url: string;
@@ -474,72 +456,6 @@ export function useCreateShareLink() {
 }
 
 // ===== Routes =====
-export function useRoutes() {
-  return useQuery({
-    queryKey: ["routes"],
-    queryFn: () => api.get<{ routes: RouteItem[] }>("/api/routes"),
-    staleTime: 30_000,
-  });
-}
-
-export function useCreateRoute() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body: {
-      name: string;
-      description?: string;
-      startLat: number;
-      startLon: number;
-      endLat: number;
-      endLon: number;
-    }) => api.post<{ route: RouteItem }>("/api/routes", body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["routes"] }),
-  });
-}
-
-export function useUpdateRoute() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      id,
-      patch,
-    }: {
-      id: string;
-      patch: Partial<{
-        name: string;
-        description: string;
-        startLat: number;
-        startLon: number;
-        endLat: number;
-        endLon: number;
-      }>;
-    }) => api.patch<{ route: RouteItem }>(`/api/routes/${id}`, patch),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["routes"] }),
-  });
-}
-
-export function useDeleteRoute() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => api.delete(`/api/routes/${id}`),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["routes"] }),
-  });
-}
-
-// ===== Plan =====
-export function usePlan() {
-  return useMutation({
-    mutationFn: (body: {
-      startLat: number;
-      startLon: number;
-      endLat: number;
-      endLon: number;
-      sessionId?: string;
-    }) => api.post<PlanResponse>("/api/plan", body),
-  });
-}
-
-// ===== Export =====
 export function useExportSession() {
   return useMutation({
     mutationFn: ({
@@ -579,19 +495,6 @@ export interface AuditQuery {
   targetType?: string;
 }
 
-export function useAudit(params: AuditQuery) {
-  return useQuery({
-    queryKey: ["audit", params],
-    queryFn: () =>
-      api.get<{ logs: AuditLogItem[]; nextCursor: string | null }>(
-        "/api/audit",
-        params as Record<string, string | number | undefined>
-      ),
-    staleTime: 10_000,
-  });
-}
-
-// ===== Backups =====
 export function useBackups() {
   return useQuery({
     queryKey: ["backups"],
@@ -747,17 +650,6 @@ export interface BatchStatItem {
   track?: { lat: number; lon: number }[]; // v2.9.6: ≤40 точек для мини-карты в списке поездок
 }
 
-export function useBatchStats(ids: string[]) {
-  return useQuery({
-    queryKey: ["batch-stats", ids],
-    queryFn: () =>
-      api.post<{ sessions: BatchStatItem[]; total: number }>("/api/sessions/batch-stats", { ids }),
-    enabled: ids.length > 0,
-    staleTime: 60_000,
-  });
-}
-
-// ===== Aggregate stats (totalDistance, totalDuration, avgSpeed) =====
 export interface AggregateStats {
   totalDistanceM: number;
   totalDistanceKm: number;
@@ -769,24 +661,6 @@ export interface AggregateStats {
   validCount: number;
 }
 
-export function useAggregateStats() {
-  return useQuery({
-    queryKey: ["aggregate-stats"],
-    queryFn: async () => {
-      const data = await api.get<AggregateStats>("/api/stats/aggregate");
-      // v2.9.9: офлайн-снимок — суммарные дистанция/длительность/средняя скорость
-      saveOfflineSummary({
-        totalDistanceKm: data.totalDistanceKm,
-        totalDurationMin: data.totalDurationMin,
-        avgSpeedKmh: data.avgSpeedKmh,
-      });
-      return data;
-    },
-    staleTime: 60_000,
-  });
-}
-
-// ===== Speed distribution =====
 export interface SpeedBucket {
   label: string;
   minKmh: number;
@@ -804,20 +678,6 @@ export interface SpeedDistribution {
   maxBucketCount: number;
 }
 
-export function useSpeedDistribution() {
-  return useQuery({
-    queryKey: ["speed-distribution"],
-    queryFn: async () => {
-      const data = await api.get<SpeedDistribution>("/api/stats/speed-distribution");
-      // v2.9.9: офлайн-снимок — максимальная скорость по всем поездкам
-      saveOfflineSummary({ maxSpeedKmh: data.maxSpeedKmh });
-      return data;
-    },
-    staleTime: 60_000,
-  });
-}
-
-// ===== Admin settings =====
 export interface SettingItem {
   key: string;
   value: string;
@@ -905,14 +765,23 @@ export interface RouteGroupInfo {
   polylineSample: { lat: number; lon: number }[] | null;
 }
 
+// v2.16.0 (B-7/B-4): tz-параметр для период-запросов «сегодня» — полночь считается
+// в поясе КЛИЕНТА (как getTimezoneOffset; Саратов → -240). Без этого «Сегодня»
+// в аналитике/маршрутах начинался в 03:00 МСК на UTC-сервере.
+function tzQuery(since?: string): string {
+  const tz = new Date().getTimezoneOffset();
+  const suffix = `tzOffsetMin=${tz}`;
+  return since ? `period=${encodeURIComponent(since)}&${suffix}` : suffix;
+}
+
 export function useRouteGroups(period?: string) {
   return useQuery({
     // v2.12.0 (D-8): период входит в ключ — смена «Сегодня»→«30 дней» перезабирает
     // группы с сервера (?period=...), а не показывает общий список.
-    queryKey: ["route-groups", period ?? "all"],
+    queryKey: ["route-groups", period ?? "all", new Date().getTimezoneOffset()],
     queryFn: () =>
       api.get<{ groups: RouteGroupInfo[]; total: number }>(
-        `/api/routes/grouped${period ? `?period=${encodeURIComponent(period)}` : ""}`
+        `/api/routes/grouped?${tzQuery(period)}`
       ),
     staleTime: 60_000,
   });
@@ -950,10 +819,10 @@ export interface HeavySegmentsData {
 export function useHeavySegments(period?: string) {
   return useQuery({
     // v2.12.0 (D-8): тяжёлые участки уважают выбранный период (?period=...).
-    queryKey: ["heavy-segments", period ?? "all"],
+    queryKey: ["heavy-segments", period ?? "all", new Date().getTimezoneOffset()],
     queryFn: () =>
       api.get<HeavySegmentsData>(
-        `/api/routes/heavy-segments${period ? `?period=${encodeURIComponent(period)}` : ""}`
+        `/api/routes/heavy-segments?${tzQuery(period)}`
       ),
     staleTime: 120_000,
     retry: 1,
@@ -1039,12 +908,3 @@ export interface RouteHotspotsData {
   polylineSample: { lat: number; lon: number }[];
 }
 
-export function useRouteHotspots(routeHash: string | null) {
-  return useQuery({
-    queryKey: ["route-hotspots", routeHash],
-    queryFn: () => api.get<RouteHotspotsData>(`/api/routes/${routeHash}/hotspots`),
-    enabled: !!routeHash,
-    staleTime: 60_000,
-    retry: false,
-  });
-}

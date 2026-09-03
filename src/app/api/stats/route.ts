@@ -29,38 +29,61 @@ export async function GET(request: NextRequest) {
     ]);
 
     // Today
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    // v2.16.0 (B7): «сегодня» — в часовом поясе КЛИЕНТА (?tzOffsetMin, как
+    // Date#getTimezoneOffset; по умолчанию 0 = UTC). Раньше полночь бралась в
+    // СЕРВЕРНОМ поясе — на Render UTC «сегодня» начиналось в 03:00 МСК и
+    // расходилось с «батя-статс», который всегда считал в поясе клиента.
+    const url = new URL(request.url);
+    const tzRaw = Number(url.searchParams.get("tzOffsetMin"));
+    const tzOffsetMin = Number.isFinite(tzRaw) && Math.abs(tzRaw) <= 15 * 60 ? Math.round(tzRaw) : 0;
+    const tzMs = tzOffsetMin * 60_000;
+    const todayStartMs = Math.floor((Date.now() - tzMs) / 86_400_000) * 86_400_000 + tzMs;
     const todaySessions = await db.session.count({
-      where: { startTime: { gte: todayStart }, deletedAt: null },
+      where: { startTime: { gte: new Date(todayStartMs) }, deletedAt: null },
     });
 
-    // Last 7 days activity (for sparkline)
+    // v2.16.0 (I4): 4 независимых запроса (7д, 12нед, aggregate, трейс) —
+    // параллельно (было 4 последовательных HTTPS-раундтрипа к Turso).
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    const recentSessions = await db.session.findMany({
-      where: { startTime: { gte: sevenDaysAgo }, deletedAt: null },
-      select: { startTime: true, endTime: true, pointCount: true, payloadBytes: true },
-      orderBy: { startTime: "asc" },
-      // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 резал спарклайн
-      take: 5000,
-    });
+    const twelveWeeksAgo = new Date();
+    twelveWeeksAgo.setDate(twelveWeeksAgo.getDate() - 84); // v2.16.0 (V4): имя = суть (12 недель, не «30 дней»)
+    const [recentSessions, totalBytesResult, heatmapSessions, ingestTrace] = await Promise.all([
+      db.session.findMany({
+        where: { startTime: { gte: sevenDaysAgo }, deletedAt: null },
+        select: { startTime: true, endTime: true, pointCount: true, payloadBytes: true },
+        orderBy: { startTime: "asc" },
+        // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 резал спарклайн
+        take: 5000,
+      }),
+      db.session.aggregate({
+        _sum: { payloadBytes: true },
+        where: { deletedAt: null },
+      }),
+      db.session.findMany({
+        where: { startTime: { gte: twelveWeeksAgo }, deletedAt: null },
+        select: { startTime: true, pointCount: true },
+        orderBy: { startTime: "asc" },
+        // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 в обёртке резал
+        // 12-недельную тепловую карту до 20 сессий
+        take: 5000,
+      }),
+      readIngestTrace().catch(() => ({ last: null, recent: [], updatedAt: null })),
+    ]);
 
     // Per-day buckets for last 7 days
     // v2.9.4: +durationSec — сумма длительностей сессий за день (спарклайн KPI «Длительность» в мобильной аналитике)
     // v2.9.4 fix: startTime из БД приходит ISO-строкой — сравниваем через new Date (раньше string vs Date давал NaN → все бакеты были нулями)
+    // v2.16.0: границы суток — в поясе клиента (согласовано с todaySessions выше)
     const perDay: { date: string; count: number; points: number; durationSec: number }[] = [];
     for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      d.setHours(0, 0, 0, 0);
-      const next = new Date(d);
-      next.setDate(next.getDate() + 1);
+      const dayStartMs = todayStartMs - i * 86_400_000;
+      const nextMs = dayStartMs + 86_400_000;
       const dayItems = recentSessions.filter(
-        (s) => new Date(s.startTime) >= d && new Date(s.startTime) < next
+        (s) => new Date(s.startTime).getTime() >= dayStartMs && new Date(s.startTime).getTime() < nextMs
       );
       perDay.push({
-        date: d.toISOString().slice(0, 10),
+        date: new Date(dayStartMs).toISOString().slice(0, 10),
         count: dayItems.length,
         points: dayItems.reduce((a, s) => a + s.pointCount, 0),
         durationSec: dayItems.reduce(
@@ -69,28 +92,6 @@ export async function GET(request: NextRequest) {
         ),
       });
     }
-
-    // Total payload bytes
-    const totalBytesResult = await db.session.aggregate({
-      _sum: { payloadBytes: true },
-      where: { deletedAt: null },
-    });
-
-    // Last 30 days heatmap
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 84); // 12 недель
-    const heatmapSessions = await db.session.findMany({
-      where: { startTime: { gte: thirtyDaysAgo }, deletedAt: null },
-      select: { startTime: true, pointCount: true },
-      orderBy: { startTime: "asc" },
-      // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 в обёртке резал
-      // 12-недельную тепловую карту до 20 сессий
-      take: 5000,
-    });
-
-    // DIAG-1: трассировка канала приёма — «тихие» исходы инжеста видны в админке L1.
-    // Не в /health: он публичный, а deviceId/размеры попыток — не для наружи.
-    const ingestTrace = await readIngestTrace().catch(() => ({ last: null, recent: [], updatedAt: null }));
 
     // v2.10.8: полный дамп последнего нераспознанного батча — ТОЛЬКО по
     // ?ingestRaw=1: до 64 КБ в теле ответе, не таскаем его в каждом запросе.

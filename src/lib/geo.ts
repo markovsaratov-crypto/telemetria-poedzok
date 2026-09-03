@@ -1,6 +1,6 @@
 // src/lib/geo.ts — P2-14: единственная каноническая реализация гаверсинуса.
 // Раньше 6 идентичных копий жили в format.ts, chain.ts, metrics-methodology.ts,
-// batch-stats, stats и /shared — единое место исключает расхождения формул.
+// stats и /shared — единое место исключает расхождения формул.
 // R = 6371000 м — строго по METHODOLOGY.md §4.2.
 
 const EARTH_R_M = 6371000;
@@ -19,7 +19,8 @@ export function haversineM(lat1: number, lon1: number, lat2: number, lon2: numbe
   const a =
     Math.sin(dLat / 2) ** 2 +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return 2 * EARTH_R_M * Math.asin(Math.sqrt(a));
+  // v2.16.0: clamp от флот-округления на антиподальных точках (a чуть > 1 давал NaN)
+  return 2 * EARTH_R_M * Math.asin(Math.sqrt(Math.min(1, a)));
 }
 
 /** Суммарная длина трека по последовательным точкам (метры). */

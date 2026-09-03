@@ -19,23 +19,10 @@ export const BUCKETS: [string, string][] = [
 ];
 
 // Mulberry32 seeded PRNG — deterministic, idempotent.
-export function mulberry32(a: number): () => number {
-  return function () {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+// v2.16.0 (D-7): единственная реализация в src/lib/utils.ts — была копия и здесь.
+export { mulberry32 } from "@/lib/utils";
 
-// Box-Muller transform — N(0,1) from uniform PRNG.
-export function gauss(r: () => number): number {
-  let u = 0, v = 0;
-  while (!u) u = r();
-  while (!v) v = r();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-}
+// v2.16.0: gauss удалён — 0 потребителей (Box-Muller остался только в git-истории).
 
 // EcoScore zone classifier (§7.3 CAP formula).
 export function ecoZone(s: number): { c: string; cls: string; band: string } {

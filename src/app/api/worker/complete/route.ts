@@ -32,6 +32,13 @@ export async function POST(request: NextRequest) {
     const job = await db.trafficJob.findUnique({ where: { id: jobId } });
     if (!job) return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
 
+    // v2.16.0 (S4): проверка владения и статуса — complete/failed/dead можно
+    // применить ТОЛЬКО к running-джобу этого воркера. Раньше любой держатель
+    // CRON_SECRET мог произвольно перезаписать любой джоб (даже pending).
+    if (job.status !== "running") {
+      return json({ error: `Job is not running (status=${job.status}) — complete is not applicable` }, 409, { "X-Request-Id": requestId });
+    }
+
     const attempts = job.attempts + 1;
     const updateData: Record<string, unknown> = {
       status,
@@ -74,12 +81,13 @@ export async function POST(request: NextRequest) {
     } else if (status === "failed") {
       updateData.error = error || "unknown";
       inc("traffic_job_failed_total", "Traffic jobs failed", 1);
-      // Если attempts < 3 — requeue с backoff
+      // Если attempts < 3 — requeue с backoff (v2.16.0 (V6): backoffMs — так и
+      // называем; error сохраняется в поле — раньше стирался в null, диагностика
+      // «failed»-ретраев терялась)
       if (attempts < 3) {
-        const backoffSec = Math.pow(2, attempts) * 1000; // 2s, 4s, 8s
+        const backoffMs = Math.pow(2, attempts) * 1000; // 2s, 4s, 8s
         updateData.status = "pending";
-        updateData.scheduledFor = new Date(Date.now() + backoffSec);
-        updateData.error = null;
+        updateData.scheduledFor = new Date(Date.now() + backoffMs);
       } else {
         updateData.status = "dead";
       }

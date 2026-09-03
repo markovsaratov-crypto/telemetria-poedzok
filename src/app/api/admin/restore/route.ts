@@ -49,6 +49,23 @@ const BIGINT_COLUMNS: Record<string, string[]> = {
   GpsPoint: ["timestamp"],
 };
 
+// v2.16.0 (S3): колонки-вайлист для рестора. Раньше имена колонок из дампа
+// интерполировались в SQL напрямую (`INSERT INTO ${table} (${keys.join(", ")})`)
+// — подделанный/битый дамп мог вписать ЛЮБУЮ строку в SQL (инъекция) или
+// сломать рестор мусорными колонками. Теперь неизвестные колонки отбрасываются
+// (с журналом), полностью пустые строки — пропускаются.
+const ALLOWED_COLUMNS: Record<string, ReadonlyArray<string>> = {
+  Session: ["id", "userId", "deviceId", "clientId", "deviceName", "startTime", "endTime", "pointCount", "payloadBytes", "status", "deletedAt", "purgedAt", "routeId", "routeHash", "topologyHash", "trafficJobId", "notes", "tags", "createdAt", "updatedAt"],
+  GpsPoint: ["id", "sessionId", "lat", "lon", "speed", "altitude", "accuracy", "timestamp", "bearing"],
+  Route: ["id", "userId", "name", "description", "startLat", "startLon", "endLat", "endLon", "createdAt", "updatedAt"],
+  RouteCache: ["id", "hash", "result", "todBucket", "routeId", "expiresAt", "createdAt"],
+  TrafficJob: ["id", "sessionId", "status", "attempts", "priority", "scheduledFor", "lockedBy", "lockedAt", "result", "error", "createdAt", "updatedAt"],
+  AuditLog: ["id", "userId", "action", "targetId", "targetType", "actorType", "actorId", "metadata", "sessionId", "createdAt"],
+  ExportJob: ["id", "sessionId", "format", "status", "fileUrl", "fileSize", "expiresAt", "attempts", "lockedBy", "createdAt", "completedAt", "error"],
+  BackupJob: ["id", "status", "type", "filePath", "fileSize", "checksum", "attempts", "lockedBy", "createdAt", "completedAt", "error"],
+  Setting: ["key", "value", "updatedAt", "updatedBy"],
+};
+
 // FK-safe delete order: children first, then parents.
 const DELETE_ORDER: ReadonlyArray<(typeof TABLES)[number]> = [
   "GpsPoint",
@@ -167,7 +184,9 @@ export async function POST(request: NextRequest) {
     try {
       dump = JSON.parse(content) as BackupDump;
     } catch (err) {
-      return json({ error: "Backup file is not valid JSON", detail: err instanceof Error ? err.message : String(err) }, 422, { "X-Request-Id": requestId });
+      // v2.16.0 (V10): детали парса — только в логи (клиенту — generic-текст)
+      logger.warn("Restore: dump is not valid JSON", { requestId, backupId, error: err instanceof Error ? err.message : String(err) });
+      return json({ error: "Backup file is not valid JSON" }, 422, { "X-Request-Id": requestId });
     }
 
     // 6) Truncate + insert in a transaction. libsql client supports batch()
@@ -203,7 +222,13 @@ export async function POST(request: NextRequest) {
           // Don't re-insert the current BackupJob row (already preserved).
           if (table === "BackupJob" && rawRow.id === backupId) continue;
           const row = reviveRow(table, rawRow);
-          const keys = Object.keys(row);
+          // v2.16.0 (S3): только колонки из вайлиста — неизвестные отбрасываем
+          const allowed = ALLOWED_COLUMNS[table] ?? [];
+          const keys = Object.keys(row).filter((k) => allowed.includes(k));
+          const unknownKeys = Object.keys(row).filter((k) => !allowed.includes(k));
+          if (unknownKeys.length > 0) {
+            logger.warn("Restore: unknown columns dropped", { requestId, backupId, table, unknownKeys });
+          }
           if (keys.length === 0) continue;
           const placeholders = keys.map(() => "?").join(", ");
           const values = keys.map((k) => row[k]);
@@ -228,7 +253,7 @@ export async function POST(request: NextRequest) {
         actorId: auth.via === "cookie" ? "owner" : "admin-token",
         metadata: { error: err instanceof Error ? err.message : String(err), checksumVerified },
       });
-      return json({ error: "Restore transaction failed — rolled back, DB unchanged", detail: err instanceof Error ? err.message : String(err) }, 500, { "X-Request-Id": requestId });
+      return json({ error: "Restore transaction failed — rolled back, DB unchanged" }, 500, { "X-Request-Id": requestId });
     }
 
     // 7) Audit log entry for successful restore (written AFTER commit, so it

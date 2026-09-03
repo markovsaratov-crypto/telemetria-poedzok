@@ -6,13 +6,10 @@ import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { haversineM } from "@/lib/geo";
-import { normalizeSessionSpeeds } from "@/lib/kpi";
+import { normalizeSessionSpeeds, HARSH_THRESHOLD_MS2 } from "@/lib/kpi"; // v2.16.0: единый порог §7.1/§7.2
 
-// v2.13.0 (Ф6): пороги резкости — §7.1/§7.2 (10 км/ч/с = 2,78 м/с²); раньше 10 м/с² (≈1g)
-const HARSH_THRESHOLD_MS2 = 10 / 3.6;
-
-// Пороги скоростных бакетов для цветовых сегментов (§7 методологии)
+// Пороги скоростных бакетов для цветовых сегментов (§7 методологии) —
+// presentation-схема карты (цвет+подпись), отличная от KPI-бакетов kpi.ts
 const SPEED_BUCKETS = [
   { max: 20, color: "#9ca3af", label: "0–20" },
   { max: 40, color: "#f59e0b", label: "20–40" },
@@ -186,7 +183,8 @@ export async function GET(
       { "X-Request-Id": requestId }
     );
   } catch (e) {
-    logger.error("track fetch failed", { requestId, error: (e as Error).message });
-    return json({ error: (e as Error).message }, 500, { "X-Request-Id": requestId });
+    // v2.16.0 (B1): наружу — только generic-текст (детали — в логи)
+    logger.error("track fetch failed", { requestId, error: e instanceof Error ? e.message : String(e) });
+    return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });
   }
 }

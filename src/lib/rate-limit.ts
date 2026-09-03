@@ -1,4 +1,5 @@
-// src/lib/rate-limit.ts — sliding window, in-memory (sandbox) / Redis (prod, §6.3).
+// src/lib/rate-limit.ts — sliding window, in-memory (единый инстанс; Redis —
+// заявлен конфигом, но не реализован: при включении честно логируем fallback).
 // Блокер №1 FIX: RATE_LIMIT_MAX_INGEST=120 покрывает TARGET_LOAD_RPM=100 × 1.2.
 export interface IRateLimiter {
   check(
@@ -58,10 +59,23 @@ class MemoryRateLimiter implements IRateLimiter {
   }
 }
 
-// Заглушка под Redis (когда REDIS_URL задан — в sandbox не используется)
+// v2.16.0 (B-9): Redis-«бэкенд» — ЧЕСТНЫЙ fallback. Раньше заглушка молча
+// работала как memory при RATE_LIMIT_BACKEND=redis + REDIS_URL: оператор,
+// включивший Redis в конфиге, получал memory-лимиты, счётчик
+// rate_limit_fallback_total не инкрементировался никогда.
 class RedisRateLimiter implements IRateLimiter {
+  private warned = false;
   async check(key: string, limit: number, windowSec: number) {
-    // В sandbox всегда fallback на memory. Реальный Redis через @upstash/redis — прод-расширение.
+    if (!this.warned) {
+      this.warned = true;
+      try {
+        const { inc } = await import("./metrics");
+        inc("rate_limit_fallback_total", "Requests served by memory fallback while redis backend configured", 1);
+      } catch {}
+      // Динамический импорт логгера — избежать цикла (logger без зависимостей,
+      // но держим паттерн ленивых зависимостей в этом модуле edge-безопасным)
+      console.warn(JSON.stringify({ time: new Date().toISOString(), level: "warn", msg: "RATE_LIMIT_BACKEND=redis configured, but Redis is NOT implemented — falling back to in-memory limiter (single instance only)" }));
+    }
     return memLimiter.check(key, limit, windowSec);
   }
 }

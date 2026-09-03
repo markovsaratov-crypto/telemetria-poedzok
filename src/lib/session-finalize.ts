@@ -1,62 +1,63 @@
 // src/lib/session-finalize.ts — финализация сессий и TrafficJob (shared).
 // v2.14.0 (Ф3): вынесено из src/app/api/ingest/sensorlogger/route.ts, чтобы
 // воркер мог закрывать зависшие recording-сессии («жнец» в worker-runtime.ts)
-// ТОЙ ЖЕ логикой, что и инжест при разрыве >60с. Поведение не менялось —
-// код скопирован дословно, только crypto import заменён на глобальный
-// webcrypto (Edge-safe, доступен и в Node 18+; см. шапку worker-runtime.ts
-// про Edge-бандл instrumentation.ts — этот файл входит в него транзитивно).
+// ТОЙ ЖЕ логикой, что и инжест при разрыве >60с.
+//
+// v2.16.0 (R3): атомарная защита от ДУБЛЕЙ TrafficJob. Раньше INSERT был
+// безусловным, а у TrafficJob.sessionId нет unique-констрейнта: ТРИ гонящихся
+// финализатора (инжест gap>60с, cron finalize-sessions, воркер-«жнец») могли
+// наминтить по pending-джобу каждый → двойные вызовы 2GIS/OSRM и мусорные
+// строки. Теперь вставка — единый `INSERT … SELECT … WHERE NOT EXISTS`
+// (pending/running джоба у сессии), а флаг «наш ли это переход recording→
+// completed» определяется rowsAffected самого UPDATE статуса.
 import { libsql } from "./db";
 import { logger } from "./logger";
 
-// v2.11.0 (АУДИТ C-9): финализация + TrafficJob без «висячего» trafficJobId.
-// Раньше .catch(()=>{}) глотал ЛЮБЫЕ ошибки вставки джоба, а UPDATE всё равно
-// прописывал trafficJobId = jobId несуществующего джоба → сессия без маршрутизации.
-// Теперь: вставка с проверкой — при дубликате/ошибке находим существующий джоб сессии.
+/**
+ * Гарантирует наличие TrafficJob для сессии. Вставляет pending-джоб ТОЛЬКО если
+ * у сессии нет живого (pending/running) джоба — атомарно одним SQL-стейтментом.
+ * Ссылка Session.trafficJobId проставляется на последний джоб сессии, если NULL.
+ */
 export async function ensureTrafficJob(sessionId: string): Promise<void> {
   const now = new Date().toISOString();
   const jobId = crypto.randomUUID();
-  let inserted = false;
   try {
     await libsql.execute({
       sql: `INSERT INTO TrafficJob (id, sessionId, status, priority, attempts, createdAt, updatedAt)
-            VALUES (?, ?, 'pending', 0, 0, ?, ?)`,
-      args: [jobId, sessionId, now, now],
+            SELECT ?, ?, 'pending', 0, 0, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM TrafficJob WHERE sessionId = ? AND status IN ('pending', 'running'))`,
+      args: [jobId, sessionId, now, now, sessionId],
     });
-    inserted = true;
   } catch (err) {
-    logger.warn("TrafficJob insert failed — ищем существующий", {
+    // Сбой вставки не должен ронять финализацию: сессия уже закрыта, джоб
+    // добит повтором (cron/reaper) или requeue-админом.
+    logger.warn("TrafficJob insert failed (non-fatal)", {
       sessionId, error: err instanceof Error ? err.message : String(err),
     });
   }
-  if (inserted) {
-    await libsql.execute({
-      sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
-      args: [jobId, now, sessionId],
-    });
-  } else {
-    const existing = await libsql.execute({
-      sql: `SELECT id FROM TrafficJob WHERE sessionId = ? ORDER BY createdAt DESC LIMIT 1`,
-      args: [sessionId],
-    });
-    if (existing.rows.length > 0) {
-      const exId = String((existing.rows[0] as Record<string, unknown>).id);
-      await libsql.execute({
-        sql: `UPDATE Session SET trafficJobId = ?, updatedAt = ? WHERE id = ? AND trafficJobId IS NULL`,
-        args: [exId, now, sessionId],
-      });
-    }
-  }
+  // Ссылку ставим на последний по времени джоб сессии (вставленный ИЛИ уже
+  // существующий), если она ещё не проставлена.
+  await libsql.execute({
+    sql: `UPDATE Session SET trafficJobId = COALESCE(
+            (SELECT id FROM TrafficJob WHERE sessionId = ? ORDER BY createdAt DESC LIMIT 1), trafficJobId),
+            updatedAt = ?
+          WHERE id = ? AND trafficJobId IS NULL`,
+    args: [sessionId, now, sessionId],
+  }).catch(() => null);
 }
 
-// Финализация сессии: recording → completed + TrafficJob.
-// Вызывается из инжеста (gap >60с) и из воркера-«жнеца» (тишина >10 мин).
+/**
+ * Финализация сессии: recording → completed + TrafficJob.
+ * Вызывается из инжеста (gap >60с), cron finalize-sessions и воркера-«жнеца».
+ * Идемпотентна: повторный вызов для уже-completed сессии не чинит статус
+ * (rowsAffected = 0) и не дублирует pending-джоб (см. ensureTrafficJob).
+ */
 export async function finalizeSession(sessionId: string): Promise<void> {
   const now = new Date().toISOString();
   await libsql.execute({
     sql: `UPDATE Session SET status = 'completed', updatedAt = ? WHERE id = ? AND status = 'recording'`,
     args: [now, sessionId],
   });
-  // v2.11.0 (АУДИТ C-9): TrafficJob с защитой от дублей и висячих ссылок
   await ensureTrafficJob(sessionId);
   logger.info("Session finalized", { sessionId });
 }

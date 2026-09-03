@@ -10,11 +10,28 @@ import { inc } from "@/lib/metrics";
 import { recordIngestAttempt } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток
 import { recordIngestOutcome } from "@/lib/alerts"; // P2-16: правило ingest_error_rate
 import { trackLatency } from "@/lib/latency"; // P2-16: api_latency_p95
+import { extractBearer } from "@/lib/auth";
+import { tokenMatches } from "@/lib/token-check";
+import { env } from "@/lib/env";
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   const start = Date.now();
   try {
+    // v2.16.0 (V9): проверка INGEST_TOKEN и В РОУТЕ тоже (defense-in-depth — как в
+    // sensorlogger). Обычно прокси уже отсекает, но один регресс матчера — и роут
+    // без своей проверки писал бы данные по любому запросу.
+    const bearer = extractBearer(request);
+    const queryToken = new URL(request.url).searchParams.get("token");
+    const e = env();
+    const tokenOk =
+      (await tokenMatches(bearer, e.INGEST_TOKEN)) ||
+      (await tokenMatches(queryToken, e.INGEST_TOKEN));
+    if (!tokenOk) {
+      inc("ingest_unauthorized_total", "Ingest attempts rejected with 401 (bad or missing token)", 1, "ingest");
+      return json({ error: "Unauthorized", reason: "Valid INGEST_TOKEN required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
+    }
+
     const body = await request.json().catch(() => null);
     const parsed = zIngestBody.safeParse(body);
     if (!parsed.success) {
@@ -75,19 +92,18 @@ export async function POST(request: NextRequest) {
       .sort((a, b) => a.timestampMs - b.timestampMs);
 
     // v2.11.0 (АУДИТ C-10): gap сравнивается между СОСЕДНИМИ исходными точками.
-    // Раньше lastTs обновлялся только у принятых → после первого gap > 30с весь
-    // хвост батча отбрасывался молча (прогулки с паузой обрезались).
+    // v2.16.0 (R9): точка-возобновление ПОСЛЕ паузы СОХРАНЯЕТСЯ (раньше —
+    // отбрасывалась: «прогулка с паузой» теряла первую точку после каждого
+    // перерыва; это не «фильтр мусора», а реальные данные)
     const filtered: typeof normalized = [];
     let lastTs: number | null = null;
-    let droppedByGap = 0;
+    let gapMarkers = 0;
     for (const p of normalized) {
       if (lastTs !== null && p.timestampMs - lastTs > 30000) {
-        droppedByGap++; // gap > 30 с — пропускаем точку (§3.1), но lastTs идёт дальше
-        lastTs = p.timestampMs;
-      } else {
-        filtered.push(p);
-        lastTs = p.timestampMs;
+        gapMarkers++; // gap > 30 с — маркер разрыва, точка сохраняется
       }
+      filtered.push(p);
+      lastTs = p.timestampMs;
     }
     if (filtered.length === 0) {
       filtered.push(...normalized);
@@ -98,7 +114,13 @@ export async function POST(request: NextRequest) {
     const payloadBytes = Buffer.byteLength(JSON.stringify(body));
 
     // 3. INSERT (no global write lock — SQLite WAL handles concurrency)
-    const session = await db.$transaction(async (tx: any) => {
+    // v2.16.0 (B-6): защита от TOCTOU-гонки идемпотентности — два параллельных
+    // ретрая проходят findExistingSession(null) одновременно, второй INSERT
+    // падает по @@unique(deviceId,clientId) → раньше это был 500; теперь —
+    // повторная проверка и честный ответ duplicate.
+    let session: { session: { id: string }, job: { id: string } };
+    try {
+      session = await db.$transaction(async (tx: any) => {
         const s = await tx.session.create({
           data: {
             deviceId,
@@ -138,11 +160,21 @@ export async function POST(request: NextRequest) {
         });
         return { session: s, job };
       });
+    } catch (txErr) {
+      const raced = await findExistingSession(deviceId, clientId!);
+      if (raced) {
+        inc("ingest_duplicate_total", "Duplicate ingest (idempotency race)", 1);
+        recordIngestOutcome(true);
+        trackLatency(request);
+        return json({ sessionId: raced, duplicate: true }, 200, { "X-Request-Id": requestId });
+      }
+      throw txErr;
+    }
 
     inc("ingest_total", "Total ingest requests", 1);
     recordIngestAttempt({
       at: new Date().toISOString(), route: "ingest", deviceId,
-      outcome: "accepted", points: filtered.length, dropped: droppedByGap,
+      outcome: "accepted", points: filtered.length, dropped: gapMarkers,
       bytes: payloadBytes,
     }); // DIAG-1
     recordIngestOutcome(true); // P2-16

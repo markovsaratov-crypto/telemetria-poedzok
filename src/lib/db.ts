@@ -28,8 +28,9 @@ function createDbClient(): Client {
 export const libsql = globalForDb.libsqlClient ?? createDbClient();
 if (process.env.NODE_ENV !== "production") globalForDb.libsqlClient = libsql;
 
-// Helper to convert snake_case DB rows to camelCase objects
-function toCamel(row: Record<string, unknown>): Record<string, unknown> {
+// Helper to convert snake_case DB rows to camelCase objects.
+// v2.16.0: экспортирована — worker-runtime.ts и db-обёртки используют единую реализацию.
+export function toCamel(row: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(row)) {
     const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
@@ -65,6 +66,60 @@ function pruneUndefined(o: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(o)) if (v !== undefined) out[k] = v;
   return out;
+}
+
+// v2.16.0 (D-2): ЕДИНЫЕ строители INSERT/UPDATE для всех моделей. До этого
+// один и тот же 8-строчный блок копировался 8+ раз (session/trafficJob/auditLog/
+// route/exportJob/backupJob + три копии в tx-прокси) с расползанием правок —
+// классический источник «починил в одном месте, сломал в другом».
+interface TableStamps { createdAt: boolean; updatedAt: boolean }
+const TABLE_STAMPS: Record<string, TableStamps> = {
+  Session: { createdAt: true, updatedAt: true },
+  TrafficJob: { createdAt: true, updatedAt: true },
+  Route: { createdAt: true, updatedAt: true },
+  RouteCache: { createdAt: true, updatedAt: false },
+  AuditLog: { createdAt: true, updatedAt: false },
+  // v2.16.0 (B-3): у ExportJob НЕТ колонки updatedAt — tx-прокси раньше писал её
+  // и INSERT в транзакции падал «no such column».
+  ExportJob: { createdAt: true, updatedAt: false },
+  BackupJob: { createdAt: true, updatedAt: false },
+};
+
+function buildInsert(table: string, data: Record<string, unknown>): { sql: string; args: InValue[] } {
+  const stamps = TABLE_STAMPS[table] ?? { createdAt: false, updatedAt: false };
+  const now = new Date().toISOString();
+  const full: Record<string, unknown> = {
+    id: crypto.randomUUID(),
+    ...(stamps.createdAt ? { createdAt: now } : {}),
+    ...(stamps.updatedAt ? { updatedAt: now } : {}),
+    ...pruneUndefined(data),
+  };
+  const keys = Object.keys(full);
+  const values = normVals(Object.values(full));
+  const placeholders = keys.map(() => "?").join(", ");
+  return { sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] };
+}
+
+function buildUpdate(table: string, data: Record<string, unknown>, whereSql: string, whereArgs: unknown[]): { sql: string; args: InValue[] } {
+  const stamps = TABLE_STAMPS[table] ?? { createdAt: false, updatedAt: false };
+  const full = pruneUndefined(data);
+  if (stamps.updatedAt) full.updatedAt = new Date().toISOString();
+  const keys = Object.keys(full);
+  const sets = keys.map((k) => `${k} = ?`).join(", ");
+  const values = normVals([...Object.values(full), ...whereArgs]);
+  return { sql: `UPDATE ${table} SET ${sets} WHERE ${whereSql} RETURNING *`, args: values as InValue[] };
+}
+
+async function insertRow(table: string, data: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const q = buildInsert(table, data);
+  const result = await libsql.execute(q);
+  return toCamel(result.rows[0] as Record<string, unknown>);
+}
+
+async function updateRowById(table: string, id: string, data: Record<string, unknown>): Promise<Record<string, unknown> | null> {
+  const q = buildUpdate(table, data, "id = ?", [id]);
+  const result = await libsql.execute(q);
+  return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
 }
 
 // ——— Session relations: fetching for include/select (P0-2) ———
@@ -221,15 +276,17 @@ export const db = {
           else if ((pa as { not?: unknown }).not != null) conditions.push("purgedAt IS NOT NULL");
         }
       }
-      // OR: массив {col: {contains}} — глобальный поиск (C-6: раньше молча игнорировался)
+      // OR: массив {col: {contains}} — глобальный поиск (C-6: раньше молча игнорировался).
+      // v2.16.0: LOWER(col) LIKE LOWER(?) — регистронезависимо и для КИРИЛЛИЦЫ
+      // (голый LIKE в SQLite регистронезависим только для ASCII: «работа» ≠ «Работа»)
       const or = w.OR as Array<Record<string, { contains?: string }>> | undefined;
       if (Array.isArray(or) && or.length > 0) {
         const orConds: string[] = [];
         for (const branch of or) {
           for (const [col, val] of Object.entries(branch)) {
             if (val && typeof val === "object" && val.contains != null && ["deviceId", "deviceName", "notes", "tags"].includes(col)) {
-              orConds.push(`${col} LIKE ? ESCAPE '\\'`);
-              params.push(`%${String(val.contains).replace(/[\\%_]/g, (m) => "\\" + m)}%`);
+              orConds.push(`LOWER(${col}) LIKE ? ESCAPE '\\'`);
+              params.push(`%${String(val.contains).toLowerCase().replace(/[\\%_]/g, (m) => "\\" + m)}%`);
             }
           }
         }
@@ -279,28 +336,39 @@ export const db = {
         return out;
       }
       // include: gpsPoints / trafficJobs / route
+      // v2.16.0 (B-2): исправлен no-op — раньше результат projectSession ВЫБРАСЫВАЛСЯ
+      // (`await projectSession(row, ...)` без присваивания), т.е. include в findMany
+      // молча не работал и возвращал только скаляры. Теперь строки проектируются.
       if (args?.include) {
-        for (const row of rows) await projectSession(row, undefined, args.include);
-        return rows;
+        const out: Record<string, unknown>[] = [];
+        for (const row of rows) {
+          out.push(await projectSession(row, undefined, args.include));
+        }
+        return out;
       }
       return rows;
     },
-    // P1-10: aggregate (_sum) — /api/stats падал с TypeError (метода не было)
-    async aggregate(args?: { _sum?: Record<string, unknown>; where?: Record<string, unknown> }) {
+    // P1-10: aggregate (_sum/_count) — ЕДИНСТВЕННАЯ реализация (v2.16.0: мёртвый
+    // литеральный дубль внизу файла, затираемый (db as any)-патчем, удалён;
+    // сигнатура — как у живого патча: _sum.payloadBytes/_sum.pointCount/_count.id)
+    async aggregate(args: { _sum?: { payloadBytes?: boolean; pointCount?: boolean }; _count?: { id?: boolean }; where?: { status?: string } }) {
       let sql = "SELECT";
       const params: unknown[] = [];
-      const sums: string[] = [];
-      if (args?._sum?.payloadBytes) sums.push("SUM(payloadBytes) as payloadBytes");
-      if (args?._sum?.distanceM) sums.push("SUM(distanceM) as distanceM");
-      if (sums.length === 0) sums.push("1 as x");
-      sql += " " + sums.join(", ") + " FROM Session WHERE deletedAt IS NULL";
+      const parts: string[] = [];
+      if (args._sum?.payloadBytes) parts.push("SUM(payloadBytes) as _sum_payloadBytes");
+      if (args._sum?.pointCount) parts.push("SUM(pointCount) as _sum_pointCount");
+      if (args._count?.id) parts.push("COUNT(*) as _count_id");
+      sql += " " + parts.join(", ") + " FROM Session WHERE deletedAt IS NULL";
+      if (args.where?.status) { sql += " AND status = ?"; params.push(args.where.status); }
       const result = await libsql.execute({ sql, args: params as InValue[] });
       const row = result.rows[0] as Record<string, unknown>;
-      const sum: Record<string, unknown> = {};
-      for (const k of ["payloadBytes", "distanceM"]) {
-        if (args?._sum && (args._sum as Record<string, unknown>)[k]) sum[k] = row[k] != null ? Number(row[k]) : null;
-      }
-      return { _sum: sum };
+      return {
+        _sum: {
+          payloadBytes: row._sum_payloadBytes ? Number(row._sum_payloadBytes) : null,
+          pointCount: row._sum_pointCount ? Number(row._sum_pointCount) : null,
+        },
+        _count: { id: row._count_id ? Number(row._count_id) : 0 },
+      };
     },
     async findUnique(args: {
       where: { id?: string; deviceId_clientId?: { deviceId: string; clientId: string } };
@@ -328,19 +396,10 @@ export const db = {
       return projectSession(row, args.select, args.include);
     },
     async create(args: { data: Record<string, unknown> }) {
-      const now = new Date().toISOString();
-      const data = { id: crypto.randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
-      const keys = Object.keys(data);
-      const values = normVals(Object.values(data));
-      const placeholders = keys.map(() => "?").join(", ");
-      const result = await libsql.execute({ sql: `INSERT INTO Session (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
-      return toCamel(result.rows[0] as Record<string, unknown>);
+      return insertRow("Session", args.data);
     },
     async update(args: { where: { id: string }; data: Record<string, unknown> }) {
-      const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
-      const values = normVals(Object.values(args.data));
-      const result = await libsql.execute({ sql: `UPDATE Session SET ${sets} WHERE id = ? RETURNING *`, args: [...values, args.where.id] as InValue[] });
-      return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
+      return updateRowById("Session", args.where.id, args.data);
     },
     async updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }) {
       const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
@@ -367,12 +426,14 @@ export const db = {
       const result = await libsql.execute({ sql: `UPDATE Session SET ${sets} WHERE ${conditions.join(" AND ")}`, args: [...values, ...condParams] as InValue[] });
       return { count: result.rowsAffected };
     },
-    async groupBy(args: { by: string[]; _count: boolean; where?: Record<string, unknown> }) {
+    async groupBy(args: { by: string[]; _count: boolean; where?: { deviceId?: { contains?: string } } }) {
+      // v2.16.0: единственная реализация (ORDER BY _count DESC — как у живого патча;
+      // мёртвый литеральный дубль без сортировки удалён)
       let sql = `SELECT ${args.by.join(", ")}, COUNT(*) as _count FROM Session WHERE deletedAt IS NULL`;
       const params: unknown[] = [];
-      const gbDev = args.where?.deviceId as { contains?: string } | undefined;
+      const gbDev = args.where?.deviceId;
       if (gbDev?.contains) { sql += " AND deviceId LIKE ?"; params.push(`%${gbDev.contains}%`); }
-      sql += ` GROUP BY ${args.by.join(", ")}`;
+      sql += ` GROUP BY ${args.by.join(", ")} ORDER BY _count DESC`;
       const result = await libsql.execute({ sql, args: params as InValue[] });
       return result.rows.map(r => { const row = r as Record<string, unknown>; return { [args.by[0]]: row[args.by[0]], _count: Number(row._count) }; });
     },
@@ -404,6 +465,24 @@ export const db = {
     },
   },
   gpsPoint: {
+    // v2.16.0: count — полноценный метод литерала (v2.12.0 D-1: точки только ЖИВЫХ
+    // сессий; раньше был (db as any)-патч внизу файла)
+    async count(args?: { where?: { sessionId?: string; session?: { deletedAt?: null } } }) {
+      let sql = "SELECT COUNT(*) as count FROM GpsPoint";
+      const params: unknown[] = [];
+      const w = args?.where ?? {};
+      if (w.sessionId != null) {
+        sql += " WHERE sessionId = ?";
+        params.push(w.sessionId);
+        if (w.session?.deletedAt === null) {
+          sql += " AND sessionId IN (SELECT id FROM Session WHERE deletedAt IS NULL)";
+        }
+      } else if (w.session?.deletedAt === null) {
+        sql += " WHERE sessionId IN (SELECT id FROM Session WHERE deletedAt IS NULL)";
+      }
+      const result = await libsql.execute({ sql, args: params as InValue[] });
+      return Number((result.rows[0] as Record<string, unknown>).count);
+    },
     // v2.11.0 (АУДИТ C-16): было по одному INSERT на строку (последовательные
     // HTTPS-раундтрипы к Turso ~50-100 мс каждый; 100 точек ≈ 5-10 с).
     // Теперь — многорядный INSERT чанками по 50 строк (450 плейсхолдеров <
@@ -432,20 +511,16 @@ export const db = {
     },
   },
   trafficJob: {
+    // v2.16.0: findUnique — полноценный метод литерала (был (db as any)-патч)
+    async findUnique(args: { where: { id: string } }) {
+      const result = await libsql.execute({ sql: "SELECT * FROM TrafficJob WHERE id = ?", args: [args.where.id] });
+      return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
+    },
     async create(args: { data: Record<string, unknown> }) {
-      const now = new Date().toISOString();
-      const data = { id: crypto.randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
-      const keys = Object.keys(data);
-      const values = normVals(Object.values(data));
-      const placeholders = keys.map(() => "?").join(", ");
-      const result = await libsql.execute({ sql: `INSERT INTO TrafficJob (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
-      return toCamel(result.rows[0] as Record<string, unknown>);
+      return insertRow("TrafficJob", args.data);
     },
     async update(args: { where: { id: string }; data: Record<string, unknown> }) {
-      const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
-      const values = normVals(Object.values(args.data));
-      const result = await libsql.execute({ sql: `UPDATE TrafficJob SET ${sets} WHERE id = ? RETURNING *`, args: [...values, args.where.id] as InValue[] });
-      return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
+      return updateRowById("TrafficJob", args.where.id, args.data);
     },
     async count(args?: { where?: Record<string, unknown> }) {
       let sql = "SELECT COUNT(*) as count FROM TrafficJob";
@@ -503,8 +578,10 @@ export const db = {
   },
   auditLog: {
     async create(args: { data: Record<string, unknown> }) {
+      // v2.16.0: AuditLog — только createdAt, без updatedAt (единая таблица штампов)
+      const stamps = TABLE_STAMPS["AuditLog"]!;
       const now = new Date().toISOString();
-      const data = { id: crypto.randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
+      const data = { id: crypto.randomUUID(), ...(stamps.createdAt ? { createdAt: now } : {}), ...pruneUndefined(args.data) };
       const keys = Object.keys(data);
       const values = normVals(Object.values(data));
       const placeholders = keys.map(() => "?").join(", ");
@@ -563,19 +640,10 @@ export const db = {
       return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
     },
     async create(args: { data: Record<string, unknown> }) {
-      const now = new Date().toISOString();
-      const data = { id: crypto.randomUUID(), createdAt: now, updatedAt: now, ...pruneUndefined(args.data) };
-      const keys = Object.keys(data);
-      const values = normVals(Object.values(data));
-      const placeholders = keys.map(() => "?").join(", ");
-      const result = await libsql.execute({ sql: `INSERT INTO Route (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
-      return toCamel(result.rows[0] as Record<string, unknown>);
+      return insertRow("Route", args.data);
     },
     async update(args: { where: { id: string }; data: Record<string, unknown> }) {
-      const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
-      const values = normVals(Object.values(args.data));
-      const result = await libsql.execute({ sql: `UPDATE Route SET ${sets} WHERE id = ? RETURNING *`, args: [...values, args.where.id] as InValue[] });
-      return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
+      return updateRowById("Route", args.where.id, args.data);
     },
     async delete(args: { where: { id: string } }) {
       await libsql.execute({ sql: "DELETE FROM Route WHERE id = ?", args: [args.where.id] });
@@ -613,38 +681,35 @@ export const db = {
       const result = await libsql.execute({ sql: "SELECT * FROM ExportJob WHERE id = ?", args: [args.where.id] });
       if (result.rows.length === 0) return null;
       const job = toCamel(result.rows[0] as Record<string, unknown>);
+      // v2.16.0 (QA-фикс): include.session.gpsPoints раньше собирал session ТОЛЬКО
+      // с полем gpsPoints (без id/startTime/deviceId/…) — download-роут падал 500
+      // на generateExport. Теперь грузится полная строка Session + точки.
       if ((args.include?.session as { include?: { gpsPoints?: boolean } } | undefined)?.include?.gpsPoints) {
-        const pts = await libsql.execute({ sql: "SELECT * FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC", args: [job.sessionId as InValue] });
-        const session = { gpsPoints: pts.rows.map(r => { const p = toCamel(r as Record<string, unknown>); p.timestamp = Number(p.timestamp); return p; }) };
-        (job as Record<string, unknown>).session = session;
+        const sRes = await libsql.execute({ sql: "SELECT * FROM Session WHERE id = ?", args: [job.sessionId as InValue] });
+        if (sRes.rows.length > 0) {
+          const session = toCamel(sRes.rows[0] as Record<string, unknown>);
+          const pts = await libsql.execute({ sql: "SELECT * FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC", args: [job.sessionId as InValue] });
+          session.gpsPoints = pts.rows.map(r => { const p = toCamel(r as Record<string, unknown>); p.timestamp = Number(p.timestamp); return p; });
+          (job as Record<string, unknown>).session = session;
+        }
       }
       return job;
     },
     async create(args: { data: Record<string, unknown> }) {
-      const now = new Date().toISOString();
-      const data = { id: crypto.randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
-      const keys = Object.keys(data);
-      const values = normVals(Object.values(data));
-      const placeholders = keys.map(() => "?").join(", ");
-      const result = await libsql.execute({ sql: `INSERT INTO ExportJob (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
-      return toCamel(result.rows[0] as Record<string, unknown>);
+      return insertRow("ExportJob", args.data);
     },
   },
   backupJob: {
+    // v2.16.0: findUnique — полноценный метод литерала (был (db as any)-патч)
+    async findUnique(args: { where: { id: string } }) {
+      const result = await libsql.execute({ sql: "SELECT * FROM BackupJob WHERE id = ?", args: [args.where.id] });
+      return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
+    },
     async create(args: { data: Record<string, unknown> }) {
-      const now = new Date().toISOString();
-      const data = { id: crypto.randomUUID(), createdAt: now, ...pruneUndefined(args.data) };
-      const keys = Object.keys(data);
-      const values = normVals(Object.values(data));
-      const placeholders = keys.map(() => "?").join(", ");
-      const result = await libsql.execute({ sql: `INSERT INTO BackupJob (${keys.join(", ")}) VALUES (${placeholders}) RETURNING *`, args: values as InValue[] });
-      return toCamel(result.rows[0] as Record<string, unknown>);
+      return insertRow("BackupJob", args.data);
     },
     async update(args: { where: { id: string }; data: Record<string, unknown> }) {
-      const sets = Object.keys(args.data).map((k) => `${k} = ?`).join(", ");
-      const values = normVals(Object.values(args.data));
-      const result = await libsql.execute({ sql: `UPDATE BackupJob SET ${sets} WHERE id = ? RETURNING *`, args: [...values, args.where.id] as InValue[] });
-      return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
+      return updateRowById("BackupJob", args.where.id, args.data);
     },
     async findMany(args?: { orderBy?: Record<string, string>; take?: number }) {
       const take = args?.take ?? 50;
@@ -680,34 +745,32 @@ export const db = {
   },
 };
 
-// Таблицы, доступные внутри $transaction: model → нужен ли updatedAt при create
-const TX_TABLES: Record<string, { updatedAt: boolean }> = {
-  Session: { updatedAt: true },
-  TrafficJob: { updatedAt: true },
-  Route: { updatedAt: true },
-  ExportJob: { updatedAt: true },
-  GpsPoint: { updatedAt: false },
-  AuditLog: { updatedAt: false },
-};
-
+// Таблицы, доступные внутри $transaction (v2.16.0: TableStamps вместо дубля
+// «updatedAt: boolean» — единственный источник штампов колонок; ExportJob без
+// updatedAt, как в схеме)
 type LibsqlTransaction = Awaited<ReturnType<Client["transaction"]>>;
 
 // Транзакционный исполнитель: session.create / gpsPoint.createMany и т.п.,
 // но каждый execute идёт через tx (одна атомарная единица работы).
+// v2.16.0: строители SQL — те же TABLE_STAMPS/buildInsert, что и вне транзакции.
 function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
   return new Proxy({}, {
     get(_target, modelRaw: string | symbol) {
       const model = String(modelRaw);
       const table = model.charAt(0).toUpperCase() + model.slice(1);
-      const meta = TX_TABLES[table];
+      const stamps = TABLE_STAMPS[table];
+      const requireStamps = (op: string) => {
+        if (!stamps) throw new Error(`tx.${model}.${op}: таблица ${table} не поддерживается в транзакции`);
+        return stamps;
+      };
       return {
         async create(args: { data: Record<string, unknown> }) {
-          if (!meta) throw new Error(`tx.${model}.create: таблица ${table} не поддерживается в транзакции`);
+          const s = requireStamps("create");
           const now = new Date().toISOString();
           const data = {
             id: crypto.randomUUID(),
-            createdAt: now,
-            ...(meta.updatedAt ? { updatedAt: now } : {}),
+            ...(s.createdAt ? { createdAt: now } : {}),
+            ...(s.updatedAt ? { updatedAt: now } : {}),
             ...pruneUndefined(args.data),
           };
           const keys = Object.keys(data);
@@ -717,22 +780,29 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
           return toCamel(result.rows[0] as Record<string, unknown>);
         },
         async createMany(args: { data: Array<Record<string, unknown>> }) {
-          if (!meta) throw new Error(`tx.${model}.createMany: таблица ${table} не поддерживается в транзакции`);
+          // v2.16.0: чанки по <999 плейсхолдеров — как в НЕ-транзакционном
+          // createMany (раньше тут была ПОСТРОЧНАЯ вставка: 1000 точек = 1000
+          // последовательных execute внутри транзакции)
+          requireStamps("createMany");
+          if (args.data.length === 0) return { count: 0 };
+          const items = args.data.map((item) => ({ id: crypto.randomUUID(), ...pruneUndefined(item) }));
+          const cols = Object.keys(items[0]);
+          const ph = `(${cols.map(() => "?").join(", ")})`;
+          const CH = Math.max(1, Math.floor(900 / cols.length));
           let count = 0;
-          for (const item of args.data) {
-            const data = { id: crypto.randomUUID(), ...pruneUndefined(item) };
-            const keys = Object.keys(data);
-            const values = normVals(Object.values(data).map((v) => (v === undefined ? null : v)));
-            const placeholders = keys.map(() => "?").join(", ");
-            await tx.execute({ sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders})`, args: values as InValue[] });
-            count += 1;
+          for (let i = 0; i < items.length; i += CH) {
+            const chunk = items.slice(i, i + CH);
+            const placeholders = chunk.map(() => ph).join(", ");
+            const rows = chunk.map((item) => normVals(cols.map((c) => (item[c] === undefined ? null : item[c]))));
+            await tx.execute({ sql: `INSERT INTO ${table} (${cols.join(", ")}) VALUES ${placeholders}`, args: rows.flat() as InValue[] });
+            count += chunk.length;
           }
           return { count };
         },
         async update(args: { where: { id: string }; data: Record<string, unknown> }) {
-          if (!meta) throw new Error(`tx.${model}.update: таблица ${table} не поддерживается в транзакции`);
+          const s = requireStamps("update");
           const data: Record<string, unknown> = { ...pruneUndefined(args.data) };
-          if (meta.updatedAt) data.updatedAt = new Date().toISOString();
+          if (s.updatedAt) data.updatedAt = new Date().toISOString();
           const keys = Object.keys(data);
           if (keys.length === 0) return null;
           const setSql = keys.map((k) => `${k} = ?`).join(", ");
@@ -744,74 +814,3 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
     },
   });
 }
-
-// Additional methods needed by API routes
-
-// gpsPoint.count
-// v2.12.0 (D-1): поддержан relation-фильтр where.session.deletedAt = null —
-// «точки только ЖИВЫХ сессий» (раньше считались все строки GpsPoint, включая
-// осиротевшие точки софт-делетнутых сессий → счётчик в админке расходился
-// с суммой по поездкам).
-(db as any).gpsPoint.count = async (args?: { where?: Record<string, unknown> }) => {
-  let sql = "SELECT COUNT(*) as count FROM GpsPoint";
-  const params: unknown[] = [];
-  const w = args?.where ?? {};
-  if (w.sessionId != null) {
-    sql += " WHERE sessionId = ?";
-    params.push(w.sessionId);
-    if ((w.session as { deletedAt?: unknown } | undefined)?.deletedAt === null) {
-      sql += " AND sessionId IN (SELECT id FROM Session WHERE deletedAt IS NULL)";
-    }
-  } else if ((w.session as { deletedAt?: unknown } | undefined)?.deletedAt === null) {
-    sql += " WHERE sessionId IN (SELECT id FROM Session WHERE deletedAt IS NULL)";
-  }
-  const result = await libsql.execute({ sql, args: params as InValue[] });
-  return Number((result.rows[0] as Record<string, unknown>).count);
-};
-
-// session.aggregate
-(db as any).session.aggregate = async (args: { _sum?: Record<string, boolean>; _count?: Record<string, boolean>; where?: Record<string, unknown> }) => {
-  let sql = "SELECT";
-  const params: unknown[] = [];
-  const parts: string[] = [];
-  if (args._sum?.payloadBytes) parts.push("SUM(payloadBytes) as _sum_payloadBytes");
-  if (args._sum?.pointCount) parts.push("SUM(pointCount) as _sum_pointCount");
-  if (args._count?.id) parts.push("COUNT(*) as _count_id");
-  sql += " " + parts.join(", ") + " FROM Session WHERE deletedAt IS NULL";
-  if (args.where?.status) { sql += " AND status = ?"; params.push(args.where.status); }
-  const result = await libsql.execute({ sql, args: params as InValue[] });
-  const row = result.rows[0] as Record<string, unknown>;
-  return {
-    _sum: {
-      payloadBytes: row._sum_payloadBytes ? Number(row._sum_payloadBytes) : null,
-      pointCount: row._sum_pointCount ? Number(row._sum_pointCount) : null,
-    },
-    _count: { id: row._count_id ? Number(row._count_id) : 0 },
-  };
-};
-
-// trafficJob.findUnique
-(db as any).trafficJob.findUnique = async (args: { where: { id: string } }) => {
-  const result = await libsql.execute({ sql: "SELECT * FROM TrafficJob WHERE id = ?", args: [args.where.id] });
-  return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
-};
-
-// backupJob.findUnique
-(db as any).backupJob.findUnique = async (args: { where: { id: string } }) => {
-  const result = await libsql.execute({ sql: "SELECT * FROM BackupJob WHERE id = ?", args: [args.where.id] });
-  return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
-};
-
-// session.groupBy
-(db as any).session.groupBy = async (args: { by: string[]; _count: boolean; where?: Record<string, unknown> }) => {
-  let sql = `SELECT ${args.by.join(", ")}, COUNT(*) as _count FROM Session WHERE deletedAt IS NULL`;
-  const params: unknown[] = [];
-  const gbDev = args.where?.deviceId as { contains?: string } | undefined;
-  if (gbDev?.contains) { sql += " AND deviceId LIKE ?"; params.push(`%${gbDev.contains}%`); }
-  sql += ` GROUP BY ${args.by.join(", ")} ORDER BY _count DESC`;
-  const result = await libsql.execute({ sql, args: params as InValue[] });
-  return result.rows.map(r => {
-    const row = r as Record<string, unknown>;
-    return { [args.by[0]]: row[args.by[0]], _count: Number(row._count) };
-  });
-};

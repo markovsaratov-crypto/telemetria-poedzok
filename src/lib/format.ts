@@ -22,23 +22,9 @@ export function fmtDate(iso?: string | null): string {
   return dateFmt.format(d);
 }
 
-export function fmtDateShort(iso?: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "—";
-  return dateShort.format(d);
-}
-
-export function fmtDuration(ms?: number | null): string {
-  if (ms == null || isNaN(ms) || ms <= 0) return "—";
-  const sec = Math.floor(ms / 1000);
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = sec % 60;
-  if (h > 0) return `${h} ч ${m} мин`;
-  if (m > 0) return `${m} мин ${s} сек`;
-  return `${s} сек`;
-}
+// v2.16.0: fmtDateShort/fmtDuration/fmtCountRu удалены — 0 потребителей
+// (все UI-компоненты используют fmtDate/fmtSecShort/fmtSecFull/fmtDurMin/
+// fmtNumber/pluralRu; дубли форматов — источник расхождений).
 
 // v2.10.3 (эргономика): длительность из СЕКУНД — как fmtDuration, но без ms-аргумента
 // и без тире для нуля (для легенд/тайлов, где 0 — валидное значение).
@@ -88,12 +74,6 @@ export function pluralRu(n: number, forms: [string, string, string]): string {
   return forms[2];
 }
 
-// v2.12.0 (D-9): «N + существительное» с плюрализацией и разделителями тысяч.
-export function fmtCountRu(n: number | null | undefined, forms: [string, string, string]): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return `${fmtNumber(n)} ${pluralRu(n, forms)}`;
-}
-
 // v2.12.0 (D-3): штрафные/призовые баллы EcoScore с плюрализацией.
 // Дробные значения в русском требуют родительный ед.ч.: «−18,9 балла».
 // Целые: «0 баллов», «1 балл», «2 балла», «5 баллов». Минус-ноль не выводим.
@@ -134,23 +114,13 @@ export function avgSpeed(
   return Math.round((sum / withSpeed.length) * 3.6 * 10) / 10; // м/с → км/ч
 }
 
-// P2-14: канонический гаверсинус вынесен в src/lib/geo.ts (было 6 идентичных копий).
-import { haversineM as haversine } from "./geo";
-export { haversine };
+// P2-14: канонический гаверсинус и длина трека — в src/lib/geo.ts
+// (было 6 идентичных копий; пере-экспорт из format удалён — 0 потребителей).
+import { trackDistanceM } from "./geo";
 
-// Суммарная длина трека (метры)
+// Суммарная длина трека (метры) — делегирует канонической geo.trackDistanceM.
 export function trackDistance(
   points: Array<{ lat: number; lon: number }>
 ): number {
-  if (points.length < 2) return 0;
-  let d = 0;
-  for (let i = 1; i < points.length; i++) {
-    d += haversine(
-      points[i - 1].lat,
-      points[i - 1].lon,
-      points[i].lat,
-      points[i].lon
-    );
-  }
-  return d;
+  return trackDistanceM(points);
 }

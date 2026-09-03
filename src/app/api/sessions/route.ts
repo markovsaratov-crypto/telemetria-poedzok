@@ -27,7 +27,10 @@ export async function GET(request: NextRequest) {
       deletedAt: null,
     };
     if (q.olderThan) where.endTime = { lt: new Date(q.olderThan) };
-    if (q.before) where.endTime = { gt: new Date(q.before) };
+    // v2.16.0 (B8): инвертированный фильтр исправлен — параметр «before» теперь
+    // действительно означает «до» (было gt: сессии ПОСЛЕ даты; латентный баг —
+    // параметром никто не пользовался, но семантика врала)
+    if (q.before) where.endTime = { lt: new Date(q.before) };
     if (q.routeId) where.routeId = q.routeId;
     if (q.status) where.status = q.status;
     if (q.deviceId) where.deviceId = { contains: q.deviceId };

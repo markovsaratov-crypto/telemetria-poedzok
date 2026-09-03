@@ -13,10 +13,14 @@ import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import { recordIngestAttempt, recordIngestRaw } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток; v2.10.8: сырой дамп
 import { finalizeSession } from "@/lib/session-finalize"; // v2.14.0 (Ф3): shared с воркером-«жнецом»
+import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.16.0 (D-6): единый парсер времени
 import pLimit from "p-limit";
 import { randomUUID } from "crypto";
 
 const SESSION_GAP_MS = 60_000; // 60с gap = новая сессия
+// v2.16.0 (R7): окно правдоподобия времени точки (±24 ч от серверного now):
+// мусорные/будущие/доисторические таймстемпы не должны попадать в БД и метрики
+const TS_PLAUSIBILITY_MS = 24 * 60 * 60 * 1000;
 // v2.11.0 (АУДИТ C-14): сериализация корреляции+вставки — без неё параллельные
 // батчи одного девайса видят «нет активной сессии» одновременно → дубли recording-сессий.
 const ingestWriteLock = pLimit(1);
@@ -80,21 +84,19 @@ function extractPoint(raw: RawPoint): NormalizedPoint | null {
   const lat = raw.latitude ?? raw.lat ?? loc.latitude ?? loc.lat;
   const lon = raw.longitude ?? raw.lon ?? raw.lng ?? loc.longitude ?? loc.lon ?? loc.lng;
   if (lat == null || lon == null || isNaN(Number(lat)) || isNaN(Number(lon))) return null;
+  // v2.16.0 (R7): диапазоны координат (±90/±180) — мусор не попадает в БД и метрики
+  if (Math.abs(Number(lat)) > 90 || Math.abs(Number(lon)) > 180) return null;
   // Sensor Logger-маркеры «нет GPS-фикса»: lat=-1, lon=-1 (§3.3 методологии) — фильтруем
   if (Number(lat) === -1 && Number(lon) === -1) return null;
 
   const tsRaw = raw.time ?? raw.timestamp;
   if (tsRaw == null) return null;
-  // v2.10.7: ISO-строки («2026-09-01T07:53:26.490Z») раньше давали NaN → Date.now()
-  let timestampMs: number;
-  if (typeof tsRaw === "string" && tsRaw.length >= 10) {
-    const iso = Date.parse(tsRaw);
-    timestampMs = isNaN(iso) ? Date.now() : iso;
-  } else {
-    const ts = Number(tsRaw);
-    // нс → мс, мс → мс, с → мс
-    timestampMs = ts > 1e15 ? Math.floor(ts / 1e6) : ts > 1e12 ? ts : ts > 1e9 ? ts * 1000 : Date.now();
-  }
+  // v2.16.0 (D-6+R7): единый парсер parse-timestamp (нс/мс/сек/ISO) вместо
+  // локальной копии с фолбэком Date.now() — фальшивое «сейчас» больше НЕ
+  // подставляется: непарсящееся/неправдоподобное (±24ч) время → точка отброшена
+  const timestampMs = parseTimestamp(String(tsRaw));
+  if (timestampMs == null) return null;
+  if (Math.abs(Date.now() - timestampMs) > TS_PLAUSIBILITY_MS) return null;
 
   const speed = raw.speed ?? loc.speed ?? null;
   const altitude = raw.altitude ?? loc.altitude ?? null;
@@ -319,27 +321,33 @@ export async function POST(request: NextRequest) {
 
     // v2.11.0 (АУДИТ C-14): идемпотентность по messageId — HTTP-ретрай приложения
     // больше не создаёт дубликаты точек. Sensor Logger шлёт уникальный messageId на батч.
+    // v2.16.0 (R2): проверка — только ЧТЕНИЕ (быстрая отдача дубликата), сама запись
+    // IngestMessage перенесена ПОСЛЕ успешной вставки точек ВНУТРИ writeLock — раньше
+    // строка писалась ДО точек: сбой вставки точек → ретрай батча видел «уже
+    // обработано» → батч ТЕРЯЛСЯ навсегда при ответе «duplicate: true».
     const msgId =
       body && typeof body === "object" && !Array.isArray(body)
         ? (body as Record<string, unknown>).messageId
         : undefined;
+    let duplicate = false;
     if (msgId != null && (typeof msgId === "number" || typeof msgId === "string")) {
       try {
-        const dupe = await libsql.execute({
-          sql: `INSERT OR IGNORE INTO IngestMessage (deviceId, messageId, firstSeenAt) VALUES (?, ?, ?)`,
-          args: [deviceId, String(msgId), new Date().toISOString()],
+        const seen = await libsql.execute({
+          sql: `SELECT 1 FROM IngestMessage WHERE deviceId = ? AND messageId = ? LIMIT 1`,
+          args: [deviceId, String(msgId)],
         });
-        if (dupe.rowsAffected === 0) {
-          inc("ingest_duplicate_total", "Duplicate ingest (messageId idempotency)", 1, "sensorlogger");
-          return json(
-            { ok: true, duplicate: true, message: "Batch already processed (messageId seen)", deviceId, deviceName },
-            200,
-            { "X-Request-Id": requestId }
-          );
-        }
+        if (seen.rows.length > 0) duplicate = true;
       } catch {
         // Таблицы нет (старая БД) — идемпотентность недоступна, продолжаем без неё
       }
+    }
+    if (duplicate) {
+      inc("ingest_duplicate_total", "Duplicate ingest (messageId idempotency)", 1, "sensorlogger");
+      return json(
+        { ok: true, duplicate: true, message: "Batch already processed (messageId seen)", deviceId, deviceName },
+        200,
+        { "X-Request-Id": requestId }
+      );
     }
 
     // v2.10.7: extractItems ищет массив точек в известных контейнерах (points/data/
@@ -424,10 +432,15 @@ export async function POST(request: NextRequest) {
 
     // 5. Корреляция сессий + вставка — под writeLock (C-14): параллельные батчи
     // одного девайса больше не создают дубли recording-сессий.
+    // v2.16.0 (R4): гэп считается по GPS-времени (endTime сессии vs первая точка
+    // батча), а НЕ по серверному wall-clock (Session.updatedAt) — 61-секундный
+    // сетевой затык или офлайн-буфер больше НЕ режут непрерывную поездку на куски.
+    // v2.16.0 (R11): endTime/startTime — монотонные (MAX/MIN), поздний
+    // не-по-порядку батч не двигает границы записи назад.
     const outcome = await ingestWriteLock(async () => {
       const now = Date.now();
       const recent = await libsql.execute({
-        sql: `SELECT id, updatedAt FROM Session
+        sql: `SELECT id, startTime, endTime, updatedAt FROM Session
               WHERE deviceId = ? AND status = 'recording' AND deletedAt IS NULL
               ORDER BY updatedAt DESC LIMIT 1`,
         args: [deviceId],
@@ -435,17 +448,31 @@ export async function POST(request: NextRequest) {
 
       let sessionId: string;
       let isNewSession = false;
+      let sessionStartMs = NaN;
+      let sessionEndMs = NaN;
 
       if (recent.rows.length > 0) {
         const row = recent.rows[0] as Record<string, unknown>;
-        const lastUpdatedAt = new Date(String(row.updatedAt)).getTime();
-        if (now - lastUpdatedAt < SESSION_GAP_MS) {
-          // Продолжаем ту же сессию
+        sessionStartMs = new Date(String(row.startTime)).getTime();
+        sessionEndMs = row.endTime != null ? new Date(String(row.endTime)).getTime() : NaN;
+        const firstBatchTs = points[0].timestampMs;
+        // нет endTime (пустая запись) → fallback на старую семантику wall-clock
+        const gapMs = Number.isFinite(sessionEndMs)
+          ? firstBatchTs - sessionEndMs
+          : now - new Date(String(row.updatedAt)).getTime();
+        if (gapMs < SESSION_GAP_MS) {
+          // Продолжаем ту же сессию (в т.ч. поздние батчи с отрицательным гэпом —
+          // они хронологически принадлежат этой записи)
           sessionId = String(row.id);
         } else {
-          // Прошло > 60с — финализируем старую, создаём новую
+          // Гэп > 60с ПО GPS-ВРЕМЕНИ — финализируем старую, создаём новую.
+          // v2.16.0 (QA-фикс): границы СТАРОЙ сессии не должны примешиваться
+          // к UPDATE новой (раньше min/max смешивал startTime/endTime предыдущей
+          // записи с точками новой — startTime новой уезжал назад).
           await finalizeSession(String(row.id));
-          sessionId = await createRecordingSession(deviceId, deviceName, points[0].timestampMs);
+          sessionId = await createRecordingSession(deviceId, deviceName, firstBatchTs);
+          sessionStartMs = NaN;
+          sessionEndMs = NaN;
           isNewSession = true;
         }
       } else {
@@ -468,14 +495,30 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      // 7. Обновляем session: endTime, pointCount, payloadBytes, updatedAt
+      // 7. Обновляем session: endTime/startTime — МОНОТОННО (MAX/MIN),
+      // pointCount, payloadBytes, updatedAt
       const lastTs = points[points.length - 1].timestampMs;
+      const firstTs = points[0].timestampMs;
+      const newStart = Number.isFinite(sessionStartMs) ? Math.min(sessionStartMs, firstTs) : firstTs;
+      const newEnd = Number.isFinite(sessionEndMs) ? Math.max(sessionEndMs, lastTs) : lastTs;
       await libsql.execute({
         sql: `UPDATE Session
-              SET endTime = ?, pointCount = pointCount + ?, payloadBytes = payloadBytes + ?, updatedAt = ?
+              SET startTime = ?, endTime = ?, pointCount = pointCount + ?, payloadBytes = payloadBytes + ?, updatedAt = ?
               WHERE id = ?`,
-        args: [new Date(lastTs).toISOString(), points.length, payloadBytes, new Date().toISOString(), sessionId],
+        args: [new Date(newStart).toISOString(), new Date(newEnd).toISOString(), points.length, payloadBytes, new Date().toISOString(), sessionId],
       });
+      // v2.16.0 (R2): идемпотентность-запись — ПОСЛЕ успешной вставки точек
+      // (atomic INSERT OR IGNORE — защита и от межинстансовых гонок)
+      if (msgId != null && (typeof msgId === "number" || typeof msgId === "string")) {
+        try {
+          await libsql.execute({
+            sql: `INSERT OR IGNORE INTO IngestMessage (deviceId, messageId, firstSeenAt) VALUES (?, ?, ?)`,
+            args: [deviceId, String(msgId), new Date().toISOString()],
+          });
+        } catch {
+          // нет таблицы на старых БД — не фатально
+        }
+      }
       return { sessionId, isNewSession };
     });
     const { sessionId, isNewSession } = outcome;

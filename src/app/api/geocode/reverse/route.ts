@@ -5,7 +5,6 @@ import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { libsql } from "@/lib/db";
 import { setSetting, getSetting } from "@/lib/settings";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +17,12 @@ function round(n: number, digits = 4): number {
 function cacheKey(lat: number, lon: number): string {
   return `geocode:${round(lat, 4)},${round(lon, 4)}`;
 }
+
+// v2.16.0 (B11): TTL кэша геокода — 30 суток (комментарий «кэш 30 дней» был
+// до этого ложью: записей expiry не существовало ВООБЩЕ, они жили в таблице
+// Setting вечно). Чтение теперь сверяет cachedAt; чистка протухших строк —
+// в retention-cron (ключи geocode:*).
+const GEOCODE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 // v2.12.0 (Q3): короткая человекочитаемая подпись из компонентов адреса.
 // Приоритет: улица+дом → улица → район/населённый пункт. Fallback — первые
@@ -65,36 +70,48 @@ export async function GET(request: NextRequest) {
     // Check cache via Setting table (cached for 30 days).
     const cached = await getSetting(key);
     if (cached) {
+      // v2.16.0 (B11): протухшая запись (>30 дней) — НЕ хит, обновляем живым запросом
+      let expired = false;
       try {
-        const parsed = JSON.parse(cached) as {
-          address: string;
-          short?: string;
-          cachedAt: string;
-          raw?: Record<string, string> | null;
-        };
-        return json(
-          {
-            address: parsed.address,
-            short: parsed.short ?? shortAddress(parsed.raw ?? null, parsed.address),
-            cachedAt: parsed.cachedAt,
-            cached: true,
-          },
-          200,
-          { "X-Request-Id": requestId }
-        );
+        const probe = JSON.parse(cached) as { cachedAt?: string };
+        if (probe && typeof probe.cachedAt === "string") {
+          expired = Date.now() - Date.parse(probe.cachedAt) > GEOCODE_CACHE_TTL_MS;
+        }
       } catch {
-        // v2.12.0: legacy-кэш до v2.12 — голая строка адреса (не JSON).
-        // Используем как есть, короткую подпись строим из display_name.
-        return json(
-          {
-            address: cached,
-            short: shortAddress(null, cached),
-            cachedAt: new Date().toISOString(),
-            cached: true,
-          },
-          200,
-          { "X-Request-Id": requestId }
-        );
+        // legacy-кэш без JSON/cachedAt — считаем свежим (адреса не меняются часто)
+      }
+      if (!expired) {
+        try {
+          const parsed = JSON.parse(cached) as {
+            address: string;
+            short?: string;
+            cachedAt: string;
+            raw?: Record<string, string> | null;
+          };
+          return json(
+            {
+              address: parsed.address,
+              short: parsed.short ?? shortAddress(parsed.raw ?? null, parsed.address),
+              cachedAt: parsed.cachedAt,
+              cached: true,
+            },
+            200,
+            { "X-Request-Id": requestId }
+          );
+        } catch {
+          // v2.12.0: legacy-кэш до v2.12 — голая строка адреса (не JSON).
+          // Используем как есть, короткую подпись строим из display_name.
+          return json(
+            {
+              address: cached,
+              short: shortAddress(null, cached),
+              cachedAt: new Date().toISOString(),
+              cached: true,
+            },
+            200,
+            { "X-Request-Id": requestId }
+          );
+        }
       }
     }
 
@@ -127,7 +144,6 @@ export async function GET(request: NextRequest) {
     const cacheValue = JSON.stringify({ address, short, cachedAt, raw: data.address ?? null });
     try {
       await setSetting(key, cacheValue, "geocode-cache");
-      void libsql; // ensure imported
     } catch (e) {
       logger.warn("Geocode cache write failed", {
         requestId,

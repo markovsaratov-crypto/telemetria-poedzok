@@ -216,16 +216,7 @@ export async function getUserIdFromRequest(
   return null; // legacy owner — no userId
 }
 
-// Get role: user role for multi-user, "owner" for legacy.
-export async function getUserRoleFromRequest(
-  request: NextRequest
-): Promise<string | null> {
-  const session = await verifySessionCookieFromRequest(request);
-  if (!session.ok) return null;
-  if ("userId" in session.payload) return session.payload.role;
-  if (session.payload.sub === "owner") return "owner";
-  return null;
-}
+// v2.16.0: getUserRoleFromRequest удалён — 0 потребителей (роли даёт authorizeRequest).
 
 // Require any authenticated user (cookie or bearer). Throws HTTP response on failure.
 export type AuthResult =
@@ -276,13 +267,7 @@ export async function authorizeRequest(
   return { ok: false, reason: "Unauthorized" };
 }
 
-// Convenience wrappers for routes that need to enforce user/admin.
-export async function requireUser(request: NextRequest): Promise<AuthResult> {
-  return authorizeRequest(request, "api");
-}
-
-export async function requireAdmin(request: NextRequest): Promise<AuthResult> {
-  return authorizeRequest(request, "admin");
-}
+// v2.16.0: requireUser/requireAdmin удалены — 0 потребителей (все роуты зовут
+// authorizeRequest напрямую).
 
 export { COOKIE_NAME, COOKIE_TTL_SEC, getClientIP };

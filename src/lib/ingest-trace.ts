@@ -20,6 +20,7 @@
 import { libsql } from "./db";
 import { inc } from "./metrics";
 import { logger } from "./logger";
+import { upsertSetting } from "./settings"; // v2.16.0 (D-14): единый UPSERT Setting
 
 const TRACE_KEY = "diag.ingest.trace";
 const MAX_RECENT = 20;
@@ -96,13 +97,7 @@ async function writeTraceAttempt(a: IngestAttempt): Promise<void> {
     const trace = await readIngestTrace();
     const recent = [a, ...trace.recent].slice(0, MAX_RECENT);
     const payload = JSON.stringify({ last: a, recent });
-    const now = new Date().toISOString();
-    await libsql.execute({
-      sql: `INSERT INTO Setting (key, value, updatedAt, updatedBy)
-            VALUES (?, ?, ?, 'ingest-trace')
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt, updatedBy = excluded.updatedBy`,
-      args: [TRACE_KEY, payload, now],
-    });
+    await upsertSetting(TRACE_KEY, payload, "ingest-trace");
   } catch (err) {
     logger.warn("ingest trace write failed (non-fatal)", {
       error: err instanceof Error ? err.message : String(err),
@@ -166,31 +161,34 @@ export function recordIngestRaw(
   a: { at: string; route: IngestRoute; deviceId: string | null; outcome: IngestOutcome },
   bodyStr: string,
 ): void {
-  void (async () => {
-    try {
-      const bytes = Buffer.byteLength(bodyStr);
-      const truncated = bodyStr.length > MAX_RAW_CHARS;
-      const dump: IngestRawDump = {
-        at: a.at,
-        deviceId: a.deviceId,
-        route: a.route,
-        outcome: a.outcome,
-        bytes,
-        truncated,
-        body: truncated ? bodyStr.slice(0, MAX_RAW_CHARS) : bodyStr,
-      };
-      await libsql.execute({
-        sql: `INSERT INTO Setting (key, value, updatedAt, updatedBy)
-              VALUES (?, ?, ?, 'ingest-trace')
-              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updatedAt = excluded.updatedAt, updatedBy = excluded.updatedBy`,
-        args: [RAW_KEY, JSON.stringify(dump), new Date().toISOString()],
-      });
-    } catch (err) {
-      logger.warn("ingest raw dump write failed (non-fatal)", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  })();
+  // v2.16.0 (B-11): дамп пишется ЧЕРЕЗ ту же сериализованную цепочку
+  // traceWriteQueue (раньше — голый void-промис, мог интерливиться
+  // с read-modify-write трейса по той же таблице Setting).
+  traceWriteQueue = traceWriteQueue.then(() => writeRawDump(a, bodyStr)).catch(() => {});
+}
+
+async function writeRawDump(
+  a: { at: string; route: IngestRoute; deviceId: string | null; outcome: IngestOutcome },
+  bodyStr: string,
+): Promise<void> {
+  try {
+    const bytes = Buffer.byteLength(bodyStr);
+    const truncated = bodyStr.length > MAX_RAW_CHARS;
+    const dump: IngestRawDump = {
+      at: a.at,
+      deviceId: a.deviceId,
+      route: a.route,
+      outcome: a.outcome,
+      bytes,
+      truncated,
+      body: truncated ? bodyStr.slice(0, MAX_RAW_CHARS) : bodyStr,
+    };
+    await upsertSetting(RAW_KEY, JSON.stringify(dump), "ingest-trace");
+  } catch (err) {
+    logger.warn("ingest raw dump write failed (non-fatal)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**

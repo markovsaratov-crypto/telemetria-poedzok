@@ -27,7 +27,10 @@ export async function GET(request: NextRequest) {
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
     const url = new URL(request.url);
-    const sinceIso = routePeriodSinceIso(url.searchParams.get("period"));
+    // v2.16.0 (B-4): tzOffsetMin — «сегодня» в поясе клиента (как /api/stats/batya)
+    const tzRaw = Number(url.searchParams.get("tzOffsetMin"));
+    const tzOffsetMin = Number.isFinite(tzRaw) && Math.abs(tzRaw) <= 15 * 60 ? Math.round(tzRaw) : 0;
+    const sinceIso = routePeriodSinceIso(url.searchParams.get("period"), tzOffsetMin);
 
     const groupsInfo = await listRouteGroups(sinceIso);
     let totalHotspotSegments = 0;

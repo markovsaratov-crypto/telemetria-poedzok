@@ -32,24 +32,8 @@ export const zRegisterBody = z.object({
   password: z.string().min(8).max(128),
 });
 
-export const zPlanBody = z.object({
-  startLat: z.number().min(-90).max(90),
-  startLon: z.number().min(-180).max(180),
-  endLat: z.number().min(-90).max(90),
-  endLon: z.number().min(-180).max(180),
-  sessionId: z.string().optional(),
-});
-
-export const zRouteBody = z.object({
-  name: z.string().min(1).max(128),
-  description: z.string().max(512).optional(),
-  startLat: z.number().min(-90).max(90),
-  startLon: z.number().min(-180).max(180),
-  endLat: z.number().min(-90).max(90),
-  endLon: z.number().min(-180).max(180),
-});
-
-export const zRouteUpdate = zRouteBody.partial();
+// v2.16.0: zPlanBody/zRouteBody/zRouteUpdate удалены вместе с мёртвыми
+// /api/plan* и /api/routes CRUD-роутами (0 потребителей).
 
 export const zExportBody = z.object({
   format: z.enum(["gpx", "kml", "json"]),
@@ -80,5 +64,3 @@ export const zShareBody = z.object({
 
 export type IngestBody = z.infer<typeof zIngestBody>;
 export type IngestPoint = z.infer<typeof zIngestPoint>;
-export type PlanBody = z.infer<typeof zPlanBody>;
-export type RouteBody = z.infer<typeof zRouteBody>;

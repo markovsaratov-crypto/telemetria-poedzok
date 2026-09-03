@@ -74,6 +74,23 @@ export async function getSetting(key: string): Promise<string> {
   return getSettingSync(key);
 }
 
+// v2.18.0: прямой точечный read для записей, которых НЕТ в кэше настроек
+// (geocode:* — тысячи строк). getSetting(key) гоняет refreshCache() — полную
+// загрузку ВСЕЙ таблицы Setting в Map раз в 60с TTL; дешёвые точечные записи
+// теперь читаются одним SELECT WHERE key = ? без этого churn'а.
+export async function getSettingDirect(key: string): Promise<string> {
+  try {
+    const res = await libsql.execute({
+      sql: "SELECT value FROM Setting WHERE key = ?",
+      args: [key],
+    });
+    if (res.rows.length === 0) return "";
+    return String((res.rows[0] as Record<string, unknown>).value);
+  } catch {
+    return "";
+  }
+}
+
 export async function setSetting(key: string, value: string, updatedBy?: string): Promise<void> {
   await upsertSetting(key, value, updatedBy ?? null);
   getStore().cache.set(key, { value, updatedAt: Date.now() });

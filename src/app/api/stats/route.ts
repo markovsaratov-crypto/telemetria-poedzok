@@ -1,5 +1,11 @@
 // GET /api/stats — агрегированная статистика для dashboard (§3.x overview).
 // Cookie или Bearer API_KEY.
+//
+// v2.18.0: (а) perDay УДАЛЁН — 0 потребителей (тип в hooks.ts и всё), 7 фильтр-
+// проходов на каждый запрос (включая 30-с poll) впустую + датные метки
+// показывали UTC-дату сдвинутого дня (для tz≠UTC — на день раньше);
+// (б) todaySessions влиты в общий Promise.all (был отдельный раундтрип);
+// (в) URL парсится один раз.
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
@@ -13,6 +19,8 @@ export async function GET(request: NextRequest) {
   try {
     const auth = await authorizeRequest(request, "api");
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
+
+    const url = new URL(request.url);
 
     // All-time stats
     // v2.12.0 (D-1): totalPoints — только точки ЖИВЫХ сессий (deletedAt IS NULL).
@@ -31,24 +39,22 @@ export async function GET(request: NextRequest) {
     // Today
     // v2.16.0 (B7): «сегодня» — в часовом поясе КЛИЕНТА (?tzOffsetMin, как
     // Date#getTimezoneOffset; по умолчанию 0 = UTC). Раньше полночь бралась в
-    // СЕРВЕРНОМ поясе — на Render UTC «сегодня» начиналось в 03:00 МСК и
-    // расходилось с «батя-статс», который всегда считал в поясе клиента.
-    const url = new URL(request.url);
+    // СЕРВЕРНОМ поясе — на Render UTC «сегодня» начиналось в 03:00 МСК.
     const tzRaw = Number(url.searchParams.get("tzOffsetMin"));
     const tzOffsetMin = Number.isFinite(tzRaw) && Math.abs(tzRaw) <= 15 * 60 ? Math.round(tzRaw) : 0;
     const tzMs = tzOffsetMin * 60_000;
     const todayStartMs = Math.floor((Date.now() - tzMs) / 86_400_000) * 86_400_000 + tzMs;
-    const todaySessions = await db.session.count({
-      where: { startTime: { gte: new Date(todayStartMs) }, deletedAt: null },
-    });
 
-    // v2.16.0 (I4): 4 независимых запроса (7д, 12нед, aggregate, трейс) —
-    // параллельно (было 4 последовательных HTTPS-раундтрипа к Turso).
+    // v2.16.0 (I4): независимые запросы — параллельно (было 4
+    // последовательных HTTPS-раундтрипа к Turso); v2.18.0: + todaySessions (5-й)
     const sevenDaysAgo = new Date();
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     const twelveWeeksAgo = new Date();
     twelveWeeksAgo.setDate(twelveWeeksAgo.getDate() - 84); // v2.16.0 (V4): имя = суть (12 недель, не «30 дней»)
-    const [recentSessions, totalBytesResult, heatmapSessions, ingestTrace] = await Promise.all([
+    const [todaySessions, recentSessions, totalBytesResult, heatmapSessions, ingestTrace] = await Promise.all([
+      db.session.count({
+        where: { startTime: { gte: new Date(todayStartMs) }, deletedAt: null },
+      }),
       db.session.findMany({
         where: { startTime: { gte: sevenDaysAgo }, deletedAt: null },
         select: { startTime: true, endTime: true, pointCount: true, payloadBytes: true },
@@ -56,9 +62,9 @@ export async function GET(request: NextRequest) {
         // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 резал спарклайн
         take: 5000,
       }),
+      // v2.18.0: where: {deletedAt: null} — лишний (aggregate SQL уже фильтрует живые)
       db.session.aggregate({
         _sum: { payloadBytes: true },
-        where: { deletedAt: null },
       }),
       db.session.findMany({
         where: { startTime: { gte: twelveWeeksAgo }, deletedAt: null },
@@ -71,31 +77,9 @@ export async function GET(request: NextRequest) {
       readIngestTrace().catch(() => ({ last: null, recent: [], updatedAt: null })),
     ]);
 
-    // Per-day buckets for last 7 days
-    // v2.9.4: +durationSec — сумма длительностей сессий за день (спарклайн KPI «Длительность» в мобильной аналитике)
-    // v2.9.4 fix: startTime из БД приходит ISO-строкой — сравниваем через new Date (раньше string vs Date давал NaN → все бакеты были нулями)
-    // v2.16.0: границы суток — в поясе клиента (согласовано с todaySessions выше)
-    const perDay: { date: string; count: number; points: number; durationSec: number }[] = [];
-    for (let i = 6; i >= 0; i--) {
-      const dayStartMs = todayStartMs - i * 86_400_000;
-      const nextMs = dayStartMs + 86_400_000;
-      const dayItems = recentSessions.filter(
-        (s) => new Date(s.startTime).getTime() >= dayStartMs && new Date(s.startTime).getTime() < nextMs
-      );
-      perDay.push({
-        date: new Date(dayStartMs).toISOString().slice(0, 10),
-        count: dayItems.length,
-        points: dayItems.reduce((a, s) => a + s.pointCount, 0),
-        durationSec: dayItems.reduce(
-          (a, s) => a + Math.max(0, ((s.endTime ? new Date(s.endTime).getTime() : new Date(s.startTime).getTime()) - new Date(s.startTime).getTime()) / 1000),
-          0
-        ),
-      });
-    }
-
     // v2.10.8: полный дамп последнего нераспознанного батча — ТОЛЬКО по
-    // ?ingestRaw=1: до 64 КБ в теле ответе, не таскаем его в каждом запросе.
-    const wantRaw = new URL(request.url).searchParams.get("ingestRaw") === "1";
+    // ?ingestRaw=1: до 64 КБ в теле ответа, не таскаем его в каждом запросе.
+    const wantRaw = url.searchParams.get("ingestRaw") === "1";
     const ingestRaw = wantRaw
       ? await readIngestRaw().catch(() => null)
       : null;
@@ -110,10 +94,9 @@ export async function GET(request: NextRequest) {
         pendingJobs,
         todaySessions,
         totalPayloadBytes: totalBytesResult._sum.payloadBytes || 0,
-        perDay,
         heatmapSessions: heatmapSessions.map((s) => ({
-          startTime: s.startTime,
-          pointCount: s.pointCount,
+          startTime: String(s.startTime ?? ""),
+          pointCount: Number(s.pointCount ?? 0),
         })),
         // Capacity info (блокер №1 — отображение в UI)
         capacity: {

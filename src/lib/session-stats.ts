@@ -284,7 +284,13 @@ export function computeSessionStats(
   // v2.9: метрики методологии (§12) — state machine + ActiveTrip + CAP EcoScore
   // v2.10.0 R6.1: EcoScore использует corpus-calibrated baselines
   // FIX-C1: в методологию передаётся АКТИВНАЯ дистанция
-  const methodology = computeMethodologyMetrics(points, distance, durationSec, ecoBaselines);
+  // v2.18.0 (перф): motion/activeTrip уже посчитаны выше — передаём их в
+  // методологию (раньше она пересчитывала state machine второй раз: самый
+  // дорогой шаг конвейера ×2 на каждую сессию, ×50 в батче)
+  const methodology = computeMethodologyMetrics(points, distance, durationSec, ecoBaselines, {
+    motion,
+    activeTrip: activeTrip,
+  });
   // v2.9: AvgSpeed = Distance / ActiveDuration (§4.3 + §4.11)
   // FIX-C1: числитель и знаменатель — обе активные части. Нет поездки → null.
   const avgSpeed = hasActive ? avgSpeedMs(distance, durationSec, activeTrip.activeDuration) : null;
@@ -306,6 +312,25 @@ export function computeSessionStats(
   // v2.9.4: флаг наличия высотных данных (для показа высотного профиля в UI)
   const hasAltitude = speedProfile.some((p) => p.alt != null);
 
+  // v2.18.0 (payload): states[] НЕ сериализуем — N−1 строк на сессию при
+  // НУЛЕ потребителей (фронт-агрегатор всегда zeroes: v4-hooks `states: []`,
+  // компонентов-читателей нет). 5k-точечная сессия ≈ 40 КБ мёртвого JSON в
+  // каждом ответе [id]/stats и каждой из ≤50 записей батча. Массив остаётся
+  // во внутреннем объекте методологии — пустой в копии для ответа.
+  const methodologyForPayload: MethodologyMetrics = {
+    ...methodology,
+    motion: { ...methodology.motion, states: [] },
+  };
+
+  // v2.18.0: avgAltitude — по ВСЕМ точкам с высотой (раньше гейт был
+  // prevAlt != null — высота ПОСЛЕДНЕЙ точки решала, считать ли среднее:
+  // одна точка без высоты в конце обнуляла avgAltitude при 999 валидных).
+  const altitudePoints = points.filter((p) => p.altitude != null);
+  const avgAltitudeValue =
+    altitudePoints.length > 0
+      ? Math.round(altitudePoints.reduce((a, p) => a + (p.altitude || 0), 0) / altitudePoints.length)
+      : null;
+
   return {
     kind: "full",
     payload: {
@@ -324,13 +349,13 @@ export function computeSessionStats(
       avgSpeed: avgSpeed != null ? Math.round(avgSpeed * 1000) / 1000 : null,
       speedMeanMs: speedMean != null ? Math.round(speedMean * 10) / 10 : null,
       maxSpeed: Math.round(maxSpeed * 10) / 10,
-      avgAltitude: prevAlt != null ? Math.round(points.filter((p) => p.altitude != null).reduce((a, p) => a + (p.altitude || 0), 0) / (points.filter((p) => p.altitude != null).length || 1)) : null,
+      avgAltitude: avgAltitudeValue,
       elevationGain: Math.round(elevationGain),
       elevationLoss: Math.round(elevationLoss),
       bbox,
       startTime: meta.startTime,
       endTime: meta.endTime,
-      methodology,
+      methodology: methodologyForPayload,
     },
     activeDistanceM: distance,
     actualDurationSec: hasActive ? activeTrip.activeDuration : durationSec,

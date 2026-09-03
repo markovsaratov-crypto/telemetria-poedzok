@@ -3,20 +3,11 @@
 // v2.11.0 (АУДИТ C-3): авторизация — ADMIN_TOKEN ИЛИ CRON_SECRET (backup-кроны Render
 // шлют CRON_SECRET; раньше — 401, еженедельные релиз-бэкапы не создавались).
 import { NextRequest } from "next/server";
-import { authorizeRequest, getUserIdFromRequest, type AuthResult } from "@/lib/auth";
+import { authorizeAdminOrCron, authorizeRequest, getUserIdFromRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 
 export const dynamic = "force-dynamic";
-
-async function authorizeAdminOrCron(request: NextRequest): Promise<AuthResult> {
-  let auth = await authorizeRequest(request, "admin");
-  if (!auth.ok) {
-    const cron = await authorizeRequest(request, "cron");
-    if (cron.ok) auth = { ok: true, via: "bearer", userId: null, role: "cron" };
-  }
-  return auth;
-}
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();

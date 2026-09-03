@@ -83,6 +83,13 @@ const TABLE_STAMPS: Record<string, TableStamps> = {
   // и INSERT в транзакции падал «no such column».
   ExportJob: { createdAt: true, updatedAt: false },
   BackupJob: { createdAt: true, updatedAt: false },
+  // v2.18.0 (P0): GpsPoint отсутствовал в реестре с рефакторинга v2.16.0 (D-2) —
+  // tx-прокси бросал «таблица GpsPoint не поддерживается в транзакции», и ВСЕ
+  // транзакционные вставки точек падали: /api/ingest (500 на каждой новой сессии),
+  // CSV-импорт (200, но 0 импортированных — всё в errors[]), ZIP-импорт (500).
+  // Прод выживал только потому, что SensorLogger шлёт в /api/ingest/sensorlogger
+  // (сырой SQL, не через $transaction). У GpsPoint нет createdAt/updatedAt — штампы не нужны.
+  GpsPoint: { createdAt: false, updatedAt: false },
 };
 
 function buildInsert(table: string, data: Record<string, unknown>): { sql: string; args: InValue[] } {
@@ -224,10 +231,13 @@ export const db = {
       const params: unknown[] = [];
 
       // deviceId: scalar → ТОЧНОЕ совпадение (C-21); {contains} → LIKE с ESCAPE
+      // v2.18.0: LOWER(...) LIKE LOWER(?) — как в OR-ветках поиска (v2.16.0):
+      // голый LIKE в SQLite регистронезависим только для ASCII, фильтр по
+      // кириллическому deviceId вёл себя иначе, чем поиск
       const devId = w.deviceId as { contains?: string } | string | undefined;
       if (devId && typeof devId === "object" && devId.contains != null) {
-        conditions.push("deviceId LIKE ? ESCAPE '\\'");
-        params.push(`%${String(devId.contains).replace(/[\\%_]/g, (m) => "\\" + m)}%`);
+        conditions.push("LOWER(deviceId) LIKE ? ESCAPE '\\'");
+        params.push(`%${String(devId.contains).toLowerCase().replace(/[\\%_]/g, (m) => "\\" + m)}%`);
       } else if (typeof devId === "string" && devId) {
         conditions.push("deviceId = ?");
         params.push(devId);
@@ -295,7 +305,13 @@ export const db = {
 
       // Курсорная пагинация: keyset по (startTime, id) — эмуляция Prisma cursor+skip:1.
       // C-5: старая схема «id != cursor + OFFSET 1» выдавала страницу 2 из уже видимых строк.
+      // v2.18.0 (P1): Prisma-семантика cursor = «начать строго ПОСЛЕ курсора».
+      // Keyset-предикат (startTime < ? OR (= AND id < ?)) УЖЕ исключает курсор и всё до него
+      // → наложение OFFSET поверх него (skip:1 от роута) выбрасывало ПЕРВУЮ строку
+      // после курсора — страница 2 молча теряла одну сессию. Теперь при активном
+      // keyset args.skip ИГНОРИРУЕТСЯ; OFFSET работает только для безкурсорного skip.
       let cursorSkip = 0;
+      let keysetActive = false;
       if (args?.cursor?.id) {
         const cur = await libsql.execute({
           sql: "SELECT startTime FROM Session WHERE id = ? LIMIT 1",
@@ -305,13 +321,15 @@ export const db = {
           const curStart = String((cur.rows[0] as Record<string, unknown>).startTime);
           conditions.push("(startTime < ? OR (startTime = ? AND id < ?))");
           params.push(curStart, curStart, args.cursor.id);
+          keysetActive = true;
         } else {
-          cursorSkip = 1; // курсор удалён — fallback на старую семантику
+          // Курсор удалён (soft-delete) — повторяем страницу с начала: безопаснее,
+          // чем терять строку; клиент увидит уже виденные записи и пересчитает курсор.
           conditions.push("id != ?");
           params.push(args.cursor.id);
         }
       }
-      const skip = args?.skip ?? cursorSkip;
+      const skip = keysetActive ? 0 : (args?.skip ?? cursorSkip);
 
       let sql = "SELECT * FROM Session WHERE deletedAt IS NULL";
       if (conditions.length > 0) sql += " AND " + conditions.join(" AND ");
@@ -653,29 +671,10 @@ export const db = {
       return Number((result.rows[0] as Record<string, unknown>).count);
     },
   },
-  routeCache: {
-    async findUnique(args: { where: { hash: string } }) {
-      const result = await libsql.execute({ sql: "SELECT * FROM RouteCache WHERE hash = ?", args: [args.where.hash as InValue] });
-      return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
-    },
-    async upsert(args: { where: { hash: string }; create: Record<string, unknown>; update: Record<string, unknown> }) {
-      // RouteCache: id/createdAt NOT NULL — substitute defaults if the caller didn't pass them (P0-2);
-      // drop undefined values (libsql rejects undefined — Prisma semantics "don't set")
-      const createData = { id: crypto.randomUUID(), createdAt: new Date().toISOString(), ...args.create };
-      for (const k of Object.keys(createData)) if (createData[k] === undefined) delete createData[k];
-      const updateData = { ...args.update };
-      for (const k of Object.keys(updateData)) if (updateData[k] === undefined) delete updateData[k];
-      const createKeys = Object.keys(createData);
-      const createValues = normVals(Object.values(createData));
-      const updateKeys = Object.keys(updateData);
-      const updateValues = normVals(Object.values(updateData));
-      const placeholders = createKeys.map(() => "?").join(", ");
-      const sets = updateKeys.map((k) => `${k} = ?`).join(", ");
-      await libsql.execute({ sql: `INSERT INTO RouteCache (${createKeys.join(", ")}) VALUES (${placeholders}) ON CONFLICT(hash) DO UPDATE SET ${sets}`, args: [...createValues, ...updateValues] as InValue[] });
-      const result = await libsql.execute({ sql: "SELECT * FROM RouteCache WHERE hash = ?", args: [args.where.hash as InValue] });
-      return result.rows.length > 0 ? toCamel(result.rows[0] as Record<string, unknown>) : null;
-    },
-  },
+  // v2.18.0: db.routeCache УДАЛЁН — обёртку использовал только мёртвый src/lib/cache.ts
+  // (0 importers; двухуровневый кэш маршрутизации §3.2 из спеки в рантайме
+  // не существовал). Таблица RouteCache остаётся в схеме/бэкапах/restore.
+
   exportJob: {
     async findUnique(args: { where: { id: string }; include?: Record<string, unknown> }) {
       const result = await libsql.execute({ sql: "SELECT * FROM ExportJob WHERE id = ?", args: [args.where.id] });
@@ -728,10 +727,16 @@ export const db = {
   // оставлял «висячую» сессию без точек). Транзакционный объект поддерживает
   // generic create/createMany для известных таблиц; неподдерживаемые вызовы
   // падают ГРОМКО (а не молча выполняются вне транзакции).
-  $transaction: async <T>(fn: (tx: typeof db) => Promise<T>): Promise<T> => {
+  // v2.18.0 (типизация): раньше параметр fn типизировался как `typeof db` —
+  // циклическая ссылка объекта на собственный тип в собственном инициализаторе
+  // → TS7022 («db implicitly has type any»), спрятанная noImplicitAny:false.
+  // Весь db-слой был нетипизирован: лишние/неверно набранные аргументы вызовов
+  // (напр. select в trafficJob.findMany) проходили молча. Теперь — отдельный
+  // интерфейс DbTx: db получает честный выведенный тип, компилятор снова видит формы.
+  $transaction: async <T>(fn: (tx: DbTx) => Promise<T>): Promise<T> => {
     const txClient = await libsql.transaction("write");
     try {
-      const out = await fn(makeTxExecutor(txClient) as unknown as typeof db);
+      const out = await fn(makeTxExecutor(txClient) as unknown as DbTx);
       await txClient.commit();
       return out;
     } catch (err) {
@@ -749,6 +754,24 @@ export const db = {
 // «updatedAt: boolean» — единственный источник штампов колонок; ExportJob без
 // updatedAt, как в схеме)
 type LibsqlTransaction = Awaited<ReturnType<Client["transaction"]>>;
+
+// v2.18.0: тип транзакционного исполнителя — строго create/createMany/update
+// по каждой известной таблице (замена `typeof db`, порождавшего TS7022).
+interface TxModelApi {
+  create(args: { data: Record<string, unknown> }): Promise<Record<string, unknown>>;
+  createMany(args: { data: Array<Record<string, unknown>> }): Promise<{ count: number }>;
+  update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<Record<string, unknown> | null>;
+}
+export interface DbTx {
+  session: TxModelApi;
+  gpsPoint: TxModelApi;
+  trafficJob: TxModelApi;
+  route: TxModelApi;
+  routeCache: TxModelApi;
+  auditLog: TxModelApi;
+  exportJob: TxModelApi;
+  backupJob: TxModelApi;
+}
 
 // Транзакционный исполнитель: session.create / gpsPoint.createMany и т.п.,
 // но каждый execute идёт через tx (одна атомарная единица работы).

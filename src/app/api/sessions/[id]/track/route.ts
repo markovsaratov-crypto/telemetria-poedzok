@@ -37,7 +37,9 @@ export async function GET(
       return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     }
 
-    const points = session.gpsPoints;
+    // v2.18.0: типизированный db — gpsPoints unknown, локальная типизация
+    type TrackPoint = { lat: number; lon: number; speed: number | null; timestamp: number; bearing: number | null; accuracy: number | null; altitude: number | null };
+    const points = (session.gpsPoints ?? []) as unknown as TrackPoint[];
     if (points.length === 0) {
       return json({ sessionId: id, points: [], segments: [], harshPoints: [], bounds: null }, 200, { "X-Request-Id": requestId });
     }
@@ -49,7 +51,7 @@ export async function GET(
     // v2.13.0 (Ф6): normalizeSessionSpeeds (AUDIT B-4) — как в /stats и /events.
     // Сырое поле speed бывает битым (запись с пиком 166 км/ч имела speed ≤ 20 км/ч) —
     // весь трек окрашивался в «0–20». Теперь скорость согласована с геометрией.
-    const rawNorm = session.gpsPoints.map((p) => ({
+    const rawNorm = points.map((p) => ({
       lat: p.lat,
       lon: p.lon,
       timestamp: Number(p.timestamp),

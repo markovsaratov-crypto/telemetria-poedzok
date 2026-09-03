@@ -268,7 +268,13 @@ export async function canonicalGroupPolyline(
     });
     if (jobRes.rows.length > 0) {
       try {
-        const parsed = JSON.parse(String(jobRes.rows[0]));
+        // v2.18.0 (P1): парсим ПОЛЕ result, а не объект Row. `String(row)` для
+        // объекта libsql-строки = "[object Object]" → JSON.parse всегда бросал
+        // → catch → канонический полилайн ВСЕГДА брался из fallback-геометрии
+        // первой сессии: §10.6-дизайн (TrafficJob-сегменты + планная скорость по
+        // сегментам) был мёртвым кодом с момента написания.
+        const raw = (jobRes.rows[0] as Record<string, unknown>).result;
+        const parsed = JSON.parse(String(raw));
         if (Array.isArray(parsed.segments)) {
           polyline = parsed.segments.map((sg: { lat: number; lon: number }) => ({ lat: Number(sg.lat), lon: Number(sg.lon) }));
         }
@@ -478,7 +484,14 @@ export async function listRouteGroups(sinceIso?: string | null): Promise<RouteGr
 
   // Детали (ActiveTrip-агрегаты) — только для групп ≤ 12 сессий, чтобы endpoint оставался лёгким.
   // v2.12.0 (D-7): параллельно — раньше последовательный await в цикле.
-  const detailGroups = groups.filter((g) => g.sessionIds.length > 0 && g.sessionIds.length <= 12);
+  // v2.18.0 (P1): КАП на число деталей (MAX_DETAIL_GROUPS = 8, как в
+  // heavy-segments): без него список из сотен групп разворачивался в
+  // НЕОГРАНИЧЕННЫЙ Promise.all, каждый элемент — N+1 точек по сессиям →
+  // 1000+ последовательных HTTPS-раундтрипов к Turso и неограниченная
+  // память ответа. Список групп отдаётся целиком, детали — топ по freshности.
+  const detailGroups = groups
+    .filter((g) => g.sessionIds.length > 0 && g.sessionIds.length <= 12)
+    .slice(0, 8);
   const details = await Promise.all(
     detailGroups.map(async (info) => {
       const sessions = await loadGroupSessions(info.routeHash, sinceIso);
@@ -521,37 +534,7 @@ export async function listRouteGroups(sinceIso?: string | null): Promise<RouteGr
   return groups;
 }
 
-// === v2.9.1: GPX-экспорт канонического маршрута группы ===
-// Возвращает GPX 1.1-трек канонического полилайна группы (TrafficJob-сегменты либо активная
-// часть первой сессии). Имя трека — routeHash, в desc — агрегаты группы.
-export async function groupRouteGpx(routeHash: string): Promise<string | null> {
-  const sessions = await loadGroupSessions(routeHash);
-  if (sessions.length === 0) return null;
-  const { polyline } = await canonicalGroupPolyline(sessions);
-  if (polyline.length < 2) return null;
-
-  const stats = routeDurationStats(sessions);
-  const avgKm = sessions.reduce((a, s) => a + s.distanceM, 0) / sessions.length / 1000;
-  const name = `route ${routeHash}`;
-  const desc = `Канонический маршрут группы routeHash ${routeHash}: ${sessions.length} ${pluralRu(sessions.length, ["поездка", "поездки", "поездок"])}, ` +
-    `ср. ActiveDuration ${stats.avg ?? "—"}с, ср. дистанция ${avgKm.toFixed(1)} км (методология §10.0)`;
-  const trkpts = polyline
-    .map((p) => `      <trkpt lat="${p.lat.toFixed(6)}" lon="${p.lon.toFixed(6)}"></trkpt>`)
-    .join("\n");
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="Телематика Маркова" xmlns="http://www.topografix.com/GPX/1/1">
-  <metadata>
-    <name>${name}</name>
-    <desc>${desc}</desc>
-  </metadata>
-  <trk>
-    <name>${name}</name>
-    <trkseg>
-${trkpts}
-    </trkseg>
-  </trk>
-</gpx>`;
-}
+// v2.18.0: groupRouteGpx УДАЛЁН — обслуживал /api/routes/[id]/gpx, удалённый в v2.16.0 (0 потребителей).
 
 // === Сравнение конкретной сессии с её группой (route-comparison endpoint) ===
 export interface RouteComparison {

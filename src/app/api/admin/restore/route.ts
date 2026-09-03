@@ -20,8 +20,9 @@
 //   - In sandbox libsql with file: URL, no Prisma $disconnect is required —
 //     each libsql.execute is atomic and uses the same on-disk SQLite file.
 import { NextRequest } from "next/server";
+import { z } from "zod";
 import { db, libsql } from "@/lib/db";
-import { authorizeRequest } from "@/lib/auth";
+import { authorizeRequest, getUserIdFromRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { writeAudit } from "@/lib/audit";
@@ -129,14 +130,19 @@ export async function POST(request: NextRequest) {
     const auth = await authorizeRequest(request, "admin");
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
+    // v2.18.0: zod-валидация backupId (был голый as-каст: number/объект
+    // проваливались в db.backupJob.findUnique и падали 500 вместо честного 400)
     const body = await request.json().catch(() => ({}));
-    const { backupId } = body as { backupId?: string };
-    if (!backupId) return json({ error: "backupId required" }, 400, { "X-Request-Id": requestId });
+    const parsed = z.object({ backupId: z.string().min(1) }).safeParse(body);
+    if (!parsed.success) {
+      return json({ error: "backupId required (string)" }, 400, { "X-Request-Id": requestId });
+    }
+    const backupId = parsed.data.backupId;
 
     // 2) Find BackupJob
     const job = await db.backupJob.findUnique({ where: { id: backupId } });
     if (!job) return json({ error: "Backup not found" }, 404, { "X-Request-Id": requestId });
-    const filePath = job.filePath;
+    const filePath = job.filePath == null ? "" : String(job.filePath); // v2.18.0: типизированный db
     if (!filePath) {
       return json({ error: "Backup has no filePath (not yet completed)" }, 400, { "X-Request-Id": requestId });
     }
@@ -149,7 +155,7 @@ export async function POST(request: NextRequest) {
     // Раньше значение из BackupJob.filePath читалось с диска как есть —
     // скомпрометированная строка в БД давала чтение произвольного файла.
     const BACKUP_STORAGE_DIR = "/tmp/backups";
-    const resolvedPath = path.resolve(BACKUP_STORAGE_DIR, path.isAbsolute(filePath) ? path.basename(filePath) : filePath);
+    const resolvedPath = path.resolve(BACKUP_STORAGE_DIR, path.isAbsolute(filePath) ? path.basename(filePath) : filePath); // filePath: String(...) — ниже по потоку (типизированный db)
     if (!resolvedPath.startsWith(BACKUP_STORAGE_DIR + path.sep) && resolvedPath !== BACKUP_STORAGE_DIR) {
       return json({ error: "Backup path escapes storage dir" }, 400, { "X-Request-Id": requestId });
     }
@@ -172,7 +178,7 @@ export async function POST(request: NextRequest) {
           targetId: backupId,
           targetType: "BackupJob",
           actorType: auth.via === "cookie" ? "user" : "system",
-          actorId: auth.via === "cookie" ? "owner" : "admin-token",
+          actorId: (await getUserIdFromRequest(request)) ?? (auth.via === "cookie" ? "owner" : "admin-token"), // v2.18.0: честная идентификация
           metadata: { checksumVerified: false, expected: job.checksum, actual },
         });
         return json({ error: "Checksum mismatch — backup file is corrupt", backupId, expected: job.checksum, actual }, 422, { "X-Request-Id": requestId });

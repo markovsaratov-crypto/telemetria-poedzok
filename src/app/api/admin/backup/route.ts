@@ -2,21 +2,10 @@
 // ИЛИ (v2.11.0, АУДИТ C-3) Bearer CRON_SECRET — только для backup-кронов Render.
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { authorizeRequest, type AuthResult } from "@/lib/auth";
+import { authorizeAdminOrCron, getUserIdFromRequest } from "@/lib/auth";
 import { runBackup, listBackups } from "@/lib/backup";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-
-// v2.11.0 (АУДИТ C-3): backup-крон render.yaml шлёт CRON_SECRET, а раньше требовался
-// ADMIN_TOKEN — ежедневные автобэкапы падали 401 (см. proxy.ts — гейт пропускает).
-async function authorizeAdminOrCron(request: NextRequest): Promise<AuthResult> {
-  let auth = await authorizeRequest(request, "admin");
-  if (!auth.ok) {
-    const cron = await authorizeRequest(request, "cron");
-    if (cron.ok) auth = { ok: true, via: "bearer", userId: null, role: "cron" };
-  }
-  return auth;
-}
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -24,7 +13,11 @@ export async function POST(request: NextRequest) {
     const auth = await authorizeAdminOrCron(request);
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
-    const result = await runBackup(auth.role === "cron" ? "backup-cron" : auth.via === "cookie" ? "owner" : "admin-token");
+    // v2.18.0: actorId — честная идентификация (userId при cookie-пользователе;
+    // раньше любой cookie-админ записывался как легаси-"owner" — аудит не различал людей)
+    const userId = await getUserIdFromRequest(request);
+    const actorId = auth.role === "cron" ? "backup-cron" : userId ?? (auth.via === "cookie" ? "owner" : "admin-token");
+    const result = await runBackup(actorId);
     return json({ backupId: result.backupId, status: "completed", checksum: result.checksum, fileSize: result.fileSize, tableCounts: result.tableCounts }, 201, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Backup error", { requestId, error: err instanceof Error ? err.message : String(err) });

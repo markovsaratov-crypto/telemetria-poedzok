@@ -973,11 +973,18 @@ export function computeMethodologyMetrics(
   points: MethodologyPoint[],
   distanceM: number,
   durationSec: number,
-  ecoBaselines?: EcoScoreBaselines
+  ecoBaselines?: EcoScoreBaselines,
+  // v2.18.0 (перф): опционально ПРЕДВЫЧИСЛЕННЫЕ state machine/activeTrip.
+  // computeSessionStats уже считает их для активного окна/дистанции, а затем
+  // вызывал computeMethodologyMetrics, который ПЕРЕСЧИТЫВАЛ то же самое заново —
+  // двойная цена самого тяжёлого шага конвейера (гаверсинусы на интервал +
+  // медиан-сглаживание) на каждую сессию, ×50 в /api/stats/batch.
+  precomputed?: { motion: MotionResult; activeTrip: ActiveTrip }
 ): MethodologyMetrics {
   // Сначала state machine (§4.6) — даёт states[] для всех остальных метрик
-  const motion = computeMovingTime(points);
-  const activeTrip = computeActiveTrip(points, motion);
+  // (v2.18.0: переиспользуется предвычисленное, если передано — входы идентичны)
+  const motion = precomputed?.motion ?? computeMovingTime(points);
+  const activeTrip = precomputed?.activeTrip ?? computeActiveTrip(points, motion);
 
   // Group 2 (filter by active part)
   const sp = speedP50(points, activeTrip);

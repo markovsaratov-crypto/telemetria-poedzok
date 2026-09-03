@@ -24,7 +24,10 @@ export const zIngestBody = z.object({
 
 export const zLoginBody = z.object({
   email: z.string().email().optional(),
-  password: z.string().min(1),
+  // v2.18.0: max(256) — request.json() буферизует тело без ограничения (прокси
+  // проверяет content-length, chunked-запросы пропускает), неаутентифицированный
+  // запрос мог прислать пароль в десятки МБ → Buffer.from в safeEqual.
+  password: z.string().min(1).max(256),
 });
 
 export const zRegisterBody = z.object({
@@ -42,8 +45,11 @@ export const zExportBody = z.object({
 export const zSessionsQuery = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
-  olderThan: z.string().optional(),
-  before: z.string().optional(),
+  // v2.18.0: даты валидируются — невалидная строка раньше доходила до
+  // new Date("garbage") → Invalid Date → toTs().toISOString() → RangeError → 500
+  // вместо честного 400 на ошибку клиента.
+  olderThan: z.string().refine((v) => !Number.isNaN(Date.parse(v)), "invalid date").optional(),
+  before: z.string().refine((v) => !Number.isNaN(Date.parse(v)), "invalid date").optional(),
   routeId: z.string().optional(),
   status: z.string().optional(),
   deviceId: z.string().optional(),

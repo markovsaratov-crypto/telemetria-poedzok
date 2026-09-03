@@ -46,8 +46,15 @@ export async function GET(
       return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     }
 
-    const rawPoints = session.gpsPoints.map((p) => ({
-      ...p,
+    // v2.18.0: типизированный db — gpsPoints приходит unknown, приводим к строке интерфейса
+    const gpsPoints = (session.gpsPoints ?? []) as Array<Record<string, unknown>>;
+    const rawPoints = gpsPoints.map((p) => ({
+      lat: Number(p.lat),
+      lon: Number(p.lon),
+      speed: p.speed == null ? null : Number(p.speed),
+      altitude: p.altitude == null ? null : Number(p.altitude),
+      accuracy: p.accuracy == null ? null : Number(p.accuracy),
+      bearing: p.bearing == null ? null : Number(p.bearing),
       timestamp: Number(p.timestamp),
     }));
 
@@ -62,7 +69,13 @@ export async function GET(
     // v2.10.0 R6.1: corpus-калибровка EcoScore (§7.3) — кэш 5 мин, общий с батч-роутом
     const ecoBaselines = await getCorpusEcoBaselines();
     const result = computeSessionStats(
-      { id, startTime: session.startTime, endTime: session.endTime, routeHash: session.routeHash, topologyHash: session.topologyHash },
+      {
+        id,
+        startTime: String(session.startTime ?? ""),
+        endTime: session.endTime == null ? null : String(session.endTime),
+        routeHash: session.routeHash == null ? null : String(session.routeHash),
+        topologyHash: session.topologyHash == null ? null : String(session.topologyHash),
+      },
       rawPoints,
       ecoBaselines
     );

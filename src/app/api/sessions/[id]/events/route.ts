@@ -49,7 +49,9 @@ export async function GET(
       return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     }
 
-    if (session.gpsPoints.length < 5) {
+    // v2.18.0: типизированный db — gpsPoints unknown
+    const gpsPts = (session.gpsPoints ?? []) as Array<Record<string, unknown>>;
+    if (gpsPts.length < 5) {
       return json(
         { sessionId: id, maneuvers: [], harshEvents: [], gg: { points: [], rings: [0.2, 0.4, 0.6] }, summary: { accelerationRMS: 0, jerkRMS: 0, harshBraking: 0, harshAcceleration: 0, maneuvers: 0 } },
         200,
@@ -60,13 +62,13 @@ export async function GET(
     // v2.12.0 (D-6): тот же конвейер подготовки скоростей, что и в /stats —
     // normalizeSessionSpeeds (AUDIT B-4) + 3-точечная медиана против GPS-выбросов.
     // Непригодные/отсутствующие скорости → 0 (как раньше «?? 0»), спайки гасятся медианой.
-    const rawPoints = session.gpsPoints.map((p) => ({
-      lat: p.lat,
-      lon: p.lon,
+    const rawPoints = gpsPts.map((p) => ({
+      lat: Number(p.lat),
+      lon: Number(p.lon),
       timestamp: Number(p.timestamp),
-      speed: p.speed,
-      bearing: p.bearing,
-      accuracy: p.accuracy,
+      speed: p.speed == null ? null : Number(p.speed),
+      bearing: p.bearing == null ? null : Number(p.bearing),
+      accuracy: p.accuracy == null ? null : Number(p.accuracy),
       altitude: null,
     }));
     const points = normalizeSessionSpeeds(rawPoints);

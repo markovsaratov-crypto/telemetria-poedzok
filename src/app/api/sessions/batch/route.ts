@@ -51,13 +51,16 @@ export async function POST(request: NextRequest) {
     });
 
     // Number(timestamp) для JSON-сериализации (BigInt)
-    const result = sessions.map((s) => ({
-      ...s,
-      gpsPoints: s.gpsPoints.map((p) => ({
-        ...p,
-        timestamp: Number(p.timestamp),
-      })),
-    }));
+    const result = sessions.map((s) => {
+      const pts = (s.gpsPoints ?? []) as Array<Record<string, unknown>>; // v2.18.0: типизированный db
+      return {
+        ...s,
+        gpsPoints: pts.map((p) => ({
+          ...p,
+          timestamp: Number(p.timestamp),
+        })),
+      };
+    });
 
     return json({ sessions: result }, 200, { "X-Request-Id": requestId });
   } catch (err) {

@@ -50,6 +50,12 @@ export async function POST(request: NextRequest) {
     if (!file || !(file instanceof File)) {
       return json({ error: "file required (multipart/form-data)" }, 400, { "X-Request-Id": requestId });
     }
+    // v2.18.0: лимит размера файла ДО чтения в память (прокси резал честные CSV
+    // на дефолтных 256 КБ — полный день 1 Гц ≈ 5 МБ; здесь — явный бизнес-лимит).
+    const MAX_CSV_BYTES = 20 * 1024 * 1024; // 20 МБ
+    if (file.size > MAX_CSV_BYTES) {
+      return json({ error: `CSV file too large (${file.size} > ${MAX_CSV_BYTES} bytes)` }, 413, { "X-Request-Id": requestId });
+    }
     const text = await file.text();
     const { headers, rows } = parseCSV(text);
 
@@ -73,6 +79,12 @@ export async function POST(request: NextRequest) {
     }
 
     // Группируем по deviceId (или по clientId если есть)
+    // v2.18.0 (P1): fallback-clientId — ОДИН на весь файл, а не randomUUID()
+    // на каждую строку. Раньше CSV без колонки client_id (обычный случай) рвал
+    // каждую строку в СВОЮ сессию через `${deviceId}:${randomUUID()}` — тысячи
+    // одно-точечных сессий, каждой — TrafficJob. Комментарий выше утверждал
+    // обратное («группируем по deviceId»); ZIP-импорт делал это правильно.
+    const fallbackClientId = randomUUID();
     const groups = new Map<string, { deviceId: string; clientId: string; deviceName?: string; points: { lat: number; lon: number; speed?: number; altitude?: number; accuracy?: number; timestamp: number; bearing?: number }[] }>();
 
     for (const row of rows) {
@@ -80,7 +92,7 @@ export async function POST(request: NextRequest) {
       const lon = Number(row[iLon]);
       if (isNaN(lat) || isNaN(lon)) continue;
       const deviceId = iDevice >= 0 ? row[iDevice] || "csv-import" : "csv-import";
-      const clientId = iClient >= 0 && row[iClient] ? row[iClient] : randomUUID();
+      const clientId = iClient >= 0 && row[iClient] ? row[iClient] : fallbackClientId;
       const key = `${deviceId}:${clientId}`;
       if (!groups.has(key)) {
         groups.set(key, { deviceId, clientId, deviceName: iDeviceName >= 0 ? row[iDeviceName] : undefined, points: [] });
@@ -94,7 +106,10 @@ export async function POST(request: NextRequest) {
         altitude: iAlt >= 0 ? finiteOrUndefined(row[iAlt]) : undefined,
         accuracy: iAcc >= 0 ? finiteOrUndefined(row[iAcc]) : undefined,
         timestamp: iTs >= 0 ? (parseTimestamp(row[iTs]) ?? Date.now()) : Date.now(),
-        bearing: iBearing >= 0 ? Number(row[iBearing]) || undefined : undefined,
+        // v2.18.0: bearing — finiteOrUndefined, как speed/alt/acc (АУДИТ C-22
+        // для соседних полей): «Number(x) || undefined» превращал ЛЕГИТИМНЫЙ
+        // bearing 0 (север) в NULL.
+        bearing: iBearing >= 0 ? finiteOrUndefined(row[iBearing]) : undefined,
       });
     }
 
@@ -134,13 +149,13 @@ export async function POST(request: NextRequest) {
               })),
             });
             const job = await tx.trafficJob.create({
-              data: { sessionId: s.id, status: "pending" },
+              data: { sessionId: String(s.id), status: "pending" },
             });
-            await tx.session.update({ where: { id: s.id }, data: { trafficJobId: job.id } });
+            await tx.session.update({ where: { id: String(s.id) }, data: { trafficJobId: String(job.id) } });
             return s;
           });
         });
-        imported.push({ id: session.id, deviceId: session.deviceId, points: g.points.length });
+        imported.push({ id: String(session.id), deviceId: String(session.deviceId), points: g.points.length });
         inc("ingest_total", "Total ingest requests", 1, "csv");
       } catch (err) {
         errors.push({ deviceId: g.deviceId, error: err instanceof Error ? err.message : String(err) });

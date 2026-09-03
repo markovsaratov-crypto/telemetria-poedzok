@@ -14,8 +14,8 @@ export async function findExistingSession(deviceId: string, clientId: string) {
   // повторный пакет создаёт НОВУЮ сессию (§6.3), история сохраняется.
   if (existing.deletedAt) {
     await db.session.update({
-      where: { id: existing.id },
-      data: { clientId: `${clientId}#deleted#${String(existing.id).slice(0, 8)}` },
+      where: { id: String(existing.id) }, // v2.18.0: типизированный db
+      data: { clientId: `${clientId}#deleted#${String(existing.id).slice(0, 8)}` }, // existing.id: String — типизированный db
     });
     return null;
   }

@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
   let dbError = "";
   try {
     // Use model count instead of $queryRaw (libsql adapter compatibility)
-    await db.session.count({ where: { deletedAt: null }, take: 1 });
+    await db.session.count({ where: { deletedAt: null } }); // v2.18.0: take не входит в сигнатуру count
   } catch (e) {
     dbStatus = "degraded";
     dbError = e instanceof Error ? e.message.slice(0, 100) : String(e).slice(0, 100);

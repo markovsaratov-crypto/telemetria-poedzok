@@ -90,7 +90,7 @@ export interface StatsResponse {
   pendingJobs: number;
   todaySessions: number;
   totalPayloadBytes: number;
-  perDay: { date: string; count: number; points: number; durationSec: number }[];
+  // v2.18.0: perDay удалён вместе с серверным полем (0 потребителей)
   heatmapSessions: { startTime: string; pointCount: number }[];
   capacity: { targetLoadRpm: number; rateLimitMaxIngest: number; headroom: number };
   version: string;
@@ -587,7 +587,8 @@ export function usePollExport(jobId: string | null) {
     refetchInterval: (query) => {
       const data = query.state.data;
       if (!data) return 1500;
-      if (data.status === "completed" || data.status === "failed") return false;
+      // v2.18.0: "dead" — тоже терминальное (страховка: сервер мапит dead→failed)
+      if (data.status === "completed" || data.status === "failed" || data.status === "dead") return false;
       return 1500;
     },
   });
@@ -997,21 +998,5 @@ export function useRouteTrend(routeHash: string | null) {
   });
 }
 
-export interface RouteHotspotsData {
-  routeId: string;
-  groupSize: number;
-  totalSegments: number;
-  hotspotCount: number;
-  hotspots: {
-    segmentId: string;
-    p75: number;
-    p25: number;
-    worstSeverity: number;
-    congestedSessionCount: number;
-    totalSessionCount: number;
-    a?: { lat: number; lon: number } | null;
-    b?: { lat: number; lon: number } | null;
-  }[];
-  polylineSample: { lat: number; lon: number }[];
-}
+// v2.18.0: RouteHotspotsData удалён — типировал удалённый /api/routes/[id]/hotspots (v2.16.0)
 

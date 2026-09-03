@@ -11,7 +11,7 @@ import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { writeAudit } from "@/lib/audit";
 import { zShareBody } from "@/lib/validation";
-import { makeShareToken, verifyShareToken, sharePayload, SHARE_DEFAULT_TTL_HOURS, SHARE_MAX_TTL_HOURS } from "@/lib/share";
+import { makeShareToken, SHARE_DEFAULT_TTL_HOURS, SHARE_MAX_TTL_HOURS } from "@/lib/share";
 
 export async function POST(
   request: NextRequest,
@@ -71,28 +71,7 @@ export async function POST(
   }
 }
 
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
-  try {
-    const { id } = await params;
-    const url = new URL(request.url);
-    const token = url.searchParams.get("token");
-
-    if (!token) {
-      return json({ error: "token required" }, 400, { "X-Request-Id": requestId });
-    }
-
-    const verified = verifyShareToken(token);
-    if (!verified || verified.sessionId !== id) {
-      return json({ error: "Invalid or expired token" }, 403, { "X-Request-Id": requestId });
-    }
-
-    return await sharePayload(id, verified.expiresAt, requestId);
-  } catch (err) {
-    logger.error("Share get error", { requestId, error: err instanceof Error ? err.message : String(err) });
-    return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });
-  }
-}
+// v2.18.0: GET ?token= УДАЛЁН — публичное чтение всегда шло через
+// /api/share?token= (страница /shared/[token] резолвит сессию сама),
+// этого потребителя не было, а каждый лишний публичный роут — лишняя
+// атакующая поверхность. POST (создание ссылки) живёт как раньше.

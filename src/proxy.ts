@@ -30,9 +30,9 @@ import { sessionCookieName } from "@/lib/cookie-name"; // P0-5: __Host- преф
 const SESSION_COOKIE_NAME = sessionCookieName();
 
 // Эндпоинты без авторизации
-const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics", "/api/share"]; // P1-9: /api/share — публичный по спеке
-// GET /api/sessions/<id>/share?token= — публичный доступ по спеке (матрица §7); P1-9
-const SHARE_GET_RE = /^\/api\/sessions\/[^/]+\/share$/;
+const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics", "/api/share"]; // P1-9: /api/share — публичный по спеке (токен проверяет сам роут, v2.18.0 — уже честно await-ится)
+// v2.18.0: мёртвый публичный GET /api/sessions/[id]/share удалён вместе со своим регексом:
+// страница /shared/[token] читает только /api/share?token=, других потребителей не было.
 // v2.14.1→2.14.2: точные GET-чтения UI (статы/events/track одной записи).
 const SESSION_STATS_RE = /^\/api\/sessions\/[^/]+\/stats$/;
 const SESSION_EVENTS_RE = /^\/api\/sessions\/[^/]+\/events$/;
@@ -74,10 +74,7 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
         SESSION_STATS_RE.test(pathname) ||
         SESSION_EVENTS_RE.test(pathname) ||
         SESSION_TRACK_RE.test(pathname) ||
-        // v2.15.0: батя-статс — дешёвый GET с 5-мин кэшем (первый холодный проход
-        // сканирует точки, но не чаще раза в 5 минут)
-        pathname === "/api/stats/batya" ||
-        // v2.17.0: батч-статс — пакует до 50 per-session запросов в один GET
+        // v2.18.0: батч-статс — пакует до 50 per-session запросов в один GET
         // (замена «шторма» /api/sessions/[id]/stats при открытии «Поездок»)
         pathname === "/api/stats/batch" ||
         pathname === "/api/geocode/reverse")) ||
@@ -125,6 +122,20 @@ function bearerToken(auth: string): string | null {
   return m ? m[1].trim() : null;
 }
 
+// v2.18.0: нормализация пути для label метрик http_requests_total.
+// Раньше label = сырой pathname → /api/sessions/<uuid>/stats давал
+// БЕСКОНЕЧНЫЙ рост уникальных label (каждый id = новая запись в Map навечно)
+// — утечка памяти + раздутие /api/metrics. Заменяем uuid-подобные и длинные
+// сегменты на ":id" — кардинальность ограничена фактическим набором роутов.
+function routeLabel(pathname: string): string {
+  return pathname
+    .split("/")
+    .map((seg) =>
+      !seg || seg.length <= 16 ? seg : /^[0-9a-f-]+$/i.test(seg) ? ":id" : ":param"
+    )
+    .join("/");
+}
+
 export async function proxy(request: NextRequest): Promise<NextResponse> {
   const requestId = crypto.randomUUID();
   const start = Date.now();
@@ -132,15 +143,17 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
 
   try {
     // 0. payload-size guard (до чтения body, §2.4)
-    // Skip for ZIP imports (large files expected)
-    const isZipImport = pathname === "/api/import/zip";
+    // Skip for file-upload import routes (large files expected; актуальные лимиты — в самих роутах)
+    // v2.18.0: /api/import/csv тоже exempt — раньше честная загрузка CSV резалась
+    // дефолтными 256 КБ (полный день 1 Гц ≈ 5 МБ), а роут при этом был сломан.
+    const isLargeUpload = pathname === "/api/import/zip" || pathname === "/api/import/csv";
     // v2.11.0 (АУДИТ C-15): Number("") = 0, Number("abc") = NaN — старая проверка
     // `cl > maxBytes` пропускала NaN и «0» (chunked-encoding без content-length).
     // Теперь: нечисловой/отсутствующий header не считается «малым» — пропускаем
     // валидацию здесь (роуты-получатели с JSON-body имеют собственные лимиты чтения).
     const clRaw = request.headers.get("content-length");
     const cl = clRaw != null && clRaw.trim() !== "" && Number.isFinite(Number(clRaw)) ? Number(clRaw) : null;
-    const maxBytes = isZipImport ? 100 * 1024 * 1024 : env().MAX_PAYLOAD_BYTES; // 100MB for ZIP, 256KB default
+    const maxBytes = isLargeUpload ? 100 * 1024 * 1024 : env().MAX_PAYLOAD_BYTES; // 100MB для импортов, 256KB дефолт
     if (cl != null && cl > maxBytes) {
       return json({ error: "Payload too large", limit: maxBytes }, 413, { "X-Request-Id": requestId });
     }
@@ -176,9 +189,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
 
     // 3. Auth (кроме public) — P0-3: обязательна проверка ЗНАЧЕНИЙ токенов (timing-safe),
     // а не только формата: ранее любой Bearer ≥32 символов проходил гейт.
-    const isPublic = PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"))
-      // P1-9: GET share по токену — публичный (сам роут проверяет подпись и срок токена)
-      || (SHARE_GET_RE.test(pathname) && request.method === "GET");
+    const isPublic = PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"));
     if (!isPublic && pathname.startsWith("/api/")) {
       const authHeader = request.headers.get("authorization") || "";
       const cookie = request.headers.get("cookie") || "";
@@ -246,7 +257,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     setSecurityHeaders(response);
     response.headers.set("X-Request-Id", requestId);
 
-    inc("http_requests_total", "Total HTTP requests", 1, pathname);
+    inc("http_requests_total", "Total HTTP requests", 1, routeLabel(pathname));
     return response;
   } catch (err) {
     logger.error("Middleware unexpected error", {

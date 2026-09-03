@@ -15,7 +15,8 @@ export async function GET(request: NextRequest) {
       return json({ error: "token required" }, 400, { "X-Request-Id": requestId });
     }
 
-    const verified = verifyShareToken(token);
+    // v2.18.0: verifyShareToken стал async (внутри — await timing-safe сверки)
+    const verified = await verifyShareToken(token);
     if (!verified) {
       return json({ error: "Invalid or expired token" }, 403, { "X-Request-Id": requestId });
     }

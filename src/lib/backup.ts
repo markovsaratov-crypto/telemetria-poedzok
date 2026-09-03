@@ -2,6 +2,7 @@
 import { db, libsql } from "./db";
 import { env } from "./env";
 import { writeAudit } from "./audit";
+import { logger } from "./logger"; // v2.18.0: изоляция сбоя статуса BackupJob
 import { promises as fs } from "fs";
 import { createHash } from "crypto";
 import path from "path";
@@ -49,7 +50,11 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
       version: env().APP_VERSION,
       timestamp: new Date().toISOString(),
       ...rows,
-      // User: без секретов (passwordHash) — только идентификационные поля
+      // User: без секретов (passwordHash) — только идентификационные поля.
+      // v2.18.0 (документация): пользователи в дампе — ИНФОРМАЦИОННЫЕ (для
+      // restore они не восстанавливаются: TABLES/ALLOWED_COLUMNS в restore-роуте
+      // сознательно не содержат User — восстановление паролей без passwordHash
+      // создало бы мёртвые аккаунты; ownerId в сессиях остаются валидными id).
       users: (await libsql.execute("SELECT id, email, role, createdAt, updatedAt FROM User")).rows,
     };
     tableCounts.User = dump.users.length;
@@ -80,7 +85,7 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
     }
 
     await db.backupJob.update({
-      where: { id: job.id },
+      where: { id: String(job.id) },
       data: {
         status: "completed",
         filePath,
@@ -92,23 +97,48 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
 
     await writeAudit({
       action: "backup.create",
-      targetId: job.id,
+      targetId: String(job.id),
       targetType: "BackupJob",
       actorType: actorId ? "user" : "backup-cron",
       actorId,
       metadata: { filePath, fileSize, checksum, verified, tableCounts },
     });
 
-    return { backupId: job.id, filePath, checksum, fileSize, tableCounts };
+    return { backupId: String(job.id), filePath, checksum, fileSize, tableCounts };
   } catch (err) {
-    await db.backupJob.update({
-      where: { id: job.id },
-      data: {
-        status: "failed",
-        error: err instanceof Error ? err.message : String(err),
-        completedAt: new Date(),
-      },
-    });
+    // v2.18.0: изоляция записи статуса — если упала сама БД (частая причина
+    // сбоя бэкапа), этот UPDATE падал вторым и ЗАМЕНЯЛ исходную ошибку в стеке,
+    // а BackupJob оставался «running» навсегда — что ещё и ломало алерт-правило
+    // backup_failure (3 последние статусы: вечный running подавал «3×failed»).
+    // Аудит-запись о провале — best-effort (не роняем исходную ошибку).
+    const msg = err instanceof Error ? err.message : String(err);
+    try {
+      await db.backupJob.update({
+        where: { id: String(job.id) },
+        data: {
+          status: "failed",
+          error: msg,
+          completedAt: new Date(),
+        },
+      });
+    } catch (markErr) {
+      logger.error("backup: не удалось пометить BackupJob как failed (исходная ошибка сохранена)", {
+        jobId: String(job.id),
+        markError: markErr instanceof Error ? markErr.message : String(markErr),
+      });
+    }
+    try {
+      await writeAudit({
+        action: "backup.failed",
+        targetId: String(job.id),
+        targetType: "BackupJob",
+        actorType: actorId ? "user" : "backup-cron",
+        actorId,
+        metadata: { error: msg.slice(0, 500) },
+      });
+    } catch {
+      // аудит провала не должен затирать исходную ошибку
+    }
     throw err;
   }
 }

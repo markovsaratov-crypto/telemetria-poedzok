@@ -31,16 +31,19 @@ export async function GET(
       return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     }
 
-    const trafficJob = session.trafficJobs[0];
+    // v2.18.0: типизированный db — include-поля unknown
+    const trafficJobs = (session.trafficJobs ?? []) as Array<Record<string, unknown>>;
+    const gpsPts = (session.gpsPoints ?? []) as Array<Record<string, unknown>>;
+    const trafficJob = trafficJobs[0];
     // v2.16.0 (B3): безопасный парс результата джоба — одна битая строка TrafficJob.result
     // больше НЕ роняет GET валидной сессии в 500 (паттерн как в sessions/export)
     let traffic: Record<string, unknown>;
     try {
-      traffic = trafficJob?.result ? JSON.parse(trafficJob.result) : {};
+      traffic = trafficJob?.result ? JSON.parse(String(trafficJob.result)) : {}; // v2.18.0: типизированный db
     } catch {
       traffic = {};
     }
-    if (!traffic.status) traffic.status = trafficJob?.status ?? "pending";
+    if (!traffic.status) traffic.status = trafficJob?.status == null ? "pending" : String(trafficJob.status);
     if (traffic.trafficFetched === undefined) traffic.trafficFetched = false;
 
     return json(
@@ -57,7 +60,7 @@ export async function GET(
         traffic,
         notes: session.notes,
         tags: session.tags,
-        points: session.gpsPoints.map((p) => ({
+        points: gpsPts.map((p) => ({
           lat: p.lat,
           lon: p.lon,
           speed: p.speed,

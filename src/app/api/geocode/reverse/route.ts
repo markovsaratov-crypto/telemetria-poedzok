@@ -5,7 +5,7 @@ import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { setSetting, getSetting } from "@/lib/settings";
+import { setSetting, getSettingDirect } from "@/lib/settings"; // v2.18.0: точечный read (без full-table refresh)
 
 export const dynamic = "force-dynamic";
 
@@ -68,7 +68,7 @@ export async function GET(request: NextRequest) {
 
     const key = cacheKey(lat, lon);
     // Check cache via Setting table (cached for 30 days).
-    const cached = await getSetting(key);
+    const cached = await getSettingDirect(key); // v2.18.0: geocode-кэш не грузит всю таблицу Setting
     if (cached) {
       // v2.16.0 (B11): протухшая запись (>30 дней) — НЕ хит, обновляем живым запросом
       let expired = false;

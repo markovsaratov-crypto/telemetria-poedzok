@@ -39,7 +39,9 @@ export async function GET(request: NextRequest) {
       where,
       orderBy: { startTime: "desc" },
       take: q.limit + 1,
-      ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
+      // v2.18.0: skip:1 УДАЛЁН — keyset-предикат db-обёртки уже исключает курсор;
+      // двойной скип выбрасывал первую строку после курсора (см. db.ts)
+      ...(q.cursor ? { cursor: { id: q.cursor } } : {}),
       select: {
         id: true,
         deviceId: true,
@@ -62,7 +64,7 @@ export async function GET(request: NextRequest) {
     // двумя grouped-запросами по всем id страницы (не N+1).
     if (items.length > 0) {
       try {
-        const ids = items.map((s) => s.id);
+        const ids = items.map((s) => String(s.id)); // v2.18.0: типизированный db + InValue[]
         const ph = ids.map(() => "?").join(",");
         const [cntRes, endRes] = await Promise.all([
           libsql.execute({
@@ -89,10 +91,10 @@ export async function GET(request: NextRequest) {
           endMap.set(String(r.sessionId), { lat: Number(r.lat), lon: Number(r.lon) });
         }
         items = items.map((s) => {
-          const end = endMap.get(s.id);
+          const end = endMap.get(String(s.id));
           return {
             ...s,
-            pointCountActual: cntMap.get(s.id) ?? 0,
+            pointCountActual: cntMap.get(String(s.id)) ?? 0,
             endLat: end ? end.lat : null,
             endLon: end ? end.lon : null,
           };

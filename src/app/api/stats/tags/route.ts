@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
     const tagCounts = new Map<string, number>();
     for (const s of sessions) {
       if (!s.tags) continue;
-      const tags = s.tags.split(",").map((t) => t.trim()).filter(Boolean);
+      const tags = String(s.tags).split(",").map((t) => t.trim()).filter(Boolean); // v2.18.0: типизированный db
       for (const t of tags) {
         tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
       }

@@ -248,10 +248,16 @@ export async function authorizeRequest(
   if (scope === "api" || scope === "admin") {
     const session = await verifySessionCookieFromRequest(request);
     if (session.ok) {
+      // v2.18.0 (P1): роль — из СВЕЖЕЙ строки User, а не из подписи cookie.
+      // verifySessionCookieFromRequest уже гоняет запрос в БД («revoked/changed
+      // role is reflected»), но authorizeRequest читал payload.role — роль на
+      // момент ВЫДАЧИ cookie (до 24 ч назад): разжалованный admin сохранял
+      // доступ ко всем /api/admin/* до истечения cookie. Удаление пользователя
+      // продолжало работать (там user == null → 401) — отставала только роль.
       let role: string;
       let userId: string | null;
       if ("userId" in session.payload) {
-        role = session.payload.role;
+        role = session.user?.role ?? session.payload.role;
         userId = session.payload.userId;
       } else {
         role = "owner";
@@ -269,5 +275,18 @@ export async function authorizeRequest(
 
 // v2.16.0: requireUser/requireAdmin удалены — 0 потребителей (все роуты зовут
 // authorizeRequest напрямую).
+
+// v2.18.0: ЕДИНЫЙ authorizeAdminOrCron (v2.11.0 АУДИТ C-3) — до этого 8-строчный
+// хелпер копировался дословно в /api/admin/backup и /api/admin/backup/github
+// (классический «починил в одном — сломал в другом»). Пропускает админа ИЛИ
+// backup-крон с CRON_SECRET (гейт proxy пускает CRON_SECRET только на POST).
+export async function authorizeAdminOrCron(request: NextRequest): Promise<AuthResult> {
+  let auth = await authorizeRequest(request, "admin");
+  if (!auth.ok) {
+    const cron = await authorizeRequest(request, "cron");
+    if (cron.ok) auth = { ok: true, via: "bearer", userId: null, role: "cron" };
+  }
+  return auth;
+}
 
 export { COOKIE_NAME, COOKIE_TTL_SEC, getClientIP };

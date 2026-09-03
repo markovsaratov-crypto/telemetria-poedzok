@@ -2,7 +2,7 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
-import { authorizeRequest } from "@/lib/auth";
+import { authorizeRequest, getUserIdFromRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { writeAudit } from "@/lib/audit";
@@ -45,9 +45,9 @@ export async function POST(request: NextRequest) {
       targetId: jobId,
       targetType: "TrafficJob",
       actorType: auth.via === "cookie" ? "user" : "system",
-      actorId: auth.via === "cookie" ? "owner" : "admin-token",
-      sessionId: job.sessionId,
-      metadata: force ? { force: true, previousStatus: job.status } : undefined,
+      actorId: (await getUserIdFromRequest(request)) ?? (auth.via === "cookie" ? "owner" : "admin-token"), // v2.18.0: честная идентификация
+      sessionId: String(job.sessionId ?? ""), // v2.18.0: типизированный db
+      metadata: force ? { force: true, previousStatus: String(job.status ?? "") } : undefined,
     });
     return json({ ok: true, jobId, status: "pending" }, 200, { "X-Request-Id": requestId });
   } catch (err) {

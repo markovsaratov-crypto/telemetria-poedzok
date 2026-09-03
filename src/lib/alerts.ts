@@ -282,15 +282,27 @@ export async function notifyFiring(evaluation: AlertEvaluation): Promise<number>
     "🚨 «Телеметрия поездок»: сработали правила алертов (§14.4)",
     ...firing.map((a) => `• ${a.rule}: ${a.value ?? "?"} — порог ${a.threshold}. Действие: ${a.action}`),
   ].join("\n");
+  // v2.18.0: HTTP-статус вебхука проверяется. Раньше catch покрывал только
+  // сетевые сбои: 4xx/5xx от Slack (отозванный/битый webhook) проглатывались,
+  // а функция возвращала firing.length ВО ВСЕХ ветках — оператор верил, что
+  // уведомления доставлены. Теперь честно: доставлено = только res.ok.
+  let delivered = 0;
   try {
-    await fetch(webhook, {
+    const res = await fetch(webhook, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
       signal: AbortSignal.timeout(10_000),
     });
+    if (res.ok) {
+      delivered = firing.length;
+    } else {
+      // доставка уведомления не должна ломать оценку — ошибка видна в журнале вызывающего
+      console.warn(JSON.stringify({ time: new Date().toISOString(), level: "warn", msg: `alerts: Slack webhook ответил ${res.status} — уведомления НЕ доставлены` }));
+    }
   } catch {
-    // доставка уведомления не должна ломать оценку — ошибка видна в журнале вызывающего
+    // сеть/таймаут — тоже не ломаем оценку алертов
+    console.warn(JSON.stringify({ time: new Date().toISOString(), level: "warn", msg: "alerts: Slack webhook недоступен — уведомления НЕ доставлены" }));
   }
-  return firing.length;
+  return delivered;
 }

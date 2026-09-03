@@ -27,7 +27,7 @@ export async function runRetention(): Promise<{ purged: number; archived: number
       // Архивация: логируем (в реальной системе — экспорт в cold storage)
       await writeAudit({
         action: "session.archive",
-        targetId: c.id,
+        targetId: String(c.id), // v2.18.0: типизированный db
         targetType: "Session",
         actorType: "retention-cron",
         metadata: { deviceId: c.deviceId, pointCount: c.pointCount },
@@ -35,12 +35,12 @@ export async function runRetention(): Promise<{ purged: number; archived: number
       archived += 1;
     }
     await db.session.update({
-      where: { id: c.id },
+      where: { id: String(c.id) },
       data: { deletedAt: now, status: "deleted" },
     });
     await writeAudit({
       action: "session.delete",
-      targetId: c.id,
+      targetId: String(c.id),
       targetType: "Session",
       actorType: "retention-cron",
       metadata: { reason: "retention", pointCount: c.pointCount },
@@ -66,14 +66,14 @@ export async function runRetention(): Promise<{ purged: number; archived: number
     // v2.16.0 (D2): заодно удаляем дочерние TrafficJob/ExportJob (каскад из
     // схемы не срабатывал — сессия не DELETE-нулась, а помечалась).
     await libsql.batch([
-      { sql: "DELETE FROM TrafficJob WHERE sessionId = ?", args: [s.id] },
-      { sql: "DELETE FROM ExportJob WHERE sessionId = ?", args: [s.id] },
-      { sql: "DELETE FROM GpsPoint WHERE sessionId = ?", args: [s.id] },
-      { sql: "UPDATE Session SET purgedAt = ?, status = 'archived' WHERE id = ?", args: [now.toISOString(), s.id] },
+      { sql: "DELETE FROM TrafficJob WHERE sessionId = ?", args: [String(s.id)] },
+      { sql: "DELETE FROM ExportJob WHERE sessionId = ?", args: [String(s.id)] },
+      { sql: "DELETE FROM GpsPoint WHERE sessionId = ?", args: [String(s.id)] },
+      { sql: "UPDATE Session SET purgedAt = ?, status = 'archived' WHERE id = ?", args: [now.toISOString(), String(s.id)] },
     ], "write");
     await writeAudit({
       action: "session.purge",
-      targetId: s.id,
+      targetId: String(s.id),
       targetType: "Session",
       actorType: "retention-cron",
       metadata: { deviceId: s.deviceId, pointCount: s.pointCount, reason: "grace-period-expired" },

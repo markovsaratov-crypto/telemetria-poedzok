@@ -22,7 +22,7 @@ function sign(sessionId: string, exp36: string): string {
   return createHmac("sha256", env().SESSION_SECRET).update(`${sessionId}:${exp36}`).digest("hex").slice(0, 32);
 }
 
-export function verifyShareToken(token: string): { sessionId: string; expiresAt: number } | null {
+export async function verifyShareToken(token: string): Promise<{ sessionId: string; expiresAt: number } | null> {
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const [sessionId, exp36, sig] = parts;
@@ -30,8 +30,13 @@ export function verifyShareToken(token: string): { sessionId: string; expiresAt:
   if (!/^[0-9a-f]{32}$/.test(sig)) return null;
   const expected = sign(sessionId, exp36);
   // v2.16.0 (D-16): timing-safe сверка через token-check (раньше — самодельный
-  // XOR-цикл, дублирующий ту же логику)
-  if (!tokenMatches(sig, expected)) return null;
+  // XOR-цикл, дублирующий ту же логику).
+  // v2.18.0 (P0): tokenMatches — АСИНХРОННАЯ функция. Рефакторинг v2.16.0
+  // потерял await: Promise всегда truthy → !tokenMatches(...) всегда false →
+  // проверка подписи была no-op, и ЛЮБОЙ токен вида
+  // «<sessionId>.<будущий срок>.<любые 32 hex>» проходил верификацию на
+  // публичном роуте. await обязателен.
+  if (!(await tokenMatches(sig, expected))) return null;
   const expiresAt = parseInt(exp36, 36);
   if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) return null;
   return { sessionId, expiresAt };
@@ -53,13 +58,15 @@ export async function sharePayload(sessionId: string, expiresAt: number, request
   // FIX-C3: серверные KPI по методологии — раньше страница считала дистанцию
   // по всей записи (включая дрейф «хвостов») и среднюю скорость как
   // «вся дистанция / вся длительность», расходясь с админкой.
-  const rawPoints = session.gpsPoints.map((p) => ({
-    lat: p.lat,
-    lon: p.lon,
-    speed: p.speed,
-    altitude: p.altitude,
-    bearing: p.bearing,
-    accuracy: p.accuracy,
+  // v2.18.0: типизированный db — gpsPoints unknown
+  const gpsPts = (session.gpsPoints ?? []) as Array<Record<string, unknown>>;
+  const rawPoints = gpsPts.map((p) => ({
+    lat: Number(p.lat),
+    lon: Number(p.lon),
+    speed: p.speed == null ? null : Number(p.speed),
+    altitude: p.altitude == null ? null : Number(p.altitude),
+    bearing: p.bearing == null ? null : Number(p.bearing),
+    accuracy: p.accuracy == null ? null : Number(p.accuracy),
     timestamp: Number(p.timestamp),
   }));
   // B-4: нормализация скоростей — публичная страница согласована с админкой

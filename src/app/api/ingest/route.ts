@@ -95,18 +95,17 @@ export async function POST(request: NextRequest) {
     // v2.16.0 (R9): точка-возобновление ПОСЛЕ паузы СОХРАНЯЕТСЯ (раньше —
     // отбрасывалась: «прогулка с паузой» теряла первую точку после каждого
     // перерыва; это не «фильтр мусора», а реальные данные)
-    const filtered: typeof normalized = [];
-    let lastTs: number | null = null;
+    // v2.18.0: мёртвый «фильтр» удалён — цикл сохранял КАЖДУЮ точку, а ветка
+    // `if (filtered.length === 0) push(...normalized)` была недостижима
+    // (filtered всегда == normalized по построению; zIngestBody требует ≥1 точки).
+    const filtered = normalized;
     let gapMarkers = 0;
+    let lastTs: number | null = null;
     for (const p of normalized) {
       if (lastTs !== null && p.timestampMs - lastTs > 30000) {
         gapMarkers++; // gap > 30 с — маркер разрыва, точка сохраняется
       }
-      filtered.push(p);
       lastTs = p.timestampMs;
-    }
-    if (filtered.length === 0) {
-      filtered.push(...normalized);
     }
 
     const startTime = new Date(filtered[0].timestampMs);
@@ -118,9 +117,9 @@ export async function POST(request: NextRequest) {
     // ретрая проходят findExistingSession(null) одновременно, второй INSERT
     // падает по @@unique(deviceId,clientId) → раньше это был 500; теперь —
     // повторная проверка и честный ответ duplicate.
-    let session: { session: { id: string }, job: { id: string } };
+    let session: { session: Record<string, unknown>, job: Record<string, unknown> };
     try {
-      session = await db.$transaction(async (tx: any) => {
+      session = await db.$transaction(async (tx) => {
         const s = await tx.session.create({
           data: {
             deviceId,
@@ -155,8 +154,8 @@ export async function POST(request: NextRequest) {
           },
         });
         await tx.session.update({
-          where: { id: s.id },
-          data: { trafficJobId: job.id },
+          where: { id: String(s.id) },
+          data: { trafficJobId: String(job.id) },
         });
         return { session: s, job };
       });
@@ -181,7 +180,7 @@ export async function POST(request: NextRequest) {
     trackLatency(request); // P2-16
     logger.info("Ingest success", {
       requestId,
-      sessionId: session.session.id,
+      sessionId: String(session.session.id),
       points: filtered.length,
       deviceId,
       durationMs: Date.now() - start,
@@ -189,9 +188,9 @@ export async function POST(request: NextRequest) {
 
     return json(
       {
-        sessionId: session.session.id,
+        sessionId: String(session.session.id),
         pointsAccepted: filtered.length,
-        trafficJobId: session.job.id,
+        trafficJobId: String(session.job.id),
         duplicate: false,
       },
       201,

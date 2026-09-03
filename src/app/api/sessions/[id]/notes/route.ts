@@ -41,10 +41,11 @@ export async function PATCH(
       return json({ notes: session.notes, tags: session.tags }, 200, { "X-Request-Id": requestId });
     }
 
+    // v2.18.0: select в update() не поддерживался обёрткой (типизированный db
+    // это поймал) — updateRowById и так возвращает обновлённую строку целиком
     const updated = await db.session.update({
       where: { id },
       data: updateData,
-      select: { notes: true, tags: true },
     });
 
     await writeAudit({

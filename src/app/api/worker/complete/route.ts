@@ -9,9 +9,11 @@ import { inc } from "@/lib/metrics";
 
 // v2.11.0 (АУДИТ C-27): статус валидируется zod-енамом — раньше любой мусор
 // ("banana") писался в БД и ломал семантику пайплайна.
+// v2.18.0: + workerId — проверка ВЛАДЕЛЬЦА захваченного джоба (см. ниже).
 const zCompleteBody = z.object({
   jobId: z.string().min(1),
   status: z.enum(["completed", "failed", "dead"]),
+  workerId: z.string().min(1).max(128).optional(),
   result: z.unknown().optional(),
   error: z.string().max(2000).optional(),
 });
@@ -28,18 +30,28 @@ export async function POST(request: NextRequest) {
       return json({ error: "Validation failed", details: parsed.error.flatten() }, 400, { "X-Request-Id": requestId });
     }
     const { jobId, status, result, error } = parsed.data;
+    const workerId = parsed.data.workerId ?? null;
 
     const job = await db.trafficJob.findUnique({ where: { id: jobId } });
     if (!job) return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
+    const sessionId = String(job.sessionId ?? "");
+    const lockedBy = job.lockedBy == null ? null : String(job.lockedBy);
 
     // v2.16.0 (S4): проверка владения и статуса — complete/failed/dead можно
-    // применить ТОЛЬКО к running-джобу этого воркера. Раньше любой держатель
-    // CRON_SECRET мог произвольно перезаписать любой джоб (даже pending).
+    // применить ТОЛЬКО к running-джобу. Раньше любой держатель CRON_SECRET мог
+    // произвольно перезаписать любой джоб (даже pending).
     if (job.status !== "running") {
-      return json({ error: `Job is not running (status=${job.status}) — complete is not applicable` }, 409, { "X-Request-Id": requestId });
+      return json({ error: `Job is not running (status=${String(job.status)}) — complete is not applicable` }, 409, { "X-Request-Id": requestId });
+    }
+    // v2.18.0: комментарий S4 обещал «этого воркера», но код проверял только
+    // статус. Теперь: если тело несёт workerId — джоб должен быть захвачен ИМЕННО
+    // им (иначе произвольный держатель CRON_SECRET мог перезаписать результат
+    // чужого running-джоба). Без workerId — только статус (обратная совместимость).
+    if (workerId && lockedBy && lockedBy !== workerId) {
+      return json({ error: `Job locked by ${lockedBy}, not by ${workerId}` }, 409, { "X-Request-Id": requestId });
     }
 
-    const attempts = job.attempts + 1;
+    const attempts = Number(job.attempts ?? 0) + 1;
     const updateData: Record<string, unknown> = {
       status,
       attempts,
@@ -63,12 +75,12 @@ export async function POST(request: NextRequest) {
           }
           if (r.topologyHash) sessionUpdate.topologyHash = r.topologyHash;
           await db.session.update({
-            where: { id: job.sessionId },
+            where: { id: sessionId },
             data: sessionUpdate,
           }).catch((err) => {
             logger.warn("Failed to persist routeHash/topologyHash on session (non-fatal)", {
               requestId,
-              sessionId: job.sessionId,
+              sessionId,
               error: err instanceof Error ? err.message : String(err),
             });
           });

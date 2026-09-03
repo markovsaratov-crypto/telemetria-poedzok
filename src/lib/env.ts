@@ -21,8 +21,8 @@ const schema = z.object({
   // открытие вкладки, при N>=20 они с ретраями react-query выбивают default 60/мин (429-тосты).
   RATE_LIMIT_MAX_READ: z.coerce.number().int().positive().default(240),
   RATE_LIMIT_MAX_AUTH: z.coerce.number().int().positive().default(5),
-  RATE_LIMIT_MAX_PLAN: z.coerce.number().int().positive().default(5),
-  RATE_LIMIT_MAX_AUDIT: z.coerce.number().int().positive().default(60),
+  // v2.18.0: RATE_LIMIT_MAX_PLAN/RATE_LIMIT_MAX_AUDIT удалены — скопы /api/plan и
+  // /api/audit не существуют с чистки v2.16.0, поля читались 0 раз.
   RATE_LIMIT_MAX_ADMIN: z.coerce.number().int().positive().default(1),
   RATE_LIMIT_MAX_REQUEUE: z.coerce.number().int().positive().default(10), // P1-11: спека §7.3
   RATE_LIMIT_BACKEND: z.enum(["redis", "memory"]).default("memory"),
@@ -31,7 +31,7 @@ const schema = z.object({
   WORKER_ID: z.string().default("worker-local"),
   WORKER_BATCH_SIZE: z.coerce.number().int().positive().default(10),
   WORKER_MAX_CONCURRENCY: z.coerce.number().int().positive().default(5),
-  WORKER_PORT: z.coerce.number().int().positive().default(3001),
+  // v2.18.0: WORKER_PORT удалён — воркер in-process (instrumentation), порт не слушается.
   TWO_GIS_API_KEY: z.string().default(""),
   TWO_GIS_PROXY_URL: z.string().default(""),
   OSRM_BASE_URL: z.string().default("https://router.project-osrm.org"),
@@ -43,9 +43,9 @@ const schema = z.object({
   ARCHIVE_RETENTION_DAYS: z.coerce.number().int().positive().default(3650),
   AUDIT_RETENTION_DAYS: z.coerce.number().int().positive().default(3650),
   EXPORT_ASYNC_THRESHOLD: z.coerce.number().int().positive().default(5000),
-  EXPORT_STORAGE_DIR: z.string().default("/tmp/exports"),
   EXPORT_URL_TTL_HOURS: z.coerce.number().int().positive().default(24),
-  EXPORT_MAX_FILE_BYTES: z.coerce.number().int().positive().default(104857600),
+  // v2.18.0: EXPORT_STORAGE_DIR/EXPORT_MAX_FILE_BYTES удалены — не читались
+  // (worker-runtime v2.9.10 убрал fs; download-роут не проверяет размер).
   EXPORT_CLEANUP_CRON_UTC: z.string().default("0 * * * *"),
   BACKUP_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
   BACKUP_RETRY_INTERVAL_HOURS: z.coerce.number().int().positive().default(1),

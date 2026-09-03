@@ -53,10 +53,11 @@ export async function GET(request: NextRequest) {
     // Подсветка совпадений (v2.16.0: регистронезависимо — как SQL-фильтр выше)
     const highlighted = sessions.map((s) => {
       const matchFields: string[] = [];
-      if (s.deviceId?.toLowerCase().includes(qLower)) matchFields.push("deviceId");
-      if (s.deviceName?.toLowerCase().includes(qLower)) matchFields.push("deviceName");
-      if (s.notes?.toLowerCase().includes(qLower)) matchFields.push("notes");
-      if (s.tags?.toLowerCase().includes(qLower)) matchFields.push("tags");
+      // v2.18.0: типизированный db — значения unknown, приводим к строке
+      if (s.deviceId != null && String(s.deviceId).toLowerCase().includes(qLower)) matchFields.push("deviceId");
+      if (s.deviceName != null && String(s.deviceName).toLowerCase().includes(qLower)) matchFields.push("deviceName");
+      if (s.notes != null && String(s.notes).toLowerCase().includes(qLower)) matchFields.push("notes");
+      if (s.tags != null && String(s.tags).toLowerCase().includes(qLower)) matchFields.push("tags");
       return { ...s, matchFields };
     });
 

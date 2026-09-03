@@ -67,7 +67,7 @@ export function ExportDialog({
   const poll = usePollExport(jobId);
 
   const isAsync = pointCount > 5000;
-  const isPolling = !!jobId && poll.data?.status !== "completed" && poll.data?.status !== "failed";
+  const isPolling = !!jobId && poll.data?.status !== "completed" && poll.data?.status !== "failed" && poll.data?.status !== "dead"; // v2.18.0: dead — терминальное
 
   React.useEffect(() => {
     if (!open) {

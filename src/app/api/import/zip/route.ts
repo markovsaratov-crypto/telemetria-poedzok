@@ -62,15 +62,27 @@ export async function POST(request: NextRequest) {
     }
 
     // Find Location.csv and Metadata.csv
+    // v2.18.0 (P1): проверка ФАКТИЧЕСКОГО распакованного размера. Заявленный
+    // header.size контролируется отправителем независимо от inflate-потока —
+    // zip-бомба с крошечным заявленным размером проходила декомпрессию без
+    // ограничений. getData() уже возвращает готовый Buffer — сверяем его длину.
     let locationCsv = "";
     let metadataCsv = "";
     for (const entry of entries) {
       const lower = entry.entryName.toLowerCase();
       if (lower === "location.csv" || (lower.startsWith("location") && lower.endsWith(".csv"))) {
-        locationCsv = entry.getData().toString("utf8");
+        const data = entry.getData();
+        if (data.length > MAX_UNCOMPRESSED_BYTES) {
+          return json({ error: "ZIP entry too large after decompression (zip-bomb protection)" }, 400, { "X-Request-Id": requestId });
+        }
+        locationCsv = data.toString("utf8");
       }
       if (lower === "metadata.csv" || (lower.startsWith("metadata") && lower.endsWith(".csv"))) {
-        metadataCsv = entry.getData().toString("utf8");
+        const data = entry.getData();
+        if (data.length > 1024 * 1024) {
+          return json({ error: "Metadata.csv too large after decompression" }, 400, { "X-Request-Id": requestId });
+        }
+        metadataCsv = data.toString("utf8");
       }
     }
 

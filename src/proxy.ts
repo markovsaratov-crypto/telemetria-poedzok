@@ -77,6 +77,10 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
         // v2.18.0: батч-статс — пакует до 50 per-session запросов в один GET
         // (замена «шторма» /api/sessions/[id]/stats при открытии «Поездок»)
         pathname === "/api/stats/batch" ||
+        // v2.19.0: батч events/track — та же замена для период-агрегата аналитики
+        // (2×N поштучных запросов → 2 запроса)
+        pathname === "/api/events/batch" ||
+        pathname === "/api/track/batch" ||
         pathname === "/api/geocode/reverse")) ||
     // v2.16.0 (S1): bulk-ЧТЕНИЯ POST-ом — в read-скопе. /api/sessions/batch
     // (пачка записей для «Поездок») — чтение по определению, но падало в

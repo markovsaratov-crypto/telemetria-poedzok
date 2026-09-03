@@ -346,10 +346,13 @@ const round2 = (x: number) => Math.round(x * 100) / 100;
 
 function aggregateEvents(items: EventsResponse[]): EventsResponse {
   // Порядок входного массива уже хронологический (от вызывающего).
-  const maneuvers = sampleUniform(items.flatMap((e) => e.maneuvers), 4000);
+  // v2.19.0: ?? [] — пустая форма events-роута (<5 точек) не содержит
+  // hscEvents/harshEvents-ключей вовсе; раньше flatMap клал undefined
+  // в агрегат (кандидат на краш рендера карты HSC-событий периода).
+  const maneuvers = sampleUniform(items.flatMap((e) => e.maneuvers ?? []), 4000);
   const ggPoints = sampleUniform(items.flatMap((e) => e.gg?.points ?? []), 3000);
-  const harshEvents = sampleUniform(items.flatMap((e) => e.harshEvents), 2000);
-  const hscEvents = sampleUniform(items.flatMap((e) => e.hscEvents), 2000);
+  const harshEvents = sampleUniform(items.flatMap((e) => e.harshEvents ?? []), 2000);
+  const hscEvents = sampleUniform(items.flatMap((e) => e.hscEvents ?? []), 2000);
   return {
     sessionId: `period:${items.length}`,
     deviceId: "aggregate",
@@ -467,14 +470,19 @@ export function usePeriodStats(period: PeriodKey) {
       // аналитики рендерятся мгновенно. Запрошенные, но отсутствующие в
       // ответе, добираются по одному (missing).
       const cappedKey = Array.from(new Set(capped)).sort().join(",");
-      const [batch, eventsArr, trackArr] = await Promise.all([
+      // v2.19.0: events/track периода — тоже БАТЧАМИ (/api/events/batch,
+      // /api/track/batch; единый конвейер с одиночными роутами + чанки параллельно
+      // + серверный TTL-кэш 30с). Раньше — 2×N поштучных запросов под семафором 6
+      // (последняя оставшаяся N+1-нога период-агрегата после батч-статса v2.17.0).
+      const idsQuery = capped.join(",");
+      const [batch, eventsBatch, trackBatch] = await Promise.all([
         qc.fetchQuery({
           queryKey: ["stats-batch", cappedKey],
           queryFn: () => fetchSessionsStatsBatch(capped),
           staleTime: 30_000,
         }),
-        Promise.all(capped.map((id) => api.get<EventsResponse>(`/api/sessions/${id}/events`))),
-        Promise.all(capped.map((id) => api.get<TrackResponse>(`/api/sessions/${id}/track`))),
+        api.get<{ events: EventsResponse[]; missing: string[] }>("/api/events/batch", { ids: idsQuery }),
+        api.get<{ tracks: TrackResponse[]; missing: string[] }>("/api/track/batch", { ids: idsQuery }),
       ]);
       seedSessionsStatsFromBatch(qc, batch.stats);
       const fallbackIds = batch.missing;
@@ -489,8 +497,8 @@ export function usePeriodStats(period: PeriodKey) {
         ...batch.stats,
         ...fallbackStats.filter((s): s is SessionStats => s != null),
       ];
-      const okEvents = eventsArr.filter(Boolean);
-      const okTracks = trackArr.filter((t) => t && (t.points?.length ?? 0) > 0);
+      const okEvents = (eventsBatch.events ?? []).filter(Boolean);
+      const okTracks = (trackBatch.tracks ?? []).filter((t) => t && (t.points?.length ?? 0) > 0);
       if (!okStats.length) return null;
       const chrono = [...inPeriod.slice(0, MAX_PERIOD_SESSIONS)].sort(
         (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime()

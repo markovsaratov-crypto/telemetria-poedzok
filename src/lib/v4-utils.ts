@@ -39,12 +39,6 @@ export function effZone(eff: number): { c: string; cls: string; band: string } {
   return { c: "#B47516", cls: "c-amber", band: "в пределах ±1 мин" };
 }
 
-// Transform eff (-5..+5) → marker position on gauge (0..100, 50 = center).
-export function effToGaugePct(eff: number): number {
-  const clamped = Math.max(-5, Math.min(5, eff));
-  return ((5 + clamped) / 10) * 100;
-}
-
 // Heat-color for heat-strips (10.3, 10.4). v = session duration; avg = group mean.
 export function heatColor(v: number | null, avg: number): string {
   if (v === null) return "#D9C6D2";

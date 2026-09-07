@@ -23,7 +23,6 @@ import {
   mulberry32,
   ecoZone,
   effZone,
-  effToGaugePct,
   heatColor,
   type PeriodKey,
 } from "@/lib/v4-utils";
@@ -46,7 +45,7 @@ import {
 import { useV4Track, useV4Events, usePeriodStats, useSpeedRecord, type PeriodAggregate } from "@/lib/v4-hooks";
 import type { TrackResponse, EventsResponse } from "@/lib/api-client";
 import { bindTips } from "./use-v4-tipbox";
-import { GaugeArc } from "./widgets/gauge-arc";
+import { BulletChart } from "./widgets/bullet-chart";
 
 // v2.10.0 R2: Leaflet MapTrack — dynamic import с ssr: false (Leaflet требует window).
 const V4MapTrack = dynamic(
@@ -734,7 +733,14 @@ function DrivingScoreBlock({
   const effTotalMin = hasPlan && actualDuration != null ? (actualDuration - (planDurationSec as number)) / 60 : null;
 
   const ez = effZone(eff);
-  const effPct = effToGaugePct(eff);
+  // v2.21.0: цвет полосы-меры bullet — CSS-переменные (авто-инверсия в тёмной теме)
+  const effMeasureColor = !hasPlan
+    ? "var(--amber)"
+    : eff <= -1
+      ? "var(--plum)"
+      : eff >= 1
+        ? "var(--red)"
+        : "var(--amber)";
   // v2.12.0 (D-5): нет плана — «—» и нейтральная подпись (раньше «−0,0 мин/поездку»
   // при план/факт «—» выглядело как нулевая экономия)
   const effBigValue = hasPlan
@@ -742,8 +748,6 @@ function DrivingScoreBlock({
     : "—";
   const effBand = hasPlan ? ez.band : "нет данных о плане";
   const effCls = hasPlan ? ez.cls : "c-amber";
-  const effColor = hasPlan ? ez.c : "#B47516";
-  const effPctVal = hasPlan ? effPct : 50;
 
   return (
     <section>
@@ -756,16 +760,36 @@ function DrivingScoreBlock({
         </span>
       </div>
       <div className="score-grid">
-        {/* === Виджет 1: Плавность · EcoScore === */}
-        <GaugeArc
+        {/* === Виджет 1: Плавность · EcoScore (v2.21.0: bullet chart) === */}
+        <BulletChart
           title="Плавность · EcoScore"
           helpTip="Оценка плавности вождения (§7.3, методика CAP). Формула: 100×(1 − 0.45·penalty(braking) − 0.30·penalty(accel) − 0.25·penalty(jerk)), где penalty = 1 − 1/(1+(actual/baseline)^1.5). Baseline = корпус-медиана ≥30 поездок по routeHash × 1.2 (margin для малого корпуса). Зоны: 80+ отлично · 60–79 неплохо · ниже 60 резко"
           bigValue={String(ecoScore)}
           bigValueSuffix="/ 100"
-          arcColor={z.c}
-          arcPct={ecoScore}
           bandText={z.band}
           bandCls={z.cls}
+          min={0}
+          max={100}
+          ranges={[
+            { from: 0, to: 60, color: "var(--red-dim)", label: "резко · ниже 60" },
+            { from: 60, to: 80, color: "var(--amber-dim)", label: "неплохо · 60–79" },
+            { from: 80, to: 100, color: "var(--plum-dim)", label: "отлично · 80+" },
+          ]}
+          measure={{
+            from: 0,
+            to: ecoScore,
+            color: z.cls === "c-plum" ? "var(--plum)" : z.cls === "c-amber" ? "var(--amber)" : "var(--red)",
+            tip: `EcoScore: ${ecoScore} из 100 · цель 80 (порог «отлично»)`,
+          }}
+          target={{ value: 80, tip: "Цель: 80 баллов — порог зоны «отлично» (§7.3)" }}
+          ticks={[
+            { value: 0, label: "0" },
+            { value: 20, label: "20" },
+            { value: 40, label: "40" },
+            { value: 60, label: "60" },
+            { value: 80, label: "80" },
+            { value: 100, label: "100" },
+          ]}
           note={
             <>
               Шкала штрафа — доля от максимума компонента (45 / 30 / 25 баллов за плавность торможения / разгона / рывка. Breakdown показывает вклад каждого компонента в итоговый EcoScore, базлайн {baselineVersion}.
@@ -793,20 +817,44 @@ function DrivingScoreBlock({
           ]}
         />
 
-        {/* === Виджет 2: Эффективность · экономия к плану === */}
-        <GaugeArc
+        {/* === Виджет 2: Эффективность · экономия к плану (v2.21.0: bullet chart) === */}
+        <BulletChart
           title="Эффективность · экономия к плану"
           helpTip="Метрика TimeSavingIndex (§6.3 DurationDeviation): среднее отклонение времени от плана маршрута в минутах на поездку. Отрицательное значение = экономия (слива), положительное = перерасход (алый). Источник: stats.route.planDurationSec vs активная длительность поездки (§4.11 ActiveDuration)."
           bigValue={effBigValue}
           bigValueSuffix={hasPlan ? "мин/поездку" : ""}
-          arcColor={effColor}
-          arcPct={effPctVal}
           bandText={effBand}
           bandCls={effCls}
+          min={-5}
+          max={5}
+          ranges={[
+            { from: -5, to: -1, color: "var(--plum-dim)", label: "экономия · ≤−1 мин" },
+            { from: -1, to: 1, color: "var(--amber-dim)", label: "в пределах ±1 мин" },
+            { from: 1, to: 5, color: "var(--red-dim)", label: "перерасход · ≥+1 мин" },
+          ]}
+          measure={
+            hasPlan
+              ? {
+                  from: 0,
+                  to: Math.max(-5, Math.min(5, eff)),
+                  color: effMeasureColor,
+                  tip: `Отклонение от плана: ${eff > 0 ? "+" : "−"}${Math.abs(eff).toFixed(1).replace(".", ",")} мин/поездку`,
+                }
+              : null
+          }
+          target={{ value: 0, tip: "План: 0 мин отклонения — полное совпадение с планом маршрута" }}
+          ticks={[
+            { value: -5, label: "−5" },
+            { value: -2.5, label: "−2,5" },
+            { value: 0, label: "0" },
+            { value: 2.5, label: "+2,5" },
+            { value: 5, label: "+5" },
+          ]}
+          emptyHint={hasPlan ? undefined : "план не рассчитан"}
           note={
             <>
-              Шкала: 0 в центре, левее — экономия (слива), правее — перерасход (алый). Отклонение =
-              (ActiveDuration − PlanDuration)/60 — стоянки-«хвосты» записи не учитываются.
+              Шкала bullet: −5…+5 мин/поездку, целевой маркер — 0 (план). Полоса-мера идёт от 0 влево —
+              экономия (слива), вправо — перерасход (алый). Отклонение = (ActiveDuration − PlanDuration)/60 — стоянки-«хвосты» записи не учитываются.
               {aggregated && hasPlan && planTrips > 1 && effTotalMin != null
                 ? ` За период — среднее на поездку: Σ отклонение ${(effTotalMin > 0 ? "+" : "−") + Math.abs(effTotalMin).toFixed(1).replace(".", ",")} мин делится на ${planTrips} ${pluralRu(planTrips, ["поездку", "поездки", "поездок"])} с планом.`
                 : ""}

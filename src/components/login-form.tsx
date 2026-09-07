@@ -1,7 +1,10 @@
 "use client";
 
-// src/components/login-form.tsx — форма входа (email опционален; без email — legacy single-user LOGIN_PASSWORD).
-// AUDIT B-1: режим регистрации удалён из UI — регистрация на сервере выключена (REGISTRATION_ENABLED=false).
+// src/components/login-form.tsx — форма входа + переключатель регистрации (multi-user).
+// Вход: email опционален (без email — legacy single-user LOGIN_PASSWORD).
+// Регистрация: POST /api/auth/register; работает только когда на сервере задан
+// REGISTRATION_ENABLED=true (иначе 403 — тост подскажет). Новые аккаунты — строго
+// role="user" (AUDIT B-1: авто-эскалации до admin нет).
 
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -16,6 +19,7 @@ import {
   Keyboard,
   KeyRound,
   Mail,
+  UserPlus,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -42,6 +46,7 @@ interface AuthUser {
 }
 
 export function LoginForm({ onSuccess }: LoginFormProps) {
+  const [mode, setMode] = React.useState<"login" | "register">("login");
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [show, setShow] = React.useState(false);
@@ -56,24 +61,46 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
       triggerShake();
       return;
     }
+    if (mode === "register" && !email) {
+      toast.error("Введите email");
+      triggerShake();
+      return;
+    }
     setLoading(true);
     try {
-      // Login: if email provided → multi-user; else legacy single-user
-      const payload = email ? { email, password } : { password };
-      const res = await api.post<{
-        sessionId: string;
-        expiresAt: string;
-        user?: AuthUser;
-      }>("/api/auth/login", payload);
-      toast.success("Вход выполнен", {
-        description: "Сессия активна 24 часа",
-      });
-      onSuccess(res.expiresAt);
+      if (mode === "register") {
+        const res = await api.post<{
+          sessionId: string;
+          expiresAt: string;
+          user: AuthUser;
+        }>("/api/auth/register", { email, password });
+        toast.success("Регистрация успешна", {
+          description: "Аккаунт создан",
+        });
+        onSuccess(res.expiresAt);
+      } else {
+        // Login: if email provided → multi-user; else legacy single-user
+        const payload = email ? { email, password } : { password };
+        const res = await api.post<{
+          sessionId: string;
+          expiresAt: string;
+          user?: AuthUser;
+        }>("/api/auth/login", payload);
+        toast.success("Вход выполнен", {
+          description: "Сессия активна 24 часа",
+        });
+        onSuccess(res.expiresAt);
+      }
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.status === 401) {
-          toast.error("Неверный пароль", {
+          toast.error(mode === "register" ? "Email уже занят" : "Неверный пароль", {
             description: "Проверьте данные и попробуйте снова",
+          });
+        } else if (err.status === 403) {
+          // гейт регистрации на сервере (REGISTRATION_ENABLED≠true) либо запрет первого аккаунта
+          toast.error("Регистрация недоступна", {
+            description: err.message || "Сервер не принимает новые аккаунты",
           });
         } else if (err.status === 409) {
           toast.error("Email уже зарегистрирован", {
@@ -102,6 +129,28 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
     const caps = e.getModifierState && e.getModifierState("CapsLock");
     setCapsLockOn(caps);
   }
+
+  // Сила пароля (только режим регистрации)
+  const strength = React.useMemo(() => {
+    if (!password) return 0;
+    let s = 0;
+    if (password.length >= 8) s++;
+    if (password.length >= 16) s++;
+    if (password.length >= 32) s++;
+    if (/[A-Z]/.test(password) && /[a-z]/.test(password)) s++;
+    if (/\d/.test(password)) s++;
+    if (/[^A-Za-z0-9]/.test(password)) s++;
+    return Math.min(s, 4);
+  }, [password]);
+
+  const strengthLabel = ["", "Слабый", "Средний", "Хороший", "Сильный"][strength];
+  const strengthColor = [
+    "",
+    "bg-red-500",
+    "bg-amber-500",
+    "bg-teal-500",
+    "bg-emerald-500",
+  ][strength];
 
   return (
     // v2.11.0 (U-27): айдентика v4 — айвори-фон + слива (emerald/teal-градиент убран).
@@ -136,15 +185,15 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
             </CardTitle>
             <CardDescription className="flex items-center justify-center gap-1.5">
               <ShieldCheck className="h-3.5 w-3.5 v4-login-accent" />
-              Войдите для доступа к телеметрии
+              {mode === "login" ? "Войдите для доступа к телеметрии" : "Создайте аккаунт для доступа"}
             </CardDescription>
           </CardHeader>
           <form onSubmit={handleSubmit}>
             <CardContent className="space-y-3">
-              {/* Email (optional) — без email вход по legacy LOGIN_PASSWORD (single-user) */}
+              {/* Email: в регистрации обязателен; во входе опционален (без email — legacy single-user) */}
               <div className="space-y-1.5">
                 <Label htmlFor="email-login" className="flex items-center gap-1.5 text-xs">
-                  <Mail className="h-3 w-3" /> Email (опционально)
+                  <Mail className="h-3 w-3" /> {mode === "register" ? "Email" : "Email (опционально)"}
                 </Label>
                 <div className="relative">
                   <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
@@ -153,10 +202,11 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="оставьте пустым для single-user"
+                    placeholder={mode === "register" ? "you@example.com" : "оставьте пустым для single-user"}
                     autoComplete="email"
                     disabled={loading}
                     className="pl-9 h-10"
+                    required={mode === "register"}
                   />
                 </div>
               </div>
@@ -174,11 +224,11 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
                     onChange={(e) => setPassword(e.target.value)}
                     onKeyUp={handleKeyUp}
                     onKeyDown={handleKeyUp}
-                    placeholder="Введите пароль"
-                    autoComplete="current-password"
+                    placeholder={mode === "register" ? "Минимум 8 символов" : "Введите пароль"}
+                    autoComplete={mode === "register" ? "new-password" : "current-password"}
                     disabled={loading}
                     className="pl-9 pr-16 h-10"
-                    autoFocus
+                    autoFocus={mode === "login"}
                   />
                   <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
                     <AnimatePresence>
@@ -207,6 +257,34 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
                 </div>
               </div>
 
+              {/* Индикатор силы пароля (только регистрация) */}
+              <AnimatePresence>
+                {mode === "register" && password && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: "auto" }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="space-y-1"
+                  >
+                    <div className="grid grid-cols-4 gap-1">
+                      {[0, 1, 2, 3].map((i) => (
+                        <div
+                          key={i}
+                          className={`h-1 rounded-full transition-all ${
+                            i < strength ? strengthColor : "bg-muted"
+                          }`}
+                        />
+                      ))}
+                    </div>
+                    {strength > 0 && (
+                      <p className="text-[10px] text-muted-foreground">
+                        Сила пароля: <span className="font-medium">{strengthLabel}</span>
+                      </p>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
               {capsLockOn && (
                 <motion.div
                   initial={{ opacity: 0, y: -4 }}
@@ -222,7 +300,7 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
               <Button
                 type="submit"
                 className="w-full transition-all"
-                disabled={loading || !password}
+                disabled={loading || !password || (mode === "register" && !email)}
               >
                 {loading ? (
                   <>
@@ -231,7 +309,11 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
                       transition={{ duration: 0.8, repeat: Infinity, ease: "linear" }}
                       className="inline-block h-4 w-4 border-2 border-current border-t-transparent rounded-full"
                     />
-                    Вход…
+                    {mode === "register" ? "Регистрация…" : "Вход…"}
+                  </>
+                ) : mode === "register" ? (
+                  <>
+                    <UserPlus className="h-4 w-4" /> Зарегистрироваться
                   </>
                 ) : (
                   <>
@@ -239,10 +321,25 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
                   </>
                 )}
               </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="w-full text-xs"
+                onClick={() => {
+                  setMode(mode === "login" ? "register" : "login");
+                  setPassword("");
+                }}
+                disabled={loading}
+              >
+                {mode === "login" ? "Нет аккаунта? Регистрация" : "Уже есть аккаунт? Войти"}
+              </Button>
               <div className="text-[10px] text-muted-foreground text-center space-y-0.5">
                 <p className="flex items-center justify-center gap-1">
                   <ShieldCheck className="h-3 w-3 v4-login-accent" />
-                  Multi-user + legacy LOGIN_PASSWORD · HMAC cookie · 24ч
+                  {mode === "register"
+                    ? "Multi-user · bcrypt hash · новые аккаунты — только роль user"
+                    : "Multi-user + legacy LOGIN_PASSWORD · HMAC cookie · 24ч"}
                 </p>
                 <p className="opacity-70">
                   Cookie: <code className="font-mono">telem_session</code> · sliding renewal

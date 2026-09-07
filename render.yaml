@@ -17,6 +17,10 @@ services:
         sync: false
       - key: LOGIN_PASSWORD
         sync: false
+      # v2.20.0: включить публичную регистрацию (POST /api/auth/register + форма в UI).
+      # Новые аккаунты — строго role="user" (AUDIT B-1), админ только вручную в БД.
+      - key: REGISTRATION_ENABLED
+        value: "true"
       - key: SESSION_SECRET
         sync: false
       - key: API_KEY

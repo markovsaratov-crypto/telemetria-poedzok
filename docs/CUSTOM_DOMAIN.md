@@ -2,48 +2,74 @@
 
 `*.onrender.com` внесён в реестр РКН (у части провайдеров дополнительно фильтруется
 диапазон 216.24.57.0/24) — из РФ сервис напрямую недоступен. Решение: свой домен
-через Cloudflare-проксирование. Проверено по коду: CSP домен-независимая,
-cookie `__Host-` (host-only, без Domain), share-ссылки строятся от
-`window.location.origin` — **правки кода не требуются**.
+через **TurboFlare** (turboflare.ru — бесплатный российский аналог Cloudflare от
+CDNVideo: CDN + DNS + SSL + базовая DDoS-защита, инфраструктура внутри РФ, санкционных
+рисков нет). Проверено по коду: CSP домен-независимая, cookie `__Host-`
+(host-only, без Domain), share-ссылки строятся от `window.location.origin` —
+**правки кода не требуются**.
 
 ## Порядок (≈30 минут)
 
-1. **Купить домен** (любой регистратор: reg.ru, Cloudflare Registrar, Namecheap;
-   подойдёт самый дешёвый, `.ru`/`.com`/`.xyz`). Если домен куплен не в Cloudflare —
-   добавить зону в Cloudflare (бесплатный план) и сменить NS у регистратора на выданные
-   Cloudflare.
+1. **Купить домен** (любой регистратор: reg.ru, nic.ru, 2domains и т.п.;
+   подойдёт самый дешёвый, `.ru`/`.com`/`.xyz`).
 
-2. **Render: добавить домен.** Dashboard → сервис `telemetria-poedzok` →
-   Settings → Custom Domains → Add → ввести домен (напр. `gps.example.ru`).
-   Render покажет CNAME-цель вида `telemetria-poedzok.onrender.com`.
+2. **Зарегистрироваться на turboflare.ru** (бесплатно, без карты; поддержка 24/7 —
+   русскоязычная).
 
-3. **Cloudflare: DNS.** Добавить запись CNAME: имя `gps` (или `@` для апекса —
-   CNAME Flattening), цель — CNAME из Render. **Прокси сначала выключить**
-   (серое облако, DNS only) — Render должен пройти верификацию и выпустить
-   Let's Encrypt-сертификат (статус в том же разделе Custom Domains → Verify).
+3. **TurboFlare: добавить сайт.** «Подключите домен — укажите имя сайта и
+   origin-адрес»: имя = ваш домен (напр. `gps.example.ru`), origin =
+   `https://telemetria-poedzok.onrender.com`.
 
-4. **Cloudflare: включить проксирование.** После статуса Verified — включить
-   оранжевое облако. SSL/TLS → режим **Full (strict)** (иначе цикл редиректов).
-   Опционально: Enable Always Use HTTPS.
+4. **DNS: делегировать зону TurboFlare.** Панель TurboFlare покажет свои
+   NS-серверы — прописать их у регистратора домена (замена NS занимает от
+   нескольких минут до 24 ч). TurboFlare станет DNS-хостингом зоны.
 
-5. **SensorLogger: сменить URL инжеста.** В приложении на телефоне заменить
+5. **TurboFlare: запись + проксирование + SSL.** Убедиться, что для домена
+   есть запись, ведущая на origin (или запись CNAME →
+   `telemetria-poedzok.onrender.com`), проксирование включено, бесплатный
+   SSL-сертификат выдан. Если в панели есть режим SSL с проверкой сертификата
+   origin (аналог Cloudflare «Full strict») — включить его: у origin
+   валидный Let's Encrypt-сертификат `*.onrender.com`.
+
+6. **(Запасной вариант, если шаг 5 не заработал).** Если TurboFlare не
+   подменяет Host на origin и Render отвечает «unknown host» — подключить
+   домен на стороне Render: Dashboard → `telemetria-poedzok` → Settings →
+   Custom Domains → Add → домен; Render покажет CNAME-цель
+   `telemetria-poedzok.onrender.com` — создать в TurboFlare CNAME на неё и
+   дождаться статуса Verified (Let's Encrypt от Render). После этого
+   вернуться к шагу 5.
+
+7. **SensorLogger: сменить URL инжеста.** В приложении на телефоне заменить
    `https://telemetria-poedzok.onrender.com/api/ingest` на
    `https://<домен>/api/ingest` (Bearer INGEST_TOKEN не меняется). Без этого
-   телефон продолжит слать данные в заблокированный хост.
+   телефон продолжит слать данные в заблокированный хост — именно так были
+   потеряны поездки 03–07.09.
 
-6. **Проверка:**
+8. **Проверка:**
    - из РФ без VPN: `https://<домен>/health` → `{"status":"ok",...}`;
    - браузер: вход, «Аналитика», «Поездки»;
-   - следующая поездка: точки приходят (диагностика `diag.ingest.trace` в Setting).
+   - следующая поездка: точки приходят (диагностика `diag.ingest.trace` в Setting);
+   - пропуск поездок до переезда восстанавливается `POST /api/import/zip`
+     (ZIP с CSV SensorLogger).
 
 ## Нюансы
 
-- Cloudflare-кэширование ответов API: у всех API-ответов уже стоят нужные
-  заголовки (`Cache-Control`/`no-store` — см. http-utils), кэшировать нечему;
-  при проблемах — Rules → Bypass Cache для `/api/*`.
-- Rate-limit инжеста считается по IP клиента: за Cloudflare клиенты приходят
-  с IP edge-узлов CF — X-Forwarded-For берётся ПОСЛЕДНИЙ (AUDIT B-9), т.е.
-  реальный IP клиента. Логика не меняется.
-- Render free засыпание: пока активен cron-pinger (внешний планировщик на
+- **Кэширование API:** у всех API-ответов уже стоят `Cache-Control: no-store`
+  (см. http-utils) — кэшировать нечему; при проблемах — исключить `/api/*`
+  из кэша TurboFlare в панели.
+- **Rate-limit инжеста** считается по IP клиента: за прокси клиенты приходят с
+  IP edge-узлов — X-Forwarded-For берётся ПОСЛЕДНИЙ (AUDIT B-9), т.е. реальный
+  IP клиента. Логика не меняется.
+- **2GIS-воркер не нужен:** живой хост 2ГИС `catalog.api.2gis.ru` достижим с
+  Render напрямую (R5.1, `TWO_GIS_PROXY_URL` пуст, ключ в Setting
+  `TWO_GIS_API_KEY`); `cloudflare-worker/worker.js` остаётся в репо как
+  опциональный запасной прокси — продуктов Workers у TurboFlare нет.
+- **Render free засыпание:** пока активен cron-pinger (внешний планировщик на
   песочнице) — сервис не спит. После переезда на домен пингер продолжает
   стучать в onrender-URL напрямую (сервер один и тот же).
+- **Честное предупреждение:** TurboFlare — молодой сервис (2026); лимиты
+  бесплатного тарифа смотрите в личном кабинете. Для нашего трафика
+  (инжест раз в секунду во время поездки + браузер) базового тарифа
+  достаточно с запасом. Если что-то не заработает — путь отката описан в
+  шаге 6, а Cloudflare-вариант ранбука сохранён в git-истории этого файла
+  (коммит c4f291e).

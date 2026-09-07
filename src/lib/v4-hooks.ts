@@ -328,7 +328,7 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       distanceDeviationPct:
         planDistanceM > 0 ? Math.round((distance - planDistanceM) / planDistanceM * 10000) / 100 : null,
       speedDeviationPct: null,
-      // v2.13.0 (Ф4): для честного «мин/поездку» в gauge эффективности
+      // v2.13.0 (Ф4): для честного «мин/поездку» в виджете эффективности (v2.21.0 — bullet chart)
       planTripCount,
     },
   };

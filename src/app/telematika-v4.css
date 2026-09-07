@@ -673,26 +673,79 @@ html.dark .v4-app .kpi.k-plum { border-color: #5A2438; }
      so gauge widgets don't touch KPI section above too tightly. */
   margin-top: 4px;
 }
-.v4-app .gauge-wrap {
-  position: relative;
-  text-align: center;
-  padding-top: 6px;
+.v4-app .bullet-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 2px;
 }
-.v4-app .gauge {
-  width: 100%;
-  max-width: 225px;
-}
-.v4-app .gauge-num { margin-top: -46px; }
-.v4-app .gauge-num b {
+.v4-app .bullet-num b {
   font-family: var(--cond);
-  font-size: 40px;
+  font-size: 38px;
   font-weight: 700;
   letter-spacing: -0.01em;
+  line-height: 1;
 }
-.v4-app .gauge-num span {
+.v4-app .bullet-num span {
   font-size: 13px;
   color: var(--muted);
 }
+/* v2.21.0: bullet chart (Stephen Few) — зоны-подложки + полоса-мера + целевой маркер */
+.v4-app .bullet-scale {
+  position: relative;
+  height: 22px;
+  margin-top: 10px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.v4-app .bullet-range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+.v4-app .bullet-measure {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 10px;
+  min-width: 2px;
+  border-radius: 2px;
+  transition: width 0.35s ease, left 0.35s ease, background 0.35s ease;
+}
+.v4-app .bullet-target {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2.5px;
+  background: var(--ink);
+  transform: translateX(-1.25px);
+  border-radius: 1px;
+}
+.v4-app .bullet-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.v4-app .bullet-ticks {
+  position: relative;
+  height: 14px;
+  margin-top: 3px;
+  font-size: 9.5px;
+  color: var(--faint);
+}
+.v4-app .bullet-ticks span {
+  position: absolute;
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+.v4-app .bullet-ticks span[data-align="start"] { transform: none; }
+.v4-app .bullet-ticks span[data-align="end"] { transform: translateX(-100%); }
 .v4-app .score-band {
   display: inline-block;
   font-size: 10.5px;
@@ -2086,17 +2139,15 @@ html.dark .v4-app .v4-bottom-nav {
   .v4-app .kpi-grid { grid-template-columns: repeat(7, 1fr); }
 }
 
-/* Gauge widgets: вертикальный стек на мобильном, side-by-side на md+ */
+/* Bullet widgets: вертикальный стек на мобильном, side-by-side на md+ */
 .v4-app .score-grid {
   grid-template-columns: 1fr;
   gap: 14px;
 }
-.v4-app .gauge { max-width: 200px; }
-.v4-app .gauge-num b { font-size: 36px; }
+.v4-app .bullet-num b { font-size: 34px; }
 @media (min-width: 768px) {
   .v4-app .score-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
-  .v4-app .gauge { max-width: 225px; }
-  .v4-app .gauge-num b { font-size: 40px; }
+  .v4-app .bullet-num b { font-size: 38px; }
 }
 
 /* G-G diagram: меньше на мобильном, ring labels остаются видимыми */

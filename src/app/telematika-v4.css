@@ -2753,3 +2753,28 @@ html.dark .v4-app .v4-bottom-nav {
   .v4-app .frag-row { gap: 7px; padding: 6px 8px; font-size: 10.5px; flex-wrap: wrap; }
   .v4-app .frag-row .chip { margin-left: 0; }
 }
+
+/* === v2.22.0 (M-1): мобильная шапка по требованию владельца ===
+   Скрыты: 3 bookmark-вкладки (дублируют bottom-nav) и desktop-кнопки
+   «Команды» (⌘K) / «Справка» (?) — класс v4-desktop-only на кнопках.
+   Остаются: бренд · Обновить · Поиск · Тема · Выйти.
+   Раскладка: бренд усекается ellipsis, кнопки прижаты вправо через
+   space-between — без горизонтального скролла на 360px+;
+   overflow-x: auto оставлен как страховка для сверхузких экранов. */
+@media (max-width: 767px) {
+  .v4-app .v4-bookmarks { display: none; }
+  .v4-app .v4-desktop-only { display: none; }
+  .v4-app .brand {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .v4-app .brand h1 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .v4-app .topbar-actions {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+  }
+}

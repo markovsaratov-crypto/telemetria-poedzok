@@ -1,8 +1,10 @@
 // src/components/v4/telematika-layout.tsx — каркас v4: единственный горизонтальный
 // top-bar (бренд + 3 bookmark-вкладки + активная-вкладка слово + utility иконки
-// + тема + выход). На мобильных — те же 3 bookmark-вкладки + bottom-nav вместо
-// hamburger/Sheet drawer. Период-селектор + фильтр поездки согласованы: клик по
-// period-pill сбрасывает selectedSessionId, клик по trip-pill открывает dropdown.
+// + тема + выход). На мобильных — bottom-nav вместо вкладок в шапке (v2.22.0:
+// bookmark-вкладки в topbar скрыты на <768px, «Команды»/«Справка» — v4-desktop-only),
+// остаются только Обновить/Поиск/Тема/Выйти. Период-селектор + фильтр поездки
+// согласованы: клик по period-pill сбрасывает selectedSessionId, клик по
+// trip-pill открывает dropdown.
 
 "use client";
 
@@ -304,8 +306,12 @@ export function TelematikaLayout(props: LayoutProps) {
               <Search className="h-4 w-4" />
               <span className="kbd-mini">{kbdSearch}</span>
             </button>
+            {/* v2.22.0 (M-1): «Команды» (⌘K) и «Справка» (?) — desktop-фичи
+                (шорткаты/горячие клавиши), на мобильных спрятаны по требованию
+                владельца (класс v4-desktop-only, CSS max-width 767px).
+                Диалоги остаются доступны с физической клавиатуры (Ctrl+K, «?»). */}
             <button
-              className="iconbtn"
+              className="iconbtn v4-desktop-only"
               onClick={() => onCmdOpen()}
               title={`Команды (${kbdCmd})`}
               aria-label="Команды"
@@ -314,7 +320,7 @@ export function TelematikaLayout(props: LayoutProps) {
               <span className="kbd-mini">{kbdCmd}</span>
             </button>
             <button
-              className="iconbtn"
+              className="iconbtn v4-desktop-only"
               onClick={() => onHelpOpen()}
               title="Горячие клавиши (?)"
               aria-label="Справка"

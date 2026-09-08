@@ -65,12 +65,12 @@ import { ZipImport } from "@/components/zip-import";
 // Версии документов (v2.14.0): синхронно с шапками docs/METHODOLOGY.md и docs/ADMIN_SPEC.md.
 // При следующем релизе доков обновить здесь + строки изменений ниже + шапки файлов в docs/
 const DOCS = {
-  // v2.19.0: синхронизировано с фактическими docs/METHODOLOGY.md и docs/ADMIN_SPEC.md
+  // v2.22.0: синхронизировано с фактическими docs/METHODOLOGY.md и docs/ADMIN_SPEC.md
   // (раньше methodology висел на v2.10.4 с 31.08 — рассинхрон поверхностей)
   methodology: "v2.19.0 · 04.09",
   methodologyPrev: "v2.10.4 · 31.08",
-  spec: "v2.19.0 · 04.09",
-  specPrev: "v2.18.0 · 04.09",
+  spec: "v2.22.0 · 08.09",
+  specPrev: "v2.19.0 · 04.09",
 } as const;
 
 export function AdminViewV4() {
@@ -320,6 +320,18 @@ function A1ParamsBlock() {
                 рендер-версия/методология/OPERATIONS-спека синхронизированы с package.json 2.19.0;
                 render.yaml APP_VERSION <s>2.17.1</s> → 2.19.0; GitHub draft-релиз код-бекап
                 (долг с v2.15.0). Цифры не менялись.
+              </li>
+              <li>
+                <b className="c-plum">спека v2.22.0</b> мобильная шапка — запрос владельца 08.09:
+                в topbar на &lt;768px скрыты <s>3 bookmark-вкладки</s> (дублируют нижнюю навигацию)
+                и кнопки <s>«Команды» (⌘K)</s> + <s>«Справка» (?)</s> — desktop-фичи (класс
+                <b>v4-desktop-only</b>); в мобильной шапке остаются Обновить · Поиск · Тема ·
+                Выйти, бренд усекается ellipsis, кнопки 44px тач-таргеты — без горизонтального
+                скролла (QA 375px: scrollWidth = clientWidth; десктоп ≥768px не изменён).
+                Диалоги Команд/Справки доступны с физической клавиатуры (Ctrl+K, «?»).
+                <b>v2.20.0:</b> публичная регистрация (POST /api/auth/register + форма).
+                <b>v2.21.0:</b> «Плавность · EcoScore» и «Эффективность · экономия» —
+                <s>gauge-дуги</s> → bullet chart.
               </li>
               <li>
                 <b className="c-plum">спека v2.17.0</b> батч-статс: <b>GET /api/stats/batch?ids=</b> — статистика

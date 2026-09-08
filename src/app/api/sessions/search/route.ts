@@ -2,6 +2,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionScopeWhere } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 
@@ -27,6 +28,8 @@ export async function GET(request: NextRequest) {
     const sessions = await db.session.findMany({
       where: {
         deletedAt: null,
+        // v2.23.0: изоляция данных — поиск только по своей зоне видимости
+        ...sessionScopeWhere(dataScopeFor(auth)),
         OR: [
           { deviceId: { contains: q } },
           { deviceName: { contains: q } },

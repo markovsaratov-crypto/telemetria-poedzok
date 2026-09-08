@@ -2,6 +2,7 @@
 import { NextRequest } from "next/server";
 import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
@@ -162,9 +163,13 @@ export async function POST(request: NextRequest) {
     // оставлял «висячую» сессию без точек. tx.gpsPoint.createMany внутри
     // транзакции теперь чанкует многорядными INSERT (<999 плейсхолдеров).
     // v2.19.0: tx — честный DbTx (выводится сигнатурой $transaction; было `: any`)
+    // v2.23.0: изоляция данных — импорт привязывается к импортёру (role=user);
+    // владелец (userId null) — «хозяйские» данные, как раньше
+    const importerScope = dataScopeFor(auth);
+    const importerUserId = importerScope.mode === "own" ? importerScope.userId : null;
     const session = await db.$transaction(async (tx) => {
       const s = await tx.session.create({
-        data: { deviceId, clientId, deviceName, startTime, endTime, pointCount: filtered.length, payloadBytes: fileBuffer.length, status: "completed" },
+        data: { deviceId, clientId, deviceName, startTime, endTime, pointCount: filtered.length, payloadBytes: fileBuffer.length, status: "completed", ...(importerUserId ? { userId: importerUserId } : {}) },
       });
       await tx.gpsPoint.createMany({
         data: filtered.map((p) => ({

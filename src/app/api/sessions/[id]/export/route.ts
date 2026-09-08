@@ -11,6 +11,7 @@ import { NextRequest } from "next/server";
 import { zExportBody } from "@/lib/validation";
 import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionVisibleTo } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { generateExport } from "@/lib/export";
@@ -37,9 +38,13 @@ export async function POST(
     // Скаляры сессии — БЕЗ точек (грузим ниже только если путь sync)
     const session = await db.session.findUnique({
       where: { id },
-      select: { id: true, deviceId: true, deletedAt: true },
+      select: { id: true, deviceId: true, deletedAt: true, userId: true },
     });
     if (!session || session.deletedAt) {
+      return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
+    }
+    // v2.23.0: изоляция данных — чужая сессия неотличима от отсутствующей (404)
+    if (!sessionVisibleTo(dataScopeFor(auth), session.userId)) {
       return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     }
     const deviceId = String(session.deviceId ?? "unknown");

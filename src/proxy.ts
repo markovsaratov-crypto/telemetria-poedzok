@@ -25,6 +25,9 @@ import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import { tokenMatches } from "@/lib/token-check"; // P0-3: проверка ЗНАЧЕНИЙ токенов
 import { sessionCookieName } from "@/lib/cookie-name"; // P0-5: __Host- префикс в prod
+// v2.23.0: пер-юзерный инжест-токен (User.apiKey) — лёгкая проверка для гейта;
+// полная привязка сессий делается в самих инжест-роутах
+import { userDb } from "@/lib/user-db";
 
 // В dev-режиме cookie без __Host- префикса (который требует Secure).
 const SESSION_COOKIE_NAME = sessionCookieName();
@@ -205,7 +208,10 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
 
       if (pathname === "/api/ingest" || pathname.startsWith("/api/ingest/")) {
         const token = bearer ?? queryToken;
-        if (!token || !(await tokenMatches(token, e.INGEST_TOKEN))) {
+        // v2.23.0: ЛИЧНЫЙ токен пользователя (User.apiKey) тоже проходит гейт —
+        // роут привяжет сессии к его userId (изоляция данных)
+        const tokenOk = !!token && (await tokenMatches(token, e.INGEST_TOKEN)) || (!!token && !!(await userDb.findByApiKey(token)));
+        if (!tokenOk) {
           // DIAG-1: неавторизованные попытки в БД не пишем (анти-абьюз) —
           // только in-memory счётчик в /api/metrics
           inc("ingest_unauthorized_total", "Ingest attempts rejected with 401 (bad or missing token)", 1, "ingest");

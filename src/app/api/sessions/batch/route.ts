@@ -3,6 +3,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionScopeWhere } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { z } from "zod";
@@ -27,6 +28,8 @@ export async function POST(request: NextRequest) {
       where: {
         id: { in: parsed.data.ids },
         deletedAt: null,
+        // v2.23.0: изоляция данных — чужие id молча исключаются (как несуществующие)
+        ...sessionScopeWhere(dataScopeFor(auth)),
       },
       select: {
         id: true,

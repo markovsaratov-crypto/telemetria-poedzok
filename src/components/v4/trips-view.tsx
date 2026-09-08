@@ -71,7 +71,19 @@ function groupIntoTrips(list: SessionListItem[]): SessionGroup[] {
   return groups.map((g) => ({ device: g.device, sessions: [...g.sessions].reverse() }));
 }
 
-export function TripsView({ onGoAdmin }: { onGoAdmin?: () => void }) {
+/** v2.23.0: данные зарегистрированного пользователя — для карточки «Подключение телефона» */
+export interface TripsUserInfo {
+  email: string;
+  ingestToken: string;
+}
+
+export function TripsView({
+  onGoAdmin,
+  userInfo,
+}: {
+  onGoAdmin?: () => void;
+  userInfo?: TripsUserInfo;
+}) {
   const ref = React.useRef<HTMLDivElement>(null);
   const [openId, setOpenId] = React.useState<string | null>(null);
   const sessions = useSessions({ limit: 50 });
@@ -119,6 +131,7 @@ export function TripsView({ onGoAdmin }: { onGoAdmin?: () => void }) {
 
   return (
     <div ref={ref}>
+      {userInfo && <PersonalIngestCard user={userInfo} />}
       {isError ? (
         <div className="card" style={{ padding: "20px", color: "var(--red)", fontSize: 13 }}>
           Не удалось загрузить список поездок. Попробуйте обновить страницу.
@@ -1101,6 +1114,99 @@ function Stat({
       <div className="l">
         <span data-tip={tip}>{label}</span>
       </div>
+    </div>
+  );
+}
+
+// v2.23.0: карточка «Подключение телефона» для зарегистрированных пользователей.
+// Показывает ЛИЧНЫЙ SensorLogger Push URL (ingestToken = User.apiKey): поездки
+// с этого URL привязываются к аккаунту и видны только ему (изоляция данных).
+// URL собирается из location.origin; если основной домен недоступен (edge 504),
+// пользователь может заменить хост на push.<домен> — канал стабилен.
+function PersonalIngestCard({ user }: { user: TripsUserInfo }) {
+  const [origin, setOrigin] = React.useState("");
+  const [copied, setCopied] = React.useState(false);
+  React.useEffect(() => {
+    setOrigin(window.location.origin);
+  }, []);
+  const pushUrl =
+    origin && user.ingestToken
+      ? `${origin}/api/ingest/sensorlogger?token=${user.ingestToken}&deviceId=phone`
+      : "";
+
+  async function copy() {
+    if (!pushUrl) return;
+    try {
+      await navigator.clipboard.writeText(pushUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard недоступен — URL можно выделить вручную */
+    }
+  }
+
+  return (
+    <div className="card" style={{ padding: "16px", marginBottom: 4 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 8,
+        }}
+      >
+        <span style={{ fontSize: 14, fontWeight: 600 }}>Подключение телефона</span>
+        <span
+          className="chip"
+          style={{ fontSize: 10, fontWeight: 600 }}
+          data-tip={`Аккаунт ${user.email}: поездки с этого адреса привязываются к вам и видны только вам`}
+        >
+          личный канал
+        </span>
+      </div>
+      <div style={{ fontSize: 12, lineHeight: 1.6, color: "var(--muted)", marginBottom: 8 }}>
+        В приложении SensorLogger (iOS: Настройки → HTTP Push) вставьте адрес ниже —
+        поездки будут появляться на этом экране. В поле deviceId укажите имя своего
+        устройства (например, <code>iphone-15</code>).
+      </div>
+      {pushUrl ? (
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "stretch",
+            flexWrap: "wrap",
+          }}
+        >
+          <code
+            style={{
+              flex: "1 1 260px",
+              fontSize: 11,
+              lineHeight: 1.5,
+              padding: "8px 10px",
+              background: "var(--panel)", border: "1px solid var(--line2)",
+              borderRadius: 8,
+              wordBreak: "break-all",
+              userSelect: "all",
+            }}
+          >
+            {pushUrl}
+          </code>
+          <button
+            type="button"
+            className="stale-banner-btn"
+            onClick={copy}
+            style={{ flex: "0 0 auto", fontSize: 12 }}
+            aria-label="Скопировать адрес для SensorLogger"
+          >
+            {copied ? "Скопировано" : "Копировать"}
+          </button>
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: "var(--muted)" }}>
+          Адрес появится после перезагрузки страницы.
+        </div>
+      )}
     </div>
   );
 }

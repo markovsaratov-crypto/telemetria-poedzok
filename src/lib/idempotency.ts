@@ -1,13 +1,16 @@
 // src/lib/idempotency.ts — проверка (deviceId, clientId), возврат существующего sessionId (§6.2)
-import { db } from "./db";
+// v2.23.0: userId — изоляция данных: дубликат ищется только среди сессий того же
+// владельца (глобальный ключ (deviceId, clientId) остаётся уникальным — см. generic ingest)
+import { db, libsql } from "./db";
 
-export async function findExistingSession(deviceId: string, clientId: string) {
-  const existing = await db.session.findUnique({
-    where: {
-      deviceId_clientId: { deviceId, clientId },
-    },
-    select: { id: true, status: true, deletedAt: true },
+export async function findExistingSession(deviceId: string, clientId: string, userId?: string | null) {
+  // v2.23.0: скоуп по владельцу — сырой SQL вместо composite findUnique
+  const res = await libsql.execute({
+    sql: `SELECT id, status, deletedAt FROM Session
+          WHERE deviceId = ? AND clientId = ? ${userId ? "AND userId = ?" : "AND userId IS NULL"} LIMIT 1`,
+    args: userId ? [deviceId, clientId, userId] : [deviceId, clientId],
   });
+  const existing = res.rows.length > 0 ? res.rows[0] as Record<string, unknown> : null;
   if (!existing) return null;
   // Soft-deleted сессия занимает уникальную пару (deviceId, clientId):
   // помечаем старый clientId надгробием и освобождаем пару —

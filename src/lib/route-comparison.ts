@@ -3,6 +3,7 @@
 // агрегаты по ActiveDuration (§4.11), фильтр SessionReliability ≥ 0.6 (§10.1),
 // Theil-Sen-тренд (§10.5), HotspotSegments P75 < 0.5 (§10.6).
 import { libsql } from "./db";
+import { sessionScopeSql, type DataScope } from "./scope";
 import { pluralRu } from "./format"; // v2.16.0 (D-12): единая плюрализация
 import { computeActiveTrip, computeMovingTime, type MethodologyPoint, type ActiveTrip, type MotionResult } from "./active-trip";
 import {
@@ -95,12 +96,19 @@ function toMs(v: unknown): number {
 // Загружает сессии routeHash-группы с вычислением ActiveTrip + SessionReliability (§11.6).
 // GPS-точки читаются напрямую через libsql (без db-обёрток — полный контроль над выборкой).
 // v2.12.0 (D-8): sinceIso — только сессии, начавшиеся не раньше (период-фильтр, ISO-строка).
-export async function loadGroupSessions(routeHash: string, sinceIso?: string | null): Promise<GroupSession[]> {
+// v2.23.0: scope — изоляция данных: чужие сессии в группу НЕ попадают
+// (сравнение «поездка vs группа» считается только по своим поездкам).
+export async function loadGroupSessions(
+  routeHash: string,
+  sinceIso?: string | null,
+  scope?: DataScope
+): Promise<GroupSession[]> {
+  const sc = scope ? sessionScopeSql(scope) : { clause: "", args: [] as unknown[] };
   const sessRes = await libsql.execute({
     sql: sinceIso != null
-      ? "SELECT id, deviceId, startTime, endTime FROM Session WHERE routeHash = ? AND deletedAt IS NULL AND startTime >= ? ORDER BY startTime ASC"
-      : "SELECT id, deviceId, startTime, endTime FROM Session WHERE routeHash = ? AND deletedAt IS NULL ORDER BY startTime ASC",
-    args: sinceIso != null ? [routeHash, sinceIso] : [routeHash],
+      ? `SELECT id, deviceId, startTime, endTime FROM Session WHERE routeHash = ? AND deletedAt IS NULL AND startTime >= ?${sc.clause} ORDER BY startTime ASC`
+      : `SELECT id, deviceId, startTime, endTime FROM Session WHERE routeHash = ? AND deletedAt IS NULL${sc.clause} ORDER BY startTime ASC`,
+    args: (sinceIso != null ? [routeHash, sinceIso, ...sc.args] : [routeHash, ...sc.args]) as never[],
   });
   if (sessRes.rows.length === 0) return [];
 
@@ -426,7 +434,9 @@ export async function computeGroupHotspots(routeHash: string, sessions: GroupSes
 // сессий в периоде исчезают из ответа). v2.12.0 (D-7): группы обрабатываются
 // параллельно (Promise.all) вместо последовательного цикла — 8 групп больше
 // не ждут друг друга (~8 с → ~1 с).
-export async function listRouteGroups(sinceIso?: string | null): Promise<RouteGroupInfo[]> {
+// v2.23.0: scope — изоляция данных: группы строятся только по видимым сессиям.
+export async function listRouteGroups(sinceIso?: string | null, scope?: DataScope): Promise<RouteGroupInfo[]> {
+  const sc = scope ? sessionScopeSql(scope) : { clause: "", args: [] as unknown[] };
   const res = await libsql.execute(
     sinceIso != null
       ? {
@@ -436,11 +446,11 @@ export async function listRouteGroups(sinceIso?: string | null): Promise<RouteGr
                    GROUP_CONCAT(DISTINCT deviceId) as devices,
                    GROUP_CONCAT(id) as ids
             FROM Session
-            WHERE routeHash IS NOT NULL AND deletedAt IS NULL AND startTime >= ?
+            WHERE routeHash IS NOT NULL AND deletedAt IS NULL AND startTime >= ?${sc.clause}
             GROUP BY routeHash
             ORDER BY lastSeen DESC
           `,
-          args: [sinceIso],
+          args: [sinceIso, ...sc.args] as never[],
         }
       : {
           sql: `
@@ -449,10 +459,11 @@ export async function listRouteGroups(sinceIso?: string | null): Promise<RouteGr
                    GROUP_CONCAT(DISTINCT deviceId) as devices,
                    GROUP_CONCAT(id) as ids
             FROM Session
-            WHERE routeHash IS NOT NULL AND deletedAt IS NULL
+            WHERE routeHash IS NOT NULL AND deletedAt IS NULL${sc.clause}
             GROUP BY routeHash
             ORDER BY lastSeen DESC
           `,
+          args: [...sc.args] as never[],
         }
   );
   const groups: RouteGroupInfo[] = [];
@@ -552,16 +563,19 @@ export interface RouteComparison {
   history: { sessionId: string; date: string; activeDurationSec: number; deviceId: string }[];
 }
 
-export async function compareSessionWithGroup(sessionId: string): Promise<RouteComparison | null> {
+export async function compareSessionWithGroup(sessionId: string, scope?: DataScope): Promise<RouteComparison | null> {
+  // v2.23.0: скоуп применяется и к самой сессии (чужая → null → 404 на роуте),
+  // и к группе сравнения (чужие поездки не участвуют в агрегатах)
+  const sc = scope ? sessionScopeSql(scope) : { clause: "", args: [] as unknown[] };
   const sessRes = await libsql.execute({
-    sql: "SELECT id, routeHash FROM Session WHERE id = ? AND deletedAt IS NULL",
-    args: [sessionId],
+    sql: `SELECT id, routeHash FROM Session WHERE id = ? AND deletedAt IS NULL${sc.clause}`,
+    args: [sessionId, ...sc.args] as never[],
   });
   if (sessRes.rows.length === 0) return null;
   const routeHash = (sessRes.rows[0] as unknown as Record<string, unknown>).routeHash;
   if (!routeHash) return null;
 
-  const sessions = await loadGroupSessions(String(routeHash));
+  const sessions = await loadGroupSessions(String(routeHash), null, scope);
   const me = sessions.find((s) => s.sessionId === sessionId);
   if (!me) return null;
 

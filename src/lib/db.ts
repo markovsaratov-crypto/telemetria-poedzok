@@ -201,6 +201,11 @@ export const db = {
       let sql = "SELECT COUNT(*) as count FROM Session WHERE deletedAt IS NULL";
       const params: unknown[] = [];
       if (args?.where?.status) { sql += " AND status = ?"; params.push(args.where.status); }
+      // v2.23.0: userId — изоляция данных пользователей (null | string | {not: null})
+      const uid = args?.where?.userId;
+      if (uid === null) sql += " AND userId IS NULL";
+      else if (typeof uid === "string") { sql += " AND userId = ?"; params.push(uid); }
+      else if (uid && typeof uid === "object" && (uid as { not?: unknown }).not === null) sql += " AND userId IS NOT NULL";
       // P1-10: startTime { gte } (было молча игнорировалось → «сегодня» показывало всего)
       const st = (args?.where?.startTime as { gte?: Date | number; lt?: Date | number } | undefined);
       if (st?.gte != null) { sql += " AND startTime >= ?"; params.push(toTs(st.gte)); }
@@ -253,6 +258,12 @@ export const db = {
         params.push(w.id);
       }
       if (typeof w.status === "string") { conditions.push("status = ?"); params.push(w.status); }
+      // v2.23.0: userId — изоляция данных (null | string | {not: null});
+      // отдельная ветка, чтобы не ломать существующие текстовые фильтры
+      const wUid = w.userId;
+      if (wUid === null) conditions.push("userId IS NULL");
+      else if (typeof wUid === "string") { conditions.push("userId = ?"); params.push(wUid); }
+      else if (wUid && typeof wUid === "object" && (wUid as { not?: unknown }).not === null) conditions.push("userId IS NOT NULL");
       if (typeof w.routeId === "string") { conditions.push("routeId = ?"); params.push(w.routeId); }
       // текстовые колонки: null | {not: null} (поиск/теги)
       for (const col of ["notes", "tags", "deviceName"] as const) {
@@ -369,7 +380,7 @@ export const db = {
     // P1-10: aggregate (_sum/_count) — ЕДИНСТВЕННАЯ реализация (v2.16.0: мёртвый
     // литеральный дубль внизу файла, затираемый (db as any)-патчем, удалён;
     // сигнатура — как у живого патча: _sum.payloadBytes/_sum.pointCount/_count.id)
-    async aggregate(args: { _sum?: { payloadBytes?: boolean; pointCount?: boolean }; _count?: { id?: boolean }; where?: { status?: string } }) {
+    async aggregate(args: { _sum?: { payloadBytes?: boolean; pointCount?: boolean }; _count?: { id?: boolean }; where?: { status?: string; userId?: null | string } }) {
       let sql = "SELECT";
       const params: unknown[] = [];
       const parts: string[] = [];
@@ -378,6 +389,9 @@ export const db = {
       if (args._count?.id) parts.push("COUNT(*) as _count_id");
       sql += " " + parts.join(", ") + " FROM Session WHERE deletedAt IS NULL";
       if (args.where?.status) { sql += " AND status = ?"; params.push(args.where.status); }
+      // v2.23.0: userId — изоляция данных (aggregate использовался в /api/stats)
+      if (args.where?.userId === null) sql += " AND userId IS NULL";
+      else if (typeof args.where?.userId === "string") { sql += " AND userId = ?"; params.push(args.where.userId); }
       const result = await libsql.execute({ sql, args: params as InValue[] });
       const row = result.rows[0] as Record<string, unknown>;
       return {
@@ -467,6 +481,9 @@ export const db = {
       if (w.status) { sql += " AND status = ?"; params.push(w.status); }
       if (w.routeId) { sql += " AND routeId = ?"; params.push(w.routeId); }
       if (w.id) { sql += " AND id = ?"; params.push(w.id); }
+      // v2.23.0: userId — изоляция данных
+      if (w.userId === null) sql += " AND userId IS NULL";
+      else if (typeof w.userId === "string") { sql += " AND userId = ?"; params.push(w.userId); }
       const order = args?.orderBy?.startTime === "asc" ? "ASC" : "DESC";
       sql += ` ORDER BY startTime ${order} LIMIT 1`;
       const result = await libsql.execute({ sql, args: params as InValue[] });
@@ -485,7 +502,7 @@ export const db = {
   gpsPoint: {
     // v2.16.0: count — полноценный метод литерала (v2.12.0 D-1: точки только ЖИВЫХ
     // сессий; раньше был (db as any)-патч внизу файла)
-    async count(args?: { where?: { sessionId?: string; session?: { deletedAt?: null } } }) {
+    async count(args?: { where?: { sessionId?: string; session?: { deletedAt?: null; userId?: null | string } } }) {
       let sql = "SELECT COUNT(*) as count FROM GpsPoint";
       const params: unknown[] = [];
       const w = args?.where ?? {};
@@ -495,8 +512,14 @@ export const db = {
         if (w.session?.deletedAt === null) {
           sql += " AND sessionId IN (SELECT id FROM Session WHERE deletedAt IS NULL)";
         }
-      } else if (w.session?.deletedAt === null) {
-        sql += " WHERE sessionId IN (SELECT id FROM Session WHERE deletedAt IS NULL)";
+      } else if (w.session?.deletedAt === null || w.session?.userId !== undefined) {
+        sql += " WHERE sessionId IN (SELECT id FROM Session WHERE deletedAt IS NULL";
+        // v2.23.0: скоуп по владельцу сессии — точки чужих сессий не считаются
+        if (w.session?.userId === null) sql += " AND userId IS NULL";
+        else if (typeof w.session?.userId === "string") { sql += " AND userId = ?"; params.push(w.session.userId); }
+        sql += ")";
+      } else {
+        // без фильтров — все точки (как раньше)
       }
       const result = await libsql.execute({ sql, args: params as InValue[] });
       return Number((result.rows[0] as Record<string, unknown>).count);

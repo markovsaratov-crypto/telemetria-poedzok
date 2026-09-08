@@ -1,11 +1,15 @@
 // POST /api/ingest/sensorlogger — адаптер для SensorLogger HTTP Push (iOS app).
 // Принимает нативный формат SensorLogger: JSON-массив сенсорных батчей с вложенной location.
 // Auth: Authorization: Bearer <INGEST_TOKEN>  ИЛИ  ?token=<INGEST_TOKEN>
+// v2.23.0: ЛИЧНЫЙ инжест-токен зарегистрированного пользователя (User.apiKey в
+// Bearer/?token=) — сессии привязываются к его userId (изоляция данных): личный
+// Push URL выдаётся на вкладке «Поездки» после регистрации.
 // Query: ?deviceId=<required>&deviceName=<optional>
 // Корреляция сессий: батчи с одним deviceId в пределах 60с друг от друга = одна сессия.
 import { NextRequest } from "next/server";
 import { libsql } from "@/lib/db";
 import { extractBearer } from "@/lib/auth";
+import { userDb } from "@/lib/user-db"; // v2.23.0: пер-юзерный инжест-токен
 import { tokenMatches } from "@/lib/token-check"; // AUDIT B-16: timing-safe сравнение
 import { env } from "@/lib/env";
 import { json } from "@/lib/http-utils";
@@ -256,14 +260,17 @@ function describePayloadShape(body: unknown): string {
   }
 }
 
-async function createRecordingSession(deviceId: string, deviceName: string, firstTsMs: number): Promise<string> {
+// v2.23.0: userId — привязка сессии к владельцу инжест-канала (null = владелец сервера)
+async function createRecordingSession(deviceId: string, deviceName: string, firstTsMs: number, userId: string | null): Promise<string> {
   const id = randomUUID();
   const now = new Date().toISOString();
   const startTime = new Date(firstTsMs).toISOString();
   await libsql.execute({
-    sql: `INSERT INTO Session (id, deviceId, clientId, deviceName, startTime, endTime, pointCount, payloadBytes, status, createdAt, updatedAt)
-          VALUES (?, ?, ?, ?, ?, ?, 0, 0, 'recording', ?, ?)`,
-    args: [id, deviceId, randomUUID(), deviceName, startTime, startTime, now, now],
+    sql: `INSERT INTO Session (id, deviceId, clientId, deviceName, startTime, endTime, pointCount, payloadBytes, status, createdAt, updatedAt${userId ? ", userId" : ""})
+          VALUES (?, ?, ?, ?, ?, ?, 0, 0, 'recording', ?, ?${userId ? ", ?" : ""})`,
+    args: userId
+      ? [id, deviceId, randomUUID(), deviceName, startTime, startTime, now, now, userId]
+      : [id, deviceId, randomUUID(), deviceName, startTime, startTime, now, now],
   });
   return id;
 }
@@ -284,12 +291,21 @@ export async function POST(request: NextRequest) {
     const tokenOk =
       (await tokenMatches(bearer, e.INGEST_TOKEN)) ||
       (await tokenMatches(queryToken, e.INGEST_TOKEN));
+    // v2.23.0: пер-юзерный токен (User.apiKey) — привязка сессий к пользователю.
+    // Глобальный INGEST_TOKEN остаётся каналом владельца (userId IS NULL).
+    let ingestUserId: string | null = null;
     if (!tokenOk) {
-      return json(
-        { error: "Unauthorized: invalid or missing INGEST_TOKEN. Use Authorization: Bearer <token> or ?token=<token>" },
-        401,
-        { "X-Request-Id": requestId }
-      );
+      const presented = bearer ?? queryToken;
+      const u = presented ? await userDb.findByApiKey(presented) : null;
+      if (u) {
+        ingestUserId = u.id;
+      } else {
+        return json(
+          { error: "Unauthorized: invalid or missing INGEST_TOKEN. Use Authorization: Bearer <token> or ?token=<token>" },
+          401,
+          { "X-Request-Id": requestId }
+        );
+      }
     }
 
     // 2. deviceId из query (обязательный) + валидация (C-21)
@@ -439,11 +455,14 @@ export async function POST(request: NextRequest) {
     // не-по-порядку батч не двигает границы записи назад.
     const outcome = await ingestWriteLock(async () => {
       const now = Date.now();
+      // v2.23.0: корреляция ТОЛЬКО в рамках владельца канала (userId) — батчи
+      // двух пользователей с одинаковым deviceId не склеиваются в общую сессию
       const recent = await libsql.execute({
         sql: `SELECT id, startTime, endTime, updatedAt FROM Session
               WHERE deviceId = ? AND status = 'recording' AND deletedAt IS NULL
+              ${ingestUserId ? "AND userId = ?" : "AND userId IS NULL"}
               ORDER BY updatedAt DESC LIMIT 1`,
-        args: [deviceId],
+        args: ingestUserId ? [deviceId, ingestUserId] : [deviceId],
       });
 
       let sessionId: string;
@@ -470,13 +489,13 @@ export async function POST(request: NextRequest) {
           // к UPDATE новой (раньше min/max смешивал startTime/endTime предыдущей
           // записи с точками новой — startTime новой уезжал назад).
           await finalizeSession(String(row.id));
-          sessionId = await createRecordingSession(deviceId, deviceName, firstBatchTs);
+          sessionId = await createRecordingSession(deviceId, deviceName, firstBatchTs, ingestUserId);
           sessionStartMs = NaN;
           sessionEndMs = NaN;
           isNewSession = true;
         }
       } else {
-        sessionId = await createRecordingSession(deviceId, deviceName, points[0].timestampMs);
+        sessionId = await createRecordingSession(deviceId, deviceName, points[0].timestampMs, ingestUserId);
         isNewSession = true;
       }
 

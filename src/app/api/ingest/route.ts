@@ -1,5 +1,6 @@
 // POST /api/ingest — приём GPS-данных (§4.1). Bearer INGEST_TOKEN.
 // Идемпотентность через (deviceId, clientId). p-limit(1) serialization для SQLite write lock.
+// v2.23.0: ЛИЧНЫЙ токен пользователя (User.apiKey) — сессии привязываются к userId.
 import { NextRequest } from "next/server";
 import { zIngestBody } from "@/lib/validation";
 import { findExistingSession } from "@/lib/idempotency";
@@ -11,6 +12,7 @@ import { recordIngestAttempt } from "@/lib/ingest-trace"; // DIAG-1: трасс�
 import { recordIngestOutcome } from "@/lib/alerts"; // P2-16: правило ingest_error_rate
 import { trackLatency } from "@/lib/latency"; // P2-16: api_latency_p95
 import { extractBearer } from "@/lib/auth";
+import { userDb } from "@/lib/user-db"; // v2.23.0: пер-юзерный инжест-токен
 import { tokenMatches } from "@/lib/token-check";
 import { env } from "@/lib/env";
 
@@ -27,9 +29,16 @@ export async function POST(request: NextRequest) {
     const tokenOk =
       (await tokenMatches(bearer, e.INGEST_TOKEN)) ||
       (await tokenMatches(queryToken, e.INGEST_TOKEN));
+    // v2.23.0: пер-юзерный токен (User.apiKey) → привязка сессий к пользователю
+    let ingestUserId: string | null = null;
     if (!tokenOk) {
-      inc("ingest_unauthorized_total", "Ingest attempts rejected with 401 (bad or missing token)", 1, "ingest");
-      return json({ error: "Unauthorized", reason: "Valid INGEST_TOKEN required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
+      const presented = bearer ?? queryToken;
+      const u = presented ? await userDb.findByApiKey(presented) : null;
+      if (u) ingestUserId = u.id;
+      else {
+        inc("ingest_unauthorized_total", "Ingest attempts rejected with 401 (bad or missing token)", 1, "ingest");
+        return json({ error: "Unauthorized", reason: "Valid INGEST_TOKEN required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
+      }
     }
 
     const body = await request.json().catch(() => null);
@@ -56,7 +65,7 @@ export async function POST(request: NextRequest) {
     const deviceName = parsed.data.deviceName ?? null;
 
     // 1. Идемпотентность (§6.7)
-    const existing = await findExistingSession(deviceId, clientId!);
+    const existing = await findExistingSession(deviceId, clientId!, ingestUserId);
     if (existing) {
       inc("ingest_duplicate_total", "Duplicate ingest (idempotency hit)", 1);
       recordIngestOutcome(true); // P2-16: дубль — успешный исход (идемпотентность)
@@ -130,6 +139,7 @@ export async function POST(request: NextRequest) {
             pointCount: filtered.length,
             payloadBytes,
             status: "completed",
+            ...(ingestUserId ? { userId: ingestUserId } : {}), // v2.23.0: изоляция данных
           },
         });
         // Batch insert GPS points
@@ -160,6 +170,9 @@ export async function POST(request: NextRequest) {
         return { session: s, job };
       });
     } catch (txErr) {
+      // race-фолбэк — БЕЗ скоупа: уникальный ключ (deviceId, clientId) глобален;
+      // коллизия пары разных владельцев маловероятна (clientId — UUID батча),
+      // но честный «duplicate» лучше 500-го
       const raced = await findExistingSession(deviceId, clientId!);
       if (raced) {
         inc("ingest_duplicate_total", "Duplicate ingest (idempotency race)", 1);

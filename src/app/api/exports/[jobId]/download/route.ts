@@ -2,6 +2,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionVisibleTo } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { generateExport } from "@/lib/export";
@@ -29,6 +30,10 @@ export async function GET(
     // (раньше файл скачивался весь TTL после удаления поездки пользователем)
     const sessionRow = (job.session ?? null) as Record<string, unknown> | null;
     if (!sessionRow || sessionRow.deletedAt != null) return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
+    // v2.23.0: изоляция данных — файл чужой сессии не отдаётся (404, как удалённая)
+    if (!sessionVisibleTo(dataScopeFor(auth), sessionRow.userId)) {
+      return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
+    }
 
     // Генерируем контент на лету (в sandbox нет файлового хранилища)
     const { content, mime, ext } = generateExport(job.session as never, job.format as "gpx" | "kml" | "json");

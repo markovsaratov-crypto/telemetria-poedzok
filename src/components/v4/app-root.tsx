@@ -99,11 +99,24 @@ export function AppRoot() {
     return <LoginForm onSuccess={() => auth.refetch()} />;
   }
 
+  // v2.23.0: «Админ»-вкладка только для владельца (legacy, без user) и admin;
+  // зарегистрированный role=user её не видит (админ-роуты для него 403)
+  const userRole = (auth.data as { user?: { role?: string } } | null | undefined)?.user?.role;
+  const showAdmin = !userRole || userRole === "admin";
+
+  // v2.23.0: гвард таба — CommandPalette (⌘K) всё ещё содержит команду
+  // «Перейти: Администрирование»; для role=user она игнорируется.
+  // (не useCallback: стоит после ранних return — нарушал бы rules-of-hooks)
+  const guardedSetTab = (t: V4Tab) => {
+    if (!showAdmin && t === "admin") return;
+    setTab(t);
+  };
+
   return (
     <>
       <TelematikaLayout
         tab={tab}
-        onTabChange={setTab}
+        onTabChange={guardedSetTab}
         period={period}
         onPeriodChange={setPeriod}
         selectedSessionId={selectedSessionId}
@@ -111,18 +124,31 @@ export function AppRoot() {
         onCmdOpen={() => setCmdOpen(true)}
         onSearchOpen={() => setSearchOpen(true)}
         onHelpOpen={() => setHelpOpen(true)}
+        showAdmin={showAdmin}
       >
         {tab === "analytics" && (
           <AnalyticsView period={period} sessionId={selectedSessionId} />
         )}
-        {tab === "trips" && <TripsView onGoAdmin={() => setTab("admin")} />}
+        {tab === "trips" && (
+          <TripsView
+            onGoAdmin={showAdmin ? () => setTab("admin") : undefined}
+            userInfo={
+              userRole === "user"
+                ? {
+                    email: String((auth.data as { user?: { email?: string } } | null | undefined)?.user?.email ?? ""),
+                    ingestToken: String((auth.data as { ingestToken?: string } | null | undefined)?.ingestToken ?? ""),
+                  }
+                : undefined
+            }
+          />
+        )}
         {tab === "admin" && <AdminViewV4 />}
       </TelematikaLayout>
 
       <CommandPalette
         open={cmdOpen}
         onOpenChange={setCmdOpen}
-        onTabChange={(name) => setTab(mapLegacyTab(name))}
+        onTabChange={(name) => guardedSetTab(mapLegacyTab(name))}
         onLogout={handleLogout}
         onRefresh={handleRefresh}
       />

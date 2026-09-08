@@ -30,6 +30,8 @@ export async function GET(request: NextRequest) {
           expiresAt: renewed.expiresAt,
           renewed: true,
           user: renewed.user,
+          // v2.23.0: личный инжест-токен для SensorLogger Push URL
+          ingestToken: session.user.apiKey,
         },
         { status: 200, headers: { "X-Request-Id": requestId } }
       );
@@ -41,6 +43,8 @@ export async function GET(request: NextRequest) {
         authenticated: true,
         expiresAt: new Date(session.payload.exp * 1000).toISOString(),
         user: { id: session.user.id, email: session.user.email, role: session.user.role },
+        // v2.23.0: личный инжест-токен для SensorLogger Push URL
+        ingestToken: session.user.apiKey,
       },
       { status: 200, headers: { "X-Request-Id": requestId } }
     );

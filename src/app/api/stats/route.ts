@@ -9,6 +9,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionScopeWhere } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { env } from "@/lib/env";
@@ -20,6 +21,10 @@ export async function GET(request: NextRequest) {
     const auth = await authorizeRequest(request, "api");
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
+    // v2.23.0: изоляция данных — все агрегаты дашборда в зоне видимости запрашивающего
+    const scope = dataScopeFor(auth);
+    const scopeW = sessionScopeWhere(scope);
+
     const url = new URL(request.url);
 
     // All-time stats
@@ -28,8 +33,8 @@ export async function GET(request: NextRequest) {
     // софт-делетнутых сессий → «GPS-точек (всего)» в админке расходилось
     // с суммой по поездкам в других разделах.
     const [totalSessions, totalPoints, totalRoutes, totalTrafficJobs, deadJobs, pendingJobs] = await Promise.all([
-      db.session.count({ where: { deletedAt: null } }),
-      db.gpsPoint.count({ where: { session: { deletedAt: null } } }),
+      db.session.count({ where: { deletedAt: null, ...scopeW } }),
+      db.gpsPoint.count({ where: { session: { deletedAt: null, ...scopeW } } }),
       db.route.count(),
       db.trafficJob.count(),
       db.trafficJob.count({ where: { status: "dead" } }),
@@ -53,10 +58,10 @@ export async function GET(request: NextRequest) {
     twelveWeeksAgo.setDate(twelveWeeksAgo.getDate() - 84); // v2.16.0 (V4): имя = суть (12 недель, не «30 дней»)
     const [todaySessions, recentSessions, totalBytesResult, heatmapSessions, ingestTrace] = await Promise.all([
       db.session.count({
-        where: { startTime: { gte: new Date(todayStartMs) }, deletedAt: null },
+        where: { startTime: { gte: new Date(todayStartMs) }, deletedAt: null, ...scopeW },
       }),
       db.session.findMany({
-        where: { startTime: { gte: sevenDaysAgo }, deletedAt: null },
+        where: { startTime: { gte: sevenDaysAgo }, deletedAt: null, ...scopeW },
         select: { startTime: true, endTime: true, pointCount: true, payloadBytes: true },
         orderBy: { startTime: "asc" },
         // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 резал спарклайн
@@ -65,21 +70,27 @@ export async function GET(request: NextRequest) {
       // v2.18.0: where: {deletedAt: null} — лишний (aggregate SQL уже фильтрует живые)
       db.session.aggregate({
         _sum: { payloadBytes: true },
+        ...(scope.mode === "own" ? { where: { userId: scope.userId } } : scope.mode === "unclaimed" ? { where: { userId: null } } : {}),
       }),
       db.session.findMany({
-        where: { startTime: { gte: twelveWeeksAgo }, deletedAt: null },
+        where: { startTime: { gte: twelveWeeksAgo }, deletedAt: null, ...scopeW },
         select: { startTime: true, pointCount: true },
         orderBy: { startTime: "asc" },
         // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 в обёртке резал
         // 12-недельную тепловую карту до 20 сессий
         take: 5000,
       }),
-      readIngestTrace().catch(() => ({ last: null, recent: [], updatedAt: null })),
+      // v2.23.0: трейс инжеста — только владельцу/админу (это дебаг-канал
+      // владельца: deviceId и сырое тело батчей его телефона)
+      scope.mode === "own"
+        ? Promise.resolve({ last: null, recent: [], updatedAt: null })
+        : readIngestTrace().catch(() => ({ last: null, recent: [], updatedAt: null })),
     ]);
 
     // v2.10.8: полный дамп последнего нераспознанного батча — ТОЛЬКО по
     // ?ingestRaw=1: до 64 КБ в теле ответа, не таскаем его в каждом запросе.
-    const wantRaw = url.searchParams.get("ingestRaw") === "1";
+    // v2.23.0: сырой дамп чужих батчей — только владелец/админ
+    const wantRaw = url.searchParams.get("ingestRaw") === "1" && scope.mode !== "own";
     const ingestRaw = wantRaw
       ? await readIngestRaw().catch(() => null)
       : null;

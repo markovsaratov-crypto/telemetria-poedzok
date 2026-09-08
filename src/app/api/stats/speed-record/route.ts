@@ -8,6 +8,7 @@
 import { NextRequest } from "next/server";
 import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionScopeSql } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { maxSpeedMs, normalizeSessionSpeeds } from "@/lib/kpi";
@@ -20,7 +21,8 @@ interface SpeedRecordValue {
   date: string | null; // startTime сессии-рекордсмена (ISO)
 }
 
-let cache: { value: SpeedRecordValue; ts: number } | null = null;
+// v2.23.0: кэш ПО РЕЖИМУ СКОУПА — общий кэш лил бы чужой рекорд другому юзеру
+const scopeCache = new Map<string, { value: SpeedRecordValue; ts: number }>();
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -28,16 +30,22 @@ export async function GET(request: NextRequest) {
     const auth = await authorizeRequest(request, "api");
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
-    if (cache && Date.now() - cache.ts < CACHE_TTL_MS) {
-      return json(cache.value, 200, { "X-Request-Id": requestId, "Cache-Control": "private, max-age=300" });
+    const scope = dataScopeFor(auth);
+    const cacheKey = scope.mode === "own" ? `own:${scope.userId}` : scope.mode;
+    const cached = scopeCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+      return json(cached.value, 200, { "X-Request-Id": requestId, "Cache-Control": "private, max-age=300" });
     }
 
     // Живые сессии с GPS-точками одним JOIN (хронологический порядок).
+    // v2.23.0: изоляция данных — рекорд считается по своей зоне видимости
+    const sc = sessionScopeSql(scope, "s");
     const res = await libsql.execute({
       sql: `SELECT s.id AS sid, s.startTime AS startTime, g.lat, g.lon, g.timestamp, g.speed, g.bearing, g.accuracy
             FROM Session s JOIN GpsPoint g ON g.sessionId = s.id
-            WHERE s.deletedAt IS NULL
+            WHERE s.deletedAt IS NULL${sc.clause}
             ORDER BY s.startTime ASC, g.timestamp ASC`,
+      args: sc.args as never[],
     });
 
     // Группировка точек по сессиям (строки уже в хронологическом порядке).
@@ -82,7 +90,7 @@ export async function GET(request: NextRequest) {
         }
       : { maxSpeedAllTimeKmh: null, sessionId: null, date: null };
 
-    cache = { value, ts: Date.now() };
+    scopeCache.set(cacheKey, { value, ts: Date.now() });
     return json(value, 200, { "X-Request-Id": requestId, "Cache-Control": "private, max-age=300" });
   } catch (err) {
     logger.error("speed record failed", { requestId, error: err instanceof Error ? err.message : String(err) });

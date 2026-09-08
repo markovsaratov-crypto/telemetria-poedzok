@@ -4,6 +4,7 @@
 import { NextRequest } from "next/server";
 import { libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionScopeSql } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 
@@ -13,23 +14,27 @@ export async function GET(request: NextRequest) {
     const auth = await authorizeRequest(request, "api");
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
+    // v2.23.0: изоляция данных — топ устройств только в зоне видимости
+    const sc = sessionScopeSql(dataScopeFor(auth), "s");
     const sql = `
       SELECT
         s.deviceId AS deviceId,
         (SELECT s2.deviceName FROM Session s2
-         WHERE s2.deviceId = s.deviceId AND s2.deletedAt IS NULL
+         WHERE s2.deviceId = s.deviceId AND s2.deletedAt IS NULL${sc.clause.replace(/s\./g, "s2.")}
          ORDER BY s2.startTime DESC LIMIT 1) AS deviceName,
         COUNT(*) AS sessionCount,
         COALESCE(SUM(s.pointCount), 0) AS totalPoints,
         COALESCE(SUM(s.payloadBytes), 0) AS totalBytes,
         MAX(s.startTime) AS lastActivity
       FROM Session s
-      WHERE s.deletedAt IS NULL
+      WHERE s.deletedAt IS NULL${sc.clause}
       GROUP BY s.deviceId
       ORDER BY sessionCount DESC
       LIMIT 10
     `;
-    const result = await libsql.execute(sql);
+    // v2.23.0: в own-режиме userId-плейсхолдер встречается ДВАЖДЫ (основной
+    // запрос + коррелированный подзапрос deviceName) — аргументы дублируются
+    const result = await libsql.execute({ sql, args: [...sc.args, ...sc.args] as never[] });
     const devices = result.rows.map((row) => {
       const r = row as Record<string, unknown>;
       return {

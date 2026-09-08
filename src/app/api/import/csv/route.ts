@@ -5,6 +5,7 @@ import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.11.0: общий �
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
@@ -115,6 +116,9 @@ export async function POST(request: NextRequest) {
 
     const imported: { id: string; deviceId: string; points: number }[] = [];
     const errors: { deviceId: string; error: string }[] = [];
+    // v2.23.0: изоляция данных — импорт привязывается к импортёру (role=user)
+    const importerScope = dataScopeFor(auth);
+    const importerUserId = importerScope.mode === "own" ? importerScope.userId : null;
 
     for (const [, g] of groups) {
       try {
@@ -134,6 +138,7 @@ export async function POST(request: NextRequest) {
                 pointCount: g.points.length,
                 payloadBytes: Buffer.byteLength(JSON.stringify(g.points)),
                 status: "completed",
+                ...(importerUserId ? { userId: importerUserId } : {}), // v2.23.0: изоляция
               },
             });
             await tx.gpsPoint.createMany({

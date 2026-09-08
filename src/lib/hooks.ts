@@ -28,7 +28,17 @@ export function useAuth() {
   return useQuery({
     queryKey: ["auth", "me"],
     queryFn: () =>
-      api.get<{ authenticated: boolean; expiresAt?: string } | null>(
+      api.get<
+        | {
+            authenticated: boolean;
+            expiresAt?: string;
+            /** v2.23.0: данные зарегистрированного пользователя (у owner-сессии нет) */
+            user?: { id: string; email: string; role: string };
+            /** v2.23.0: личный инжест-токен (SensorLogger Push URL) */
+            ingestToken?: string;
+          }
+        | null
+      >(
         "/api/auth/me",
         undefined,
         { expect: "json" }

@@ -12,6 +12,7 @@
 // Read-скоп rate-limit (proxy.ts, 240/мин).
 import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { parseBatchIds, batchCacheKey, loadSessionsForBatch } from "@/lib/batch-points";
@@ -36,14 +37,17 @@ export async function GET(request: NextRequest) {
 
     // TTL-кэш 30с: повторные открытия периода/вкладки и истёкший клиентский
     // staleTime не пересчитывают G-G по 25k точек заново
-    const cacheKey = batchCacheKey(ids);
+    // v2.23.0: изоляция данных — ключ кэша включает зону видимости
+    const scope = dataScopeFor(auth);
+    const cacheKey = (scope.mode === "own" ? `own:${scope.userId}:` : scope.mode === "unclaimed" ? "unclaimed:" : "all:") + batchCacheKey(ids);
     const cached = CACHE.get(cacheKey);
     if (cached) {
       trackLatency(request);
       return json(cached, 200, { "X-Request-Id": requestId, "X-Cache": "ttl" });
     }
 
-    const sessions = await loadSessionsForBatch(ids);
+    // v2.23.0: чужие сессии не попадают в Map → трактуются как missing
+    const sessions = await loadSessionsForBatch(ids, scope);
     const missing = ids.filter((id) => {
       const e = sessions.get(id);
       return !e || e.deleted;

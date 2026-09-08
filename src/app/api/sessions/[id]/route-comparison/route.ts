@@ -3,6 +3,7 @@
 // RouteTrafficPattern (8×3ч), RouteDayOfWeekPattern (пн–вс), RouteTrend (Theil-Sen).
 import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionVisibleTo } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { compareSessionWithGroup } from "@/lib/route-comparison";
@@ -17,7 +18,8 @@ export async function GET(
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
     const { id } = await params;
-    const comparison = await compareSessionWithGroup(id);
+    // v2.23.0: изоляция данных — и сессия, и группа сравнения в зоне видимости
+    const comparison = await compareSessionWithGroup(id, dataScopeFor(auth));
     if (!comparison) {
       // Сессии без routeHash (нет ActiveTrip или единственная поездка) — 404 с пояснением
       return json(

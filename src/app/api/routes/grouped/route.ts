@@ -3,6 +3,7 @@
 // v2.12.0 (D-8): ?period=today|week|d30|all — группы ограничены сессиями периода.
 import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { listRouteGroups, routePeriodSinceIso } from "@/lib/route-comparison";
@@ -18,7 +19,8 @@ export async function GET(request: NextRequest) {
     const tzRaw = Number(url.searchParams.get("tzOffsetMin"));
     const tzOffsetMin = Number.isFinite(tzRaw) && Math.abs(tzRaw) <= 15 * 60 ? Math.round(tzRaw) : 0;
     const sinceIso = routePeriodSinceIso(url.searchParams.get("period"), tzOffsetMin);
-    const groups = await listRouteGroups(sinceIso);
+    // v2.23.0: изоляция данных — группы только своей зоны видимости
+    const groups = await listRouteGroups(sinceIso, dataScopeFor(auth));
     return json({ groups, total: groups.length }, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Route groups error", { requestId, error: err instanceof Error ? err.message : String(err) });

@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionVisibleTo } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { writeAudit } from "@/lib/audit";
@@ -28,8 +29,12 @@ export async function PATCH(
       return json({ error: "Validation failed", details: parsed.error.flatten() }, 400, { "X-Request-Id": requestId });
     }
 
-    const session = await db.session.findUnique({ where: { id }, select: { id: true, deletedAt: true, notes: true, tags: true } });
+    const session = await db.session.findUnique({ where: { id }, select: { id: true, deletedAt: true, notes: true, tags: true, userId: true } });
     if (!session || session.deletedAt) {
+      return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
+    }
+    // v2.23.0: изоляция данных — чужая сессия неотличима от отсутствующей (404)
+    if (!sessionVisibleTo(dataScopeFor(auth), session.userId)) {
       return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     }
 

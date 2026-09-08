@@ -3,6 +3,8 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionVisibleTo } from "@/lib/scope";
+import { libsql } from "@/lib/db";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 
@@ -22,6 +24,17 @@ export async function GET(
     // на КАЖДЫЙ poll, пока воркер не завершит). Контент генерирует download-роут.
     const job = await db.exportJob.findUnique({ where: { id: jobId } });
     if (!job) return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
+
+    // v2.23.0: изоляция данных — джоб чужой сессии неотличим от отсутствующего.
+    //Poll-роут не тянет сессию include-ом (v2.16.0 I2) — лёгкий точечный запрос.
+    const ownRes = await libsql.execute({
+      sql: "SELECT userId FROM Session WHERE id = ? LIMIT 1",
+      args: [String(job.sessionId)],
+    });
+    const sessUserId = ownRes.rows.length > 0 ? (ownRes.rows[0] as Record<string, unknown>).userId : undefined;
+    if (sessUserId === undefined || !sessionVisibleTo(dataScopeFor(auth), sessUserId)) {
+      return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
+    }
 
     const status = String(job.status ?? "");
     const jobError = job.error == null ? null : String(job.error);

@@ -45,6 +45,8 @@ interface LayoutProps {
   onCmdOpen: () => void;
   onSearchOpen: () => void;
   onHelpOpen: () => void;
+  /** v2.23.0: показывать вкладку «Админ» (owner/admin; для role=user скрыта) */
+  showAdmin?: boolean;
   children: React.ReactNode;
 }
 
@@ -141,6 +143,7 @@ export function TelematikaLayout(props: LayoutProps) {
     onCmdOpen,
     onSearchOpen,
     onHelpOpen,
+    showAdmin = true,
     children,
   } = props;
   useV4Tipbox();
@@ -255,6 +258,10 @@ export function TelematikaLayout(props: LayoutProps) {
   const activeTabLabel = TABS.find((t) => t.id === tab)?.label ?? "";
 
   // v2.11.0 (U-22): sr-only заголовок текущего раздела + семантический <main> —
+  // v2.23.0: «Админ» — только владельцу/админу (role=user видел вкладку,
+  // которая целиком билась об 403 админ-роутов)
+  const visibleTabs = TABS.filter((t) => showAdmin || t.id !== "admin");
+
   // у страницы единственный h1 (бренд в шапке), навигация по разделам скринридером.
   const tabAriaTitle =
     tab === "admin" ? "Администрирование" : tab === "trips" ? "Поездки" : "Аналитика";
@@ -270,7 +277,7 @@ export function TelematikaLayout(props: LayoutProps) {
           </div>
 
           <nav className="v4-bookmarks" aria-label="Вкладки">
-            {TABS.map((t) => (
+            {visibleTabs.map((t) => (
               <button
                 key={t.id}
                 className={`v4-bookmark ${tab === t.id ? "active" : ""}`}
@@ -477,7 +484,7 @@ export function TelematikaLayout(props: LayoutProps) {
 
       {/* === Bottom navigation (mobile only, sticky) === */}
       <nav className="v4-bottom-nav" aria-label="Мобильная навигация">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button
             key={t.id}
             className={`v4-bottom-nav-item ${tab === t.id ? "active" : ""}`}

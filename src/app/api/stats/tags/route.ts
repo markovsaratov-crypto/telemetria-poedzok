@@ -2,6 +2,7 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionScopeWhere } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 
@@ -16,6 +17,8 @@ export async function GET(request: NextRequest) {
       where: {
         deletedAt: null,
         tags: { not: null },
+        // v2.23.0: изоляция данных — теги только своей зоны
+        ...sessionScopeWhere(dataScopeFor(auth)),
       },
       select: { tags: true },
       // v2.11.0 (АУДИТ C-7): явный лимит вместо тихого дефолта 20

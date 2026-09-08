@@ -6,6 +6,7 @@
 // v2.12.0 (D-7): группы обрабатываются параллельно (Promise.all).
 import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import {
@@ -32,7 +33,9 @@ export async function GET(request: NextRequest) {
     const tzOffsetMin = Number.isFinite(tzRaw) && Math.abs(tzRaw) <= 15 * 60 ? Math.round(tzRaw) : 0;
     const sinceIso = routePeriodSinceIso(url.searchParams.get("period"), tzOffsetMin);
 
-    const groupsInfo = await listRouteGroups(sinceIso);
+    // v2.23.0: изоляция данных
+    const scope = dataScopeFor(auth);
+    const groupsInfo = await listRouteGroups(sinceIso, scope);
     let totalHotspotSegments = 0;
     let worstP75: number | null = null;
 
@@ -40,7 +43,7 @@ export async function GET(request: NextRequest) {
     // цикл с двумя await на группу, ~1 с × 8 групп).
     const groupResults = await Promise.all(
       groupsInfo.slice(0, MAX_GROUPS).map(async (g) => {
-        const sessions = await loadGroupSessions(g.routeHash, sinceIso);
+        const sessions = await loadGroupSessions(g.routeHash, sinceIso, scope);
         if (sessions.length === 0) return null;
         const { hotspots, totalSegments, polyline } = await computeGroupHotspots(g.routeHash, sessions);
         if (totalSegments === 0) return null;

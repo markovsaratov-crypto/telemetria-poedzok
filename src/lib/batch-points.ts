@@ -15,6 +15,7 @@
 // (каждый id входит ровно в один чанк, внутри чанка ORDER BY timestamp ASC).
 
 import { libsql } from "./db";
+import { sessionScopeSql, type DataScope } from "./scope";
 
 export const BATCH_MAX_IDS = 50;
 export const BATCH_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -82,16 +83,23 @@ function toNumOrNull(v: unknown): number | null {
  * Меты сессий + точки, чанками параллельно. Возвращает Map по id, включая
  * удалённые сессии (deleted: true) — фильтрация/missing решает вызывающий.
  * Несуществующие id в Map не попадают (→ missing).
+ * v2.23.0: scope — изоляция данных: чужие сессии (не входящие в зону видимости)
+ * в Map НЕ попадают → вызывающий трактует их как missing. Точки чужих сессий
+ * не запрашиваются вовсе.
  */
-export async function loadSessionsForBatch(ids: string[]): Promise<Map<string, BatchSessionData>> {
+export async function loadSessionsForBatch(
+  ids: string[],
+  scope?: DataScope
+): Promise<Map<string, BatchSessionData>> {
   const out = new Map<string, BatchSessionData>();
 
-  // ——— меты: один крошечный IN-запрос (≤50 строк) ———
+  // ——— меты: один крошечный IN-запрос (≤50 строк) + скоуп владельца ———
+  const sc = scope ? sessionScopeSql(scope) : { clause: "", args: [] as unknown[] };
   const metaPh = ids.map(() => "?").join(", ");
   const metaRes = await libsql.execute({
     sql: `SELECT id, deviceId, startTime, endTime, deletedAt, routeHash, topologyHash, pointCount
-          FROM Session WHERE id IN (${metaPh})`,
-    args: ids,
+          FROM Session WHERE id IN (${metaPh})${sc.clause}`,
+    args: [...ids, ...sc.args] as never[],
   });
   const order: string[] = [];
   for (const row of metaRes.rows as Record<string, unknown>[]) {

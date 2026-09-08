@@ -7,6 +7,7 @@ import { NextRequest } from "next/server";
 import { zSessionsQuery } from "@/lib/validation";
 import { db, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor, sessionScopeWhere } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 
@@ -25,6 +26,8 @@ export async function GET(request: NextRequest) {
 
     const where: Record<string, unknown> = {
       deletedAt: null,
+      // v2.23.0: изоляция данных — сессии только зоны видимости запрашивающего
+      ...sessionScopeWhere(dataScopeFor(auth)),
     };
     if (q.olderThan) where.endTime = { lt: new Date(q.olderThan) };
     // v2.16.0 (B8): инвертированный фильтр исправлен — параметр «before» теперь

@@ -7,6 +7,7 @@
 import { NextRequest } from "next/server";
 import { libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
+import { dataScopeFor } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import {
@@ -28,18 +29,22 @@ export async function GET(
 
     const { id } = await params;
 
+    // v2.23.0: изоляция данных — тренды только по своей зоне видимости
+    const scope = dataScopeFor(auth);
     // 1) [id] как routeHash
-    let sessions = await loadGroupSessions(id);
+    let sessions = await loadGroupSessions(id, null, scope);
 
     // 2) Fallback: [id] как UUID админского Route → сессии по FK
     if (sessions.length === 0 && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      // routeHash — детерминированный хэш геометрии маршрута (не персональные
+      // данные); сами сессии группы скоупятся ниже в loadGroupSessions
       const res = await libsql.execute({
         sql: "SELECT routeHash FROM Session WHERE routeId = ? AND deletedAt IS NULL AND routeHash IS NOT NULL LIMIT 1",
         args: [id],
       });
       if (res.rows.length > 0) {
         const routeHash = String((res.rows[0] as unknown as Record<string, unknown>).routeHash);
-        sessions = await loadGroupSessions(routeHash);
+        sessions = await loadGroupSessions(routeHash, null, scope);
       }
     }
 

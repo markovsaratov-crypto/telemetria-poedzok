@@ -26,6 +26,7 @@
 "use client";
 
 import * as React from "react";
+import { ZipImport } from "@/components/zip-import";
 import { useSessions, useSessionStats, useSessionsStatsBatch, isStatsBatchCovered, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
 import { ecoCls, ecoLab } from "@/lib/v4-utils";
@@ -132,6 +133,15 @@ export function TripsView({
   return (
     <div ref={ref}>
       {userInfo && <PersonalIngestCard user={userInfo} />}
+      {/* v2.24.0: импорт ZIP для зарегистрированных пользователей — восстановление
+          поездок, не дошедших по push (SensorLogger хранит логи локально; архив
+          экспортируется из приложения и загружается здесь; сессии привязываются
+          к аккаунту импортёра — тот же скоуп, что у инжеста по личному токену). */}
+      {userInfo && (
+        <div style={{ marginBottom: 4 }}>
+          <ZipImport />
+        </div>
+      )}
       {isError ? (
         <div className="card" style={{ padding: "20px", color: "var(--red)", fontSize: 13 }}>
           Не удалось загрузить список поездок. Попробуйте обновить страницу.
@@ -1121,13 +1131,19 @@ function Stat({
 // v2.23.0: карточка «Подключение телефона» для зарегистрированных пользователей.
 // Показывает ЛИЧНЫЙ SensorLogger Push URL (ingestToken = User.apiKey): поездки
 // с этого URL привязываются к аккаунту и видны только ему (изоляция данных).
-// URL собирается из location.origin; если основной домен недоступен (edge 504),
-// пользователь может заменить хост на push.<домен> — канал стабилен.
+// v2.24.0: URL по умолчанию выдаётся через push.<домен> — стабильный канал
+// (единый edge-IP, без round-robin между edge и их редкими 504). Phone-клиент
+// SensorLogger не ретраит сбойные отправки — надёжность канала критична.
 function PersonalIngestCard({ user }: { user: TripsUserInfo }) {
   const [origin, setOrigin] = React.useState("");
   const [copied, setCopied] = React.useState(false);
   React.useEffect(() => {
-    setOrigin(window.location.origin);
+    const host = window.location.hostname;
+    const pushHost =
+      host === "poedzok.fun" || host === "www.poedzok.fun"
+        ? "push.poedzok.fun"
+        : host;
+    setOrigin(`${window.location.protocol}//${pushHost}`);
   }, []);
   const pushUrl =
     origin && user.ingestToken
@@ -1166,8 +1182,10 @@ function PersonalIngestCard({ user }: { user: TripsUserInfo }) {
       </div>
       <div style={{ fontSize: 12, lineHeight: 1.6, color: "var(--muted)", marginBottom: 8 }}>
         В приложении SensorLogger (iOS: Настройки → HTTP Push) вставьте адрес ниже —
-        поездки будут появляться на этом экране. В поле deviceId укажите имя своего
-        устройства (например, <code>iphone-15</code>).
+        поездки будут появляться на этом экране. Адрес начинается с
+        <code>https://</code> — iOS блокирует незащищённые <code>http://</code>-ссылки
+        («App Transport Security»); канал <code>push.</code> — стабильный. В поле deviceId
+        укажите имя своего устройства (например, <code>iphone-15</code>).
       </div>
       {pushUrl ? (
         <div

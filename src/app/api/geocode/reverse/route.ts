@@ -175,24 +175,48 @@ export async function GET(request: NextRequest) {
       if (dgisKey) {
         const proxyUrl = getSettingSync("TWO_GIS_PROXY_URL") || process.env.TWO_GIS_PROXY_URL || "";
         const baseUrl = proxyUrl || "https://catalog.api.2gis.ru";
-        // 2ГИС 3.0 items/geocode: q={lon},{lat} — обратное геокодирование координат
-        const url = `${baseUrl}/3.0/items/geocode?q=${encodeURIComponent(lon)},${encodeURIComponent(lat)}&key=${dgisKey}`;
+        // 2ГИС 3.0 items/geocode: q={lon},{lat} — обратное геокодирование координат.
+        // items.adm_div — административная привязка: нужна для БЕЗЫМЯННЫХ точек
+        // (парковка/поле без названия — v2.25.0: «куда: 51.48971, 46.13059»
+        // хотя район/город известны).
+        const url = `${baseUrl}/3.0/items/geocode?q=${encodeURIComponent(lon)},${encodeURIComponent(lat)}&fields=items.adm_div&key=${dgisKey}`;
         const res = await fetch(url, {
           headers: { Accept: "application/json" },
           signal: AbortSignal.timeout(8000),
         });
         if (res.ok) {
           const data = (await res.json()) as {
-            result?: { items?: Array<{ type?: string; full_name?: string; name?: string; address_name?: string }> };
+            result?: {
+              items?: Array<{
+                type?: string;
+                subtype?: string;
+                full_name?: string;
+                name?: string;
+                address_name?: string;
+                adm_div?: Array<{ name?: string; type?: string }>;
+              }>;
+            };
           };
           const items = data.result?.items ?? [];
           // items[0] — «coordinates»-заглушка; первый осмысленный — building/street/place
-          const item = items.find((it) => it.type !== "coordinates" && (it.full_name || it.name));
-          if (item && (item.full_name || item.name)) {
-            const address = item.full_name || (item.name as string);
-            const short = item.address_name || item.name || shortAddress(null, address);
+          const item = items.find((it) => it.type !== "coordinates");
+          // v2.25.0 (П.1): подпись из имени объекта → адреса → административной
+          // привязки (adm_div: город → район → регион). Даже безымянная парковка
+          // получает «Энгельс» вместо сырых координат.
+          const adm = item?.adm_div ?? [];
+          const admCity = [...adm].reverse().find((a) => a.type === "city" || a.type === "town" || a.type === "settlement")?.name ?? null;
+          const admArea = [...adm].reverse().find((a) => a.type === "district_area" || a.type === "district")?.name ?? null;
+          const admRegion = adm.find((a) => a.type === "region")?.name ?? null;
+          const itemName = item?.full_name || item?.name || item?.address_name || null;
+          const itemShort = item?.address_name || item?.name || null;
+          const placeShort = admCity ?? admArea ?? admRegion ?? null;
+          if (itemName || placeShort) {
+            // Полный адрес: имя объекта; иначе административная цепочка (регион → район → город)
+            const address = itemName || [admRegion, admArea, admCity].filter(Boolean).join(", ");
+            const subtypeNote = item?.subtype ? ` (${item.subtype === "ground" ? "парковка" : item.subtype})` : "";
+            const short = itemShort || placeShort;
             const cachedAt = new Date().toISOString();
-            const cacheValue = JSON.stringify({ address, short, cachedAt, raw: null, provider: "2gis" });
+            const cacheValue = JSON.stringify({ address: address + subtypeNote, short, cachedAt, raw: null, provider: "2gis" });
             try {
               await setSetting(key, cacheValue, "geocode-cache");
             } catch (e) {
@@ -201,7 +225,7 @@ export async function GET(request: NextRequest) {
                 error: e instanceof Error ? e.message : String(e),
               });
             }
-            return json({ address, short, cachedAt, cached: false, provider: "2gis" }, 200, { "X-Request-Id": requestId });
+            return json({ address: address + subtypeNote, short, cachedAt, cached: false, provider: "2gis" }, 200, { "X-Request-Id": requestId });
           }
         } else {
           logger.warn("2GIS reverse geocode failed", { requestId, status: res.status });

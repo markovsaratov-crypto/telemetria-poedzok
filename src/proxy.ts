@@ -55,8 +55,10 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
     // v2.11.0 (АУДИТ C-18): тяжёлый лимит 1/час — для ВСЕХ дорогих мутаций бэкапов:
     // POST /api/admin/backup (полный дамп) И POST /api/admin/backup/github
     // (дамп + релиз + аплоад 6 МБ) — второй раньше попадал в 60/мин default.
-    (pathname === "/api/admin/backup" || pathname.startsWith("/api/admin/backup/") || pathname === "/api/admin/restore") &&
-    method !== "GET"
+    // v2.26.0 (ТЗ §13): POST /api/admin/backfill-trips — backfill поездок
+    // (полный recompute истории + постановка план-джобов) — тот же класс.
+    ((pathname === "/api/admin/backup" || pathname.startsWith("/api/admin/backup/") || pathname === "/api/admin/restore" || pathname === "/api/admin/backfill-trips") &&
+      method !== "GET")
   ) {
     return { limit: e.RATE_LIMIT_MAX_ADMIN, windowSec: 3600, scope: "admin:heavy" };
   }
@@ -84,7 +86,12 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
         // (2×N поштучных запросов → 2 запроса)
         pathname === "/api/events/batch" ||
         pathname === "/api/track/batch" ||
-        pathname === "/api/geocode/reverse")) ||
+        pathname === "/api/geocode/reverse" ||
+        // v2.26.0 (ТЗ §10): поездки — лёгкий список + батч-статсы, тот же класс
+        // чтения, что у записей (вкладка «Поездки»: /api/trips + /api/trips/batch)
+        pathname === "/api/trips" ||
+        pathname === "/api/trips/batch" ||
+        /^\/api\/trips\/[A-Za-z0-9_-]{1,64}$/.test(pathname))) ||
     // v2.16.0 (S1): bulk-ЧТЕНИЯ POST-ом — в read-скопе. /api/sessions/batch
     // (пачка записей для «Поездок») — чтение по определению, но падало в
     // default 60/мин: ровно тот класс 429-шторма, ради которого read-скоп

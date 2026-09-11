@@ -29,6 +29,7 @@ import * as React from "react";
 import { ZipImport } from "@/components/zip-import";
 import { useSessions, useSessionStats, useSessionsStatsBatch, isStatsBatchCovered, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
+import { useTrips, useTripsStatsBatch, useTripStats } from "@/lib/trip-hooks"; // v2.26.0: ПОЕЗДКИ сервера
 import { ecoCls, ecoLab } from "@/lib/v4-utils";
 import { fmtSecFull, fmtDurMin, fmtNumber, pluralRu } from "@/lib/format";
 import { bindTips } from "./use-v4-tipbox";
@@ -85,12 +86,22 @@ export function TripsView({
   onGoAdmin?: () => void;
   userInfo?: TripsUserInfo;
 }) {
+  // v2.26.0 (ТЗ §11): ПОЕЗДКИ СЕРВЕРА — канонический список /api/trips.
+  // Склейка больше не клиентская эвристика: поездка назначается сервером
+  // (trip-grouping, каноническое правило §4 ТЗ). Легаси-рендер записей остаётся
+  // фолбэком на expand-фазе (TRIP_ENABLED=false / поездок ещё нет) — регрессионно
+  // безопасный переход (§13 ТЗ).
+  const tripsQ = useTrips({ limit: 50 });
+  const serverTrips = tripsQ.data?.trips ?? [];
+  const serverTripsActive =
+    tripsQ.isSuccess && tripsQ.data?.disabled !== true && serverTrips.length > 0;
+
   const ref = React.useRef<HTMLDivElement>(null);
   const [openId, setOpenId] = React.useState<string | null>(null);
-  const sessions = useSessions({ limit: 50 });
+  const sessions = useSessions({ limit: 50 }, { enabled: !serverTripsActive });
   React.useEffect(() => {
     if (ref.current) bindTips(ref.current);
-  }, [openId, sessions.data]);
+  }, [openId, sessions.data, tripsQ.data]);
 
   const list: SessionListItem[] = sessions.data?.sessions ?? [];
   const isLoading = sessions.isLoading && !sessions.data;
@@ -142,7 +153,17 @@ export function TripsView({
           <ZipImport />
         </div>
       )}
-      {isError ? (
+      {/* v2.26.0: СЕРВЕРНЫЕ ПОЕЗДКИ — приоритетный рендер (ТЗ §11) */}
+      {serverTripsActive ? (
+        <TripsServerView
+          trips={serverTrips}
+          isLoading={tripsQ.isLoading}
+          isError={tripsQ.isError}
+          onGoAdmin={onGoAdmin}
+          openId={openId}
+          setOpenId={setOpenId}
+        />
+      ) : isError ? (
         <div className="card" style={{ padding: "20px", color: "var(--red)", fontSize: 13 }}>
           Не удалось загрузить список поездок. Попробуйте обновить страницу.
         </div>
@@ -1238,6 +1259,459 @@ function PersonalIngestCard({ user }: { user: TripsUserInfo }) {
           Адрес появится после перезагрузки страницы.
         </div>
       )}
+    </div>
+  );
+}
+
+// ===== v2.26.0 (ТЗ «Поездка не рвётся», §11): СЕРВЕРНЫЕ ПОЕЗДКИ =====
+// Карточки рендерятся из /api/trips + /api/trips/batch: поездка назначена
+// СЕРВЕРОМ (каноническое правило trip-grouping §4 ТЗ), клиентская эвристика
+// groupIntoTrips выше остаётся фолбэком expand-фазы и удаляется в contract-фазе.
+
+function TripsServerView({
+  trips,
+  isLoading,
+  isError,
+  onGoAdmin,
+  openId,
+  setOpenId,
+}: {
+  trips: import("@/lib/api-client").TripListItem[];
+  isLoading: boolean;
+  isError: boolean;
+  onGoAdmin?: () => void;
+  openId: string | null;
+  setOpenId: (id: string | null) => void;
+}) {
+  if (isError) {
+    return (
+      <div className="card" style={{ padding: "20px", color: "var(--red)", fontSize: 13 }}>
+        Не удалось загрузить список поездок. Попробуйте обновить страницу.
+      </div>
+    );
+  }
+  if (isLoading) return <TripsSkeleton />;
+  return (
+    <>
+      <StaleTripsBanner trips={trips} onGoAdmin={onGoAdmin} />
+      <TripSummaryServer trips={trips} />
+      {trips.map((t) => (
+        <TripEntryCard
+          key={t.id}
+          trip={t}
+          isOpen={openId === t.id}
+          onToggle={() => setOpenId(openId === t.id ? null : t.id)}
+        />
+      ))}
+    </>
+  );
+}
+
+// Баннер «данных нет >24 ч» — по последней поездке (аналог StaleDataBanner)
+function StaleTripsBanner({
+  trips,
+  onGoAdmin,
+}: {
+  trips: import("@/lib/api-client").TripListItem[];
+  onGoAdmin?: () => void;
+}) {
+  if (trips.length === 0) return null;
+  const latest = Math.max(...trips.map((t) => new Date(t.spanEnd ?? t.spanStart).getTime()));
+  const hours = (Date.now() - latest) / 3_600_000;
+  if (hours < 24) return null;
+  const days = Math.floor(hours / 24);
+  const label =
+    days >= 1 ? `${days} ${days === 1 ? "день" : days < 5 ? "дня" : "дней"}` : `${Math.floor(hours)} ч`;
+  return (
+    <div className="stale-banner" role="status">
+      <div className="stale-banner-main">
+        <b>Новых загрузок нет уже {label}</b>
+        <span>
+          Поездки попадают сюда только когда SensorLogger отправляет данные на
+          сервер. Если вы записывали поездки, но их нет — канал загрузки нужно
+          проверить.
+        </span>
+      </div>
+      {onGoAdmin ? (
+        <button type="button" className="stale-banner-btn" onClick={onGoAdmin}>
+          Диагностика канала →
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+// Сводка вкладки: ПОЕЗДКИ (сервер) · записи · км · «в поездках» · EcoScore · точки.
+// Статы — одним батчем (useTripsStatsBatch сеет per-trip кэш карточек).
+function TripSummaryServer({ trips }: { trips: import("@/lib/api-client").TripListItem[] }) {
+  const ids = React.useMemo(() => trips.map((t) => t.id), [trips]);
+  const batch = useTripsStatsBatch(ids);
+  const stats = batch.data?.stats ?? [];
+
+  const totalSessions = trips.reduce((s, t) => s + (t.sessionCount ?? 0), 0);
+  const totalDistKm = stats.reduce((s, x) => s + (x.distance ?? 0), 0) / 1000;
+  const totalActiveMin = stats.reduce((s, x) => s + (x.activeDurationSec ?? 0), 0) / 60;
+  const totalPoints = stats.reduce((s, x) => s + (x.pointCount ?? 0), 0);
+  // EcoScore — взвешенное среднее по активной длительности (как период-агрегат)
+  let ecoWSum = 0;
+  let ecoW = 0;
+  for (const x of stats) {
+    const v = x.ecoScore;
+    const w = x.activeDurationSec ?? 0;
+    if (v != null && Number.isFinite(v) && w > 0) {
+      ecoWSum += v * w;
+      ecoW += w;
+    }
+  }
+  const avgEco = ecoW > 0 ? Math.max(0, Math.min(100, Math.round(ecoWSum / ecoW))) : null;
+  const computing = stats.length < trips.length;
+
+  return (
+    <div className="card tsum">
+      <div className="tsum-main">
+        <b
+          data-tip={`Поездка = движение устройства с паузами/остановками < 15 минут (серверное правило v2.26, ТЗ §4): iOS-разрывы пуша больше не режут поездку — сервер склеивает записи автоматически. Пауза/остановка ≥ 15 минут = новая поездка`}
+        >
+          {fmtNumber(trips.length)} {pluralRu(trips.length, ["поездка", "поездки", "поездок"])}
+          {totalSessions > trips.length ? (
+            <span style={{ color: "var(--muted)", fontWeight: 500 }}>
+              {" "}· {fmtNumber(totalSessions)} {pluralRu(totalSessions, ["запись", "записи", "записей"])}
+            </span>
+          ) : null}
+        </b>
+        <span>
+          последняя:{" "}
+          {trips[0]
+            ? new Date(trips[0].spanStart).toLocaleDateString("ru-RU", {
+                day: "2-digit",
+                month: "short",
+              })
+            : "—"}
+          {computing ? " · считаем сводку…" : ""}
+        </span>
+      </div>
+      <div className="tsum-stats">
+        <div>
+          <b>{totalDistKm > 0 ? totalDistKm.toFixed(1).replace(".", ",") : "—"}</b>
+          <span>км всего</span>
+        </div>
+        <div>
+          <b>{totalActiveMin > 0 ? fmtDurMin(totalActiveMin) : "—"}</b>
+          <span>в поездках</span>
+        </div>
+        <div>
+          <b>{avgEco ?? "—"}</b>
+          <span>средняя плавность</span>
+        </div>
+        <div>
+          <b>{fmtNumber(totalPoints)}</b>
+          <span>GPS-точек</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Карточка ОДНОЙ поездки (серверной): адреса старта/финиша, N записей, план.
+function TripEntryCard({
+  trip,
+  isOpen,
+  onToggle,
+}: {
+  trip: import("@/lib/api-client").TripListItem;
+  isOpen: boolean;
+  onToggle: () => void;
+}) {
+  const stats = useTripStats(trip.id, { live: trip.status === "recording" });
+  const st = stats.data ?? null;
+  const dest = useReverseGeocode(trip.endLat ?? null, trip.endLon ?? null);
+  const destShort = dest.data?.short ?? null;
+
+  const start = new Date(trip.spanStart);
+  const dd = String(start.getDate()).padStart(2, "0");
+  const months = ["ЯНВ", "ФЕВ", "МАР", "АПР", "МАЙ", "ИЮН", "ИЮЛ", "АВГ", "СЕН", "ОКТ", "НОЯ", "ДЕК"];
+  const mo = months[start.getMonth()];
+  const hh = String(start.getHours()).padStart(2, "0");
+  const mm = String(start.getMinutes()).padStart(2, "0");
+
+  const distKm = st ? st.distance / 1000 : null;
+  const durMin = st ? st.duration / 60 : null;
+  const points = st?.pointCount ?? trip.pointCountActual ?? 0;
+  const noMovement = st != null && distKm != null && distKm <= 0;
+  const sub =
+    st == null
+      ? `${trip.sessionCount} ${pluralRu(trip.sessionCount, ["запись", "записи", "записей"])} · считаем…`
+      : noMovement
+        ? `${fmtNumber(points)} ${pluralRu(points, ["точка", "точки", "точек"])} · нет данных о движении`
+        : `${(distKm ?? 0).toFixed(1).replace(".", ",")} км · ${fmtDurMin((st.activeDurationSec ?? 0) / 60)} · ${fmtNumber(points)} ${pluralRu(points, ["точка", "точки", "точек"])}`;
+
+  const title =
+    destShort != null ? (
+      <span title={dest.data?.address ?? undefined}>
+        <span aria-hidden="true" style={{ color: "var(--plum)", fontWeight: 800 }}>→ </span>
+        {destShort}
+      </span>
+    ) : dest.isLoading ? (
+      <span style={{ color: "var(--muted)", fontWeight: 600 }}>→ адрес финиша…</span>
+    ) : (
+      <span>{trip.deviceId}</span>
+    );
+
+  const eco = st?.ecoScore ?? null;
+
+  return (
+    <div className={`trip ${isOpen ? "open" : ""}`}>
+      <div
+        className="trip-head"
+        onClick={onToggle}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
+      >
+        <div className="trip-date">
+          <b>{dd}</b>
+          <span>{mo}</span>
+          <small>
+            {hh}:{mm}
+          </small>
+        </div>
+        <div className="trip-info">
+          <div className="t-route">
+            {title}
+            {trip.sessionCount > 1 ? (
+              <span
+                className="chip chip-plum"
+                style={{ marginLeft: 6, fontSize: 10 }}
+                data-tip={`Одна поездка из ${trip.sessionCount} ${pluralRu(trip.sessionCount, ["записи", "записей", "записей"])}: паузы между ними < 15 минут — iOS приостанавливает логгер, сервер склеивает записи автоматически (v2.26)`}
+              >
+                {trip.sessionCount} {pluralRu(trip.sessionCount, ["запись", "записи", "записей"])}
+              </span>
+            ) : null}
+            {trip.status === "recording" ? (
+              <span
+                className="chip chip-amber chip-live"
+                style={{ marginLeft: 4, fontSize: 10 }}
+                data-tip="Поездка ещё пишется — статистика обновляется каждые 15 секунд"
+              >
+                идёт запись
+              </span>
+            ) : null}
+          </div>
+          <div className="t-sub">{sub}</div>
+        </div>
+        <div className={`t-eco ${eco != null ? ecoCls(eco) : ""}`}>
+          <b>{eco ?? "—"}</b>
+          <small>{eco != null ? `${ecoLab(eco)} · из 100` : "—"}</small>
+        </div>
+        <i className="chev">›</i>
+      </div>
+      {isOpen ? <TripEntryBody trip={trip} st={st} /> : null}
+    </div>
+  );
+}
+
+function TripEntryBody({
+  trip,
+  st,
+}: {
+  trip: import("@/lib/api-client").TripListItem;
+  st: import("@/lib/api-client").TripStats | null;
+}) {
+  // «откуда → куда»: адреса первой/последней активной точки поездки (ТЗ §11 —
+  // адрес старта теперь показывается, раньше — только финиш)
+  const from = useReverseGeocode(trip.startLat ?? null, trip.startLon ?? null);
+  const to = useReverseGeocode(trip.endLat ?? null, trip.endLon ?? null);
+
+  const startStr = new Date(trip.spanStart).toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const endStr = trip.spanEnd
+    ? new Date(trip.spanEnd).toLocaleString("ru-RU", {
+        day: "2-digit",
+        month: "long",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : null;
+
+  if (!st) {
+    return (
+      <div className="trip-body">
+        <p style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>
+          Загрузка детальной статистики ({trip.sessionCount}{" "}
+          {pluralRu(trip.sessionCount, ["запись", "записи", "записей"])})…
+        </p>
+      </div>
+    );
+  }
+
+  const avgKmh = st.avgSpeed != null ? st.avgSpeed * 3.6 : null;
+  const maxKmh = st.maxSpeed != null ? st.maxSpeed * 3.6 : null;
+  const spanSec = st.duration;
+  const pausesSec = st.interFragmentGapSec ?? 0;
+  const r = st.route;
+
+  return (
+    <div className="trip-body">
+      <div className="seg-total" style={{ marginBottom: 10 }}>
+        <span>старт:</span>
+        <b>{startStr}</b>
+        <span>финиш:</span>
+        <b>{endStr ?? (trip.status === "recording" ? "идёт запись" : "—")}</b>
+      </div>
+      <div className="seg-total" style={{ marginBottom: 10 }}>
+        <span>откуда:</span>
+        <b style={{ fontWeight: 600 }} title={from.data?.address ?? undefined}>
+          {from.data ? `← ${from.data.short}` : from.isLoading ? "адрес старта…" : "—"}
+        </b>
+      </div>
+      {to.data ? (
+        <div className="seg-total" style={{ marginBottom: 10 }}>
+          <span>куда:</span>
+          <b
+            style={{ fontWeight: 600 }}
+            data-tip={`Адрес конечной точки поездки (Nominatim→2ГИС, кэш на сервере) | ${to.data.cached ? "из кэша" : "свежий запрос"}`}
+          >
+            → {to.data.short}
+          </b>
+        </div>
+      ) : null}
+      <div className="stats-grid" style={{ marginTop: 0, marginBottom: 10 }}>
+        <Stat
+          value={`${fmtNumber(st.pointCount)}`}
+          tip="Сумма GPS-точек всех записей поездки (после фильтрации выбросов)"
+          label="GPS-точек"
+        />
+        <Stat
+          value={`${(st.distance / 1000).toFixed(1).replace(".", ",")} км`}
+          tip="Дистанция активной части поездки (§4.2): сумма гаверсинусов активных окон — хвосты и парковки не считаются"
+          label="Дистанция"
+        />
+        <Stat
+          value={fmtDurMin(spanSec / 60)}
+          tip="От старта до финиша: включая паузы между записями и короткие остановки (< 15 минут)"
+          label="Длительность"
+        />
+        <Stat
+          value={fmtDurMin(st.activeDurationSec / 60)}
+          tip="«В поездке» (§4.11): активные окна всех записей — светофоры и пробки включены, стоянки-хвосты нет"
+          label="В поездке"
+        />
+        <Stat
+          value={avgKmh != null ? `${avgKmh.toFixed(1).replace(".", ",")} км/ч` : "—"}
+          tip="Средняя скорость (§4.3, FIX-C1): дистанция / активная длительность поездки"
+          label="Ср. скорость"
+        />
+        <Stat
+          value={maxKmh != null ? `${maxKmh.toFixed(1).replace(".", ",")} км/ч` : "—"}
+          tip="Максимальная скорость (§4.4) — пик с фильтрацией выбросов по конкатенированному потоку поездки"
+          label="Макс. скорость"
+        />
+        <Stat
+          value={fmtSecFull(st.movingTime)}
+          tip="Суммарное время в движении (§4.6) по потоку поездки"
+          label="В движении"
+        />
+        <Stat
+          value={fmtSecFull(st.idleTime)}
+          tip="Суммарное время стоянок (§4.7) внутри записей"
+          label="Стоянки"
+        />
+        <Stat
+          value={fmtSecFull(pausesSec)}
+          tip="Паузы МЕЖДУ записями: логгер приостанавливался (iOS), сервер резал запись при тишине >60 сек — поездка склеена сервером (v2.26)"
+          label="Паузы между записями"
+        />
+        <Stat
+          value={fmtSecFull(st.gapTime)}
+          tip="Разрывы потока точек внутри записей (§4.6): интервалы > 30 сек без данных GPS"
+          label="Разрывы"
+        />
+      </div>
+      {/* План-факт поездки (§9 ТЗ): ОДИН маршрут на всю поездку */}
+      {r && (r.planDurationSec != null || r.planDistanceM != null) ? (
+        <div className="seg-total" style={{ marginBottom: 10 }}>
+          <span>план:</span>
+          <b
+            style={{ fontWeight: 600 }}
+            data-tip={`План поездки (один маршрут на все записи): провайдер ${r.provider ?? "—"}${r.planCoverage != null ? ` · покрытие ${(r.planCoverage * 100).toFixed(0)}%` : ""}${r.planComparable === false ? " · НЕ сопоставим с фактом (гейт PLAN_MIN_COVERAGE)" : ""}`}
+          >
+            {r.planDurationSec != null ? `${fmtDurMin(r.planDurationSec / 60)}` : "—"}
+            {r.planDurationSec != null && st.activeDurationSec > 0 && r.planComparable !== false
+              ? ` / факт ${fmtDurMin(st.activeDurationSec / 60)} · ${
+                  st.activeDurationSec - r.planDurationSec >= 0 ? "+" : ""
+                }${fmtDurMin(Math.abs(st.activeDurationSec - r.planDurationSec) / 60)}`
+              : ""}
+            {r.planComparable === false ? " · план не сопоставим" : ""}
+          </b>
+        </div>
+      ) : null}
+      {trip.sessionCount > 1 || (st.fragments ?? []).length > 1 ? (
+        <>
+          <div className="frag-head">
+            <span>записи этой поездки</span>
+            <span>{pluralRu((st.fragments ?? trip.sessionIds).length, ["фрагмент", "фрагмента", "фрагментов"])}</span>
+          </div>
+          <div className="frag-list">
+            {(st.fragments ?? []).map((f) => (
+              <TripFragmentRow key={f.id} sessionId={f.id} startTime={f.startTime} endTime={f.endTime} pointCount={f.pointCount} status={f.status} />
+            ))}
+          </div>
+        </>
+      ) : null}
+      <div className="t-ev">
+        Поездка собрана сервером: записи одного устройства с паузами &lt; 15 минут
+        склеиваются автоматически (v2.26) — iOS-разрывы пуша больше не режут
+        поездку на куски. Параметры считаются конвейером §4.2/§4.3/§4.11 по
+        конкатенированному потоку точек — цифры совпадают с «Аналитикой».
+      </div>
+    </div>
+  );
+}
+
+// Строка-фрагмент поездки: время · дистанция (из кэша session-stats) · статус
+function TripFragmentRow({
+  sessionId,
+  startTime,
+  endTime,
+  pointCount,
+  status,
+}: {
+  sessionId: string;
+  startTime: string;
+  endTime: string | null;
+  pointCount: number;
+  status: string;
+}) {
+  const stats = useSessionStats(sessionId, { live: status === "recording" });
+  const st = new Date(startTime);
+  const en = endTime ? new Date(endTime) : null;
+  const t = (d: Date) =>
+    `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const distKm = stats.data ? stats.data.distance / 1000 : null;
+  return (
+    <div
+      className="frag-row"
+      data-tip={`Запись ${sessionId.slice(0, 8)} · ${fmtNumber(pointCount)} ${pluralRu(pointCount, ["точка", "точки", "точек"])} GPS · статус: ${SESSION_STATUS_RU[status] ?? status}`}
+    >
+      <b className="mono">
+        {t(st)}–{en ? t(en) : "…"}
+      </b>
+      <span>{distKm != null ? `${distKm.toFixed(1).replace(".", ",")} км` : "…"}</span>
+      <span>
+        {fmtNumber(pointCount)} {pluralRu(pointCount, ["т.", "т.", "т."])}
+      </span>
+      <span className={`chip chip-${status === "recording" ? "amber chip-live" : "gray"}`} style={{ fontSize: 9 }}>
+        {SESSION_STATUS_RU[status] ?? status}
+      </span>
     </div>
   );
 }

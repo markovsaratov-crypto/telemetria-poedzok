@@ -263,8 +263,25 @@ export function computeMovingTime(points: MethodologyPoint[]): MotionResult {
  * 2 поездки. activeDuration = Σ legs (настоящее «в поездке»), spanDuration —
  * прежняя semantics «первое→последнее движение». Светофоры/пробки (< порога)
  * остаются внутри legs — активная поездка по §4.11 их по-прежнему включает.
+ *
+ * v2.26.0 (ТЗ «Поездка не рвётся», §8): opts-параметр вместо копипаста конвейера.
+ * Тот же код работает на потоке ЗАПИСИ (дефолты из env — как в v2.25) и на
+ * потоке ПОЕЗДКИ (trip-grouping передаёт splitSec=TRIP_SPLIT_SEC, воркер —
+ * splitSec=ACTIVE_TRIP_MIN_LEG_SEC для routing legs план-факта §9 ТЗ).
+ * Дефолты НЕ меняются — вызовы без opts бит-в-бит совместимы с v2.25.
  */
-export function computeActiveTrip(points: MethodologyPoint[], motion: MotionResult): ActiveTrip {
+export interface ActiveTripOpts {
+  /** Порог разбивки legs (стоянка ≥ порога закрывает leg). Дефолт env.ACTIVE_TRIP_STOP_SPLIT_SEC. */
+  splitSec?: number;
+  /** Минимальная длительность leg (микро-legs < порога отбрасываются). Дефолт env.ACTIVE_TRIP_MIN_LEG_SEC. */
+  minLegSec?: number;
+}
+
+export function computeActiveTrip(
+  points: MethodologyPoint[],
+  motion: MotionResult,
+  opts?: ActiveTripOpts
+): ActiveTrip {
   const firstMoving = motion.states.findIndex((s) => s === "moving");
   const lastMoving = motion.states.reduce<number>((acc, s, i) => (s === "moving" ? i : acc), -1);
 
@@ -286,8 +303,9 @@ export function computeActiveTrip(points: MethodologyPoint[], motion: MotionResu
   // states[i] описывает интервал points[i] → points[i+1]; «стоянка-run» — серия
   // подряд идущих idle/gap-интервалов; run ≥ порога закрывает текущий leg.
   // Для каждого leg-кандидата копим его внутренний idle (для activeIdleTime).
-  const splitSec = Math.max(60, env().ACTIVE_TRIP_STOP_SPLIT_SEC);
-  const minLegSec = Math.max(5, env().ACTIVE_TRIP_MIN_LEG_SEC);
+  // v2.26.0: пороги — из opts (поездка/маршрутизация) или env (запись, как v2.25).
+  const splitSec = Math.max(60, opts?.splitSec ?? env().ACTIVE_TRIP_STOP_SPLIT_SEC);
+  const minLegSec = Math.max(5, opts?.minLegSec ?? env().ACTIVE_TRIP_MIN_LEG_SEC);
   const rawLegs: Array<{ startTime: number; endTime: number; idleSec: number }> = [];
   let curLegStartState: number | null = null; // state idx первого moving текущего leg
   let runStartState: number | null = null; // state idx начала текущей стоянки-run

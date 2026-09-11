@@ -18,6 +18,7 @@ import {
   type SessionListItem,
 } from "./api-client";
 import { useSessions, fetchSessionsStatsBatch, seedSessionsStatsFromBatch, type SessionStats } from "./hooks";
+import { useTrips } from "./trip-hooks"; // v2.26.0: счётчик ПОЕЗДОК периода
 import { type PeriodKey } from "./v4-utils";
 
 // /api/stats/speed-record — §4.5 MaxSpeedAllTime (v2.13.0 Ф1).
@@ -95,7 +96,10 @@ export interface PeriodAggregate {
   stats: SessionStats;
   events: EventsResponse;
   track: TrackResponse;
+  /** v2.26.0 (ТЗ §11): ПОЕЗДКИ = серверные Trip (fallback на записи, если поездки ещё не заведены — expand-фаза) */
   trips: number;
+  /** v2.26.0: записи периода (транспортные фрагменты) — «· M записей» в шапке */
+  sessionsCount: number;
   rangeStart: string;
   rangeEnd: string;
 }
@@ -457,11 +461,25 @@ function aggregateTrack(items: TrackResponse[]): TrackResponse {
 // Возвращает { data: PeriodAggregate | null, trips, isLoading, isError }.
 export function usePeriodStats(period: PeriodKey) {
   const sessions = useSessions({ limit: 50 });
+  // v2.26.0 (ТЗ §11): счётчик ПОЕЗДОК — из /api/trips (spanStart в периоде);
+  // записи — транспортные фрагменты. Пока поездки не заведены (expand-фаза:
+  // TRIP_ENABLED=false / backfill не выполнен) — честный fallback на записи.
+  const tripsQ = useTrips({ limit: 100 });
   const qc = useQueryClient();
   const list = sessions.data?.sessions ?? [];
   const inPeriod = useMemo(() => sessionsInPeriod(list, period), [list, period]);
   const ids = useMemo(() => inPeriod.map((s) => s.id), [inPeriod]);
   const idsKey = ids.join(",");
+  const periodFromMs = periodStartMs(period);
+  const tripsInPeriod = useMemo(() => {
+    const tl = tripsQ.data?.trips ?? [];
+    if (tl.length === 0) return 0; // поездки не заведены — fallback ниже
+    return tl.filter((t) => {
+      const ts = new Date(t.spanStart).getTime();
+      return Number.isFinite(ts) && ts >= periodFromMs;
+    }).length;
+  }, [tripsQ.data, periodFromMs]);
+  const tripsCount = tripsInPeriod > 0 || (tripsQ.data?.trips?.length ?? 0) > 0 ? tripsInPeriod : inPeriod.length;
 
   const agg = useQuery<PeriodAggregate | null>({
     queryKey: ["v4", "period-aggregate", period, idsKey],
@@ -518,7 +536,8 @@ export function usePeriodStats(period: PeriodKey) {
         stats: aggregateStats(okStats, `period:${period}:${okStats.length}`),
         events: aggregateEvents(okEvents),
         track: aggregateTrack(okTracks),
-        trips: okStats.length,
+        trips: tripsCount,
+        sessionsCount: okStats.length,
         rangeStart,
         rangeEnd,
       };
@@ -530,7 +549,7 @@ export function usePeriodStats(period: PeriodKey) {
 
   return {
     ...agg,
-    trips: ids.length,
+    trips: tripsCount,
     isLoading: sessions.isLoading || agg.isLoading,
     isError: sessions.isError || agg.isError,
   };

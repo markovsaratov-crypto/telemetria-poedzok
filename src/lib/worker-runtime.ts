@@ -9,6 +9,7 @@ import { haversineM } from "./geo"; // v2.25.0 (П.5): Σ прямых учас�
 import { finalizeSession } from "./session-finalize"; // v2.14.0 (Ф3): «жнец» зависших recording-сессий
 import { computeMovingTime, computeActiveTrip } from "./active-trip"; // v2.16.0 (B-10): каноническое активное окно §4.11
 import { getCorpusEcoBaselines } from "./eco-corpus"; // v2.17.1: фоновый прогрев corpus-калибровки
+import { closeStaleTrips, tripsEnabled } from "./trip-grouping"; // v2.26.0 (ТЗ §7-п.4): «жнец» поездок
 
 // P0-фикс v2.9.10 (Render build failure — финальная версия без костылей):
 //
@@ -60,7 +61,9 @@ interface WorkerRuntime {
 
 interface JobWithPoints {
   id: string;
-  sessionId: string;
+  sessionId: string | null;
+  // v2.26.0 (ТЗ §6/§9): задание ПОЕЗДКИ — ровно один из sessionId/tripId.
+  tripId: string | null;
   attempts: number;
   session: {
     id: string;
@@ -94,10 +97,12 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
   } catch {}
 
   // Atomic claim
+  // v2.26.0: RETURNING включает tripId — задание может быть поездковым (ТЗ §6:
+  // ровно один из sessionId/tripId заполнен).
   const claimResult = await libsql.execute({
     sql: `UPDATE TrafficJob SET status = 'running', lockedBy = ?, lockedAt = ?, updatedAt = ?
           WHERE id IN (SELECT id FROM TrafficJob WHERE status = 'pending' AND scheduledFor <= ? ORDER BY priority DESC, scheduledFor ASC LIMIT ?)
-          RETURNING id, sessionId, attempts`,
+          RETURNING id, sessionId, tripId, attempts`,
     args: [workerId, now, now, now, batchSize],
   });
 
@@ -105,11 +110,127 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
 
   const claimed = claimResult.rows.map((r) => {
     const row = r as Record<string, unknown>;
-    return { id: String(row.id), sessionId: String(row.sessionId), attempts: Number(row.attempts || 0) };
+    return {
+      id: String(row.id),
+      sessionId: row.sessionId == null ? null : String(row.sessionId),
+      tripId: row.tripId == null ? null : String(row.tripId),
+      attempts: Number(row.attempts || 0),
+    };
   });
 
-  // Batch load sessions + gpsPoints
-  const sessionIds = claimed.map((c) => c.sessionId);
+  // ——— v2.26.0: ПОЕЗДКОВЫЕ задания (tripId != NULL) — ТЗ §9 ———
+  // Поток точек поездки = конкатенация точек её записей (ORDER BY timestamp).
+  // Routing legs = активные отрезки, разделённые паузами/остановками
+  // > ACTIVE_TRIP_MIN_LEG_SEC (§9 ТЗ); микро-участки < порога отбрасываются;
+  // свыше TRIP_MAX_ROUTING_LEGS — сливаются СОСЕДНИЕ КРАТЧАЙШИЕ (не «5 крупнейших»,
+  // как у записей v2.25 — у поездки важно не потерять средние участки).
+  const tripJobs = claimed.filter((c) => c.tripId != null);
+  const sessionJobs = claimed.filter((c) => c.tripId == null && c.sessionId != null);
+  const deadJobs = claimed.filter((c) => c.tripId == null && c.sessionId == null);
+  const jobs: JobWithPoints[] = [];
+
+  for (const c of deadJobs) {
+    await libsql.execute({ sql: `UPDATE TrafficJob SET status = 'dead', error = 'neither sessionId nor tripId set', updatedAt = ? WHERE id = ?`, args: [now, c.id] });
+  }
+
+  if (tripJobs.length > 0 && tripsEnabled()) {
+    const tripIds = tripJobs.map((c) => c.tripId as string);
+    const tph = tripIds.map(() => "?").join(", ");
+    const tripsRes = await libsql.execute({
+      sql: `SELECT id, deviceId, sessionIds FROM Trip WHERE id IN (${tph})`,
+      args: tripIds,
+    });
+    const tripById = new Map<string, { deviceId: string; sessionIds: string[] }>();
+    for (const r of tripsRes.rows as Record<string, unknown>[]) {
+      let ids: string[] = [];
+      try {
+        const parsed = JSON.parse(String(r.sessionIds ?? "[]"));
+        if (Array.isArray(parsed)) ids = parsed.map(String);
+      } catch { /* битый JSON → пустой состав → dead */ }
+      tripById.set(String(r.id), { deviceId: String(r.deviceId), sessionIds: ids });
+    }
+    // Точки всех записей всех поездок одним набором чанков
+    const allSessionIds = [...new Set(tripJobs.flatMap((c) => tripById.get(c.tripId as string)?.sessionIds ?? []))];
+    const tripPoints = new Map<string, Array<{ lat: number; lon: number; speed: number | null; timestamp: number; altitude: null; accuracy: null; bearing: null }>>();
+    for (let i = 0; i < allSessionIds.length; i += 8) {
+      const chunk = allSessionIds.slice(i, i + 8);
+      const ph = chunk.map(() => "?").join(", ");
+      const ptsRes = await libsql.execute({
+        sql: `SELECT sessionId, lat, lon, speed, timestamp FROM GpsPoint WHERE sessionId IN (${ph}) ORDER BY timestamp ASC`,
+        args: chunk,
+      });
+      for (const p of ptsRes.rows as Record<string, unknown>[]) {
+        const sid = String(p.sessionId);
+        if (!tripPoints.has(sid)) tripPoints.set(sid, []);
+        tripPoints.get(sid)!.push({
+          lat: Number(p.lat), lon: Number(p.lon),
+          speed: p.speed != null ? Number(p.speed) : null,
+          timestamp: Number(p.timestamp),
+          altitude: null, accuracy: null, bearing: null,
+        });
+      }
+    }
+    for (const c of tripJobs) {
+      const trip = tripById.get(c.tripId as string);
+      if (!trip || trip.sessionIds.length === 0) {
+        await libsql.execute({ sql: `UPDATE TrafficJob SET status = 'dead', error = 'trip not found or empty', updatedAt = ? WHERE id = ?`, args: [now, c.id] });
+        continue;
+      }
+      // Конкатенированный поток поездки (asc по timestamp, склейка записей)
+      const pts = trip.sessionIds
+        .flatMap((sid) => tripPoints.get(sid) ?? [])
+        .sort((a, b) => a.timestamp - b.timestamp);
+      if (pts.length < 2) {
+        await libsql.execute({ sql: `UPDATE TrafficJob SET status = 'dead', error = 'trip has <2 points', updatedAt = ? WHERE id = ?`, args: [now, c.id] });
+        continue;
+      }
+      // Routing legs (§9 ТЗ): сплит по остановкам > ACTIVE_TRIP_MIN_LEG_SEC
+      const motion = computeMovingTime(pts);
+      const active = computeActiveTrip(pts, motion, {
+        splitSec: Math.max(60, env().ACTIVE_TRIP_MIN_LEG_SEC),
+        minLegSec: Math.max(5, env().ACTIVE_TRIP_MIN_LEG_SEC),
+      });
+      let legs = active.hasActiveTrip && active.legs.length > 0 ? active.legs : [];
+      // Слияние СОСЕДНИХ кратчайших до ≤ TRIP_MAX_ROUTING_LEGS (§9 ТЗ)
+      const maxLegs = env().TRIP_MAX_ROUTING_LEGS;
+      while (legs.length > maxLegs) {
+        let bestIdx = 0;
+        let bestCost = Infinity;
+        for (let i = 0; i + 1 < legs.length; i++) {
+          const cost = legs[i].durationSec + legs[i + 1].durationSec;
+          if (cost < bestCost) { bestCost = cost; bestIdx = i; }
+        }
+        const a = legs[bestIdx];
+        const b = legs[bestIdx + 1];
+        legs = [
+          ...legs.slice(0, bestIdx),
+          { ...a, endTime: b.endTime, durationSec: (b.endTime - a.startTime) / 1000, endCoord: b.endCoord },
+          ...legs.slice(bestIdx + 2),
+        ];
+      }
+      const legEnds = legs.map((l) => ({
+        startLat: l.startCoord.lat, startLon: l.startCoord.lon,
+        endLat: l.endCoord.lat, endLon: l.endCoord.lon,
+      }));
+      const gpsPoints = (active.hasActiveTrip
+        ? pts.filter((p) => p.timestamp >= active.activeStartTime && p.timestamp <= active.activeEndTime)
+        : pts
+      ).map((p) => ({ lat: p.lat, lon: p.lon }));
+      jobs.push({
+        id: c.id, sessionId: null, tripId: c.tripId, attempts: c.attempts,
+        session: { id: `trip:${c.tripId}`, deviceId: trip.deviceId, gpsPoints, ...(legEnds.length > 0 ? { legEnds } : {}) },
+      });
+    }
+  } else if (tripJobs.length > 0) {
+    // Поездки выключены (expand-фаза) — поездковые джобы не берём вовсе
+    for (const c of tripJobs) {
+      await libsql.execute({ sql: `UPDATE TrafficJob SET status = 'pending', lockedBy = NULL, lockedAt = NULL, scheduledFor = ?, updatedAt = ? WHERE id = ?`, args: [new Date(Date.now() + 60_000).toISOString(), now, c.id] });
+    }
+  }
+
+  // ——— Сессионные задания (как в v2.25, без изменений поведения) ———
+  const sessionIds = sessionJobs.map((c) => c.sessionId as string);
+  if (sessionIds.length === 0) return jobs;
   const placeholders = sessionIds.map(() => "?").join(",");
 
   const sessionsRes = await libsql.execute({
@@ -121,7 +242,6 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
     const row = r as Record<string, unknown>;
     sessionMap.set(String(row.id), String(row.deviceId));
   }
-
   const ptsRes = await libsql.execute({
     sql: `SELECT sessionId, lat, lon, speed, timestamp FROM GpsPoint WHERE sessionId IN (${placeholders}) ORDER BY sessionId, timestamp ASC`,
     args: sessionIds, // v2.19.0: string[] — валидные InValue (было `as any`)
@@ -134,14 +254,14 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
     pointsMap.get(sid)!.push({ lat: Number(p.lat), lon: Number(p.lon), speed: p.speed != null ? Number(p.speed) : null, timestamp: Number(p.timestamp), altitude: null, accuracy: null, bearing: null });
   }
 
-  const jobs: JobWithPoints[] = [];
-  for (const c of claimed) {
-    const deviceId = sessionMap.get(c.sessionId);
+  const jobs2: JobWithPoints[] = [];
+  for (const c of sessionJobs) {
+    const deviceId = sessionMap.get(c.sessionId as string);
     if (!deviceId) {
       await libsql.execute({ sql: `UPDATE TrafficJob SET status = 'dead', error = 'session not found', updatedAt = ? WHERE id = ?`, args: [now, c.id] });
       continue;
     }
-    const allPoints = pointsMap.get(c.sessionId) || [];
+    const allPoints = pointsMap.get(c.sessionId as string) || [];
     // v2.16.0 (B-10): активное окно — КАНОНИЧЕСКИЙ §4.11 (state machine из
     // active-trip.ts), как во всех метриках/UI. Раньше здесь была третья
     // расходящаяся реализация «first speed>0 … last speed>0» — маршрутная
@@ -172,9 +292,9 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
             }])
       : undefined;
 
-    jobs.push({ id: c.id, sessionId: c.sessionId, attempts: c.attempts, session: { id: c.sessionId, deviceId, gpsPoints, ...(legEnds ? { legEnds } : {}) } });
+    jobs2.push({ id: c.id, sessionId: c.sessionId, tripId: null, attempts: c.attempts, session: { id: c.sessionId as string, deviceId, gpsPoints, ...(legEnds ? { legEnds } : {}) } });
   }
-  return jobs;
+  return [...jobs, ...jobs2];
 }
 
 // v2.19.0: result — честный RouteResult из routing/chain (было `any`)
@@ -210,8 +330,13 @@ async function completeJob(jobId: string, status: "completed" | "failed", result
   }
 
   if (status === "completed") {
+    // v2.26.0: обновление статуса Session — ТОЛЬКО для сессионных джобов (у
+    // поездковых sessionId IS NULL → подзапрос возвращает NULL → no-op, но
+    // явный guard читаемее и не зависит от SQL-семантики NULL).
     await libsql.execute({
-      sql: `UPDATE Session SET status = 'completed', updatedAt = ? WHERE id = (SELECT sessionId FROM TrafficJob WHERE id = ?) AND status IN ('recording', 'processing')`,
+      sql: `UPDATE Session SET status = 'completed', updatedAt = ?
+            WHERE id = (SELECT sessionId FROM TrafficJob WHERE id = ?)
+              AND id IS NOT NULL AND status IN ('recording', 'processing')`,
       args: [now, jobId],
     });
   }
@@ -220,6 +345,9 @@ async function completeJob(jobId: string, status: "completed" | "failed", result
 
 async function processOneJob(job: JobWithPoints, parentRequestId: string) {
   const requestId = crypto.randomUUID();
+  // v2.26.0 (ТЗ §14): поездковое задание — своя метрика (сессионные считаются
+  // traffic_job_completed_total как раньше)
+  if (job.tripId != null) inc("trip_plan_jobs_total", "Trip routing jobs processed", 1);
   const points = job.session.gpsPoints;
   if (points.length < 2) {
     await completeJob(job.id, "completed", { provider: "haversine", distanceM: 0, durationSec: 0, polyline: [], segments: [], trafficFetched: false }, null, job.attempts, requestId);
@@ -384,6 +512,17 @@ async function pollOnce(rt: WorkerRuntime) {
     }
   } catch (err) {
     logger.error("recording reaper failed", { requestId, error: err instanceof Error ? err.message : String(err) });
+  }
+  // v2.26.0 (ТЗ §7-п.4): «жнец» ПОЕЗДОК — закрытие trip.status=recording при
+  // тишине > TRIP_SPLIT_SEC (поездка видна и в recording; закрытие ставит
+  // план-джоб, если его ещё нет). Отдельный try/catch — тот же принцип.
+  try {
+    const closedTrips = await closeStaleTrips();
+    if (closedTrips > 0) {
+      logger.info("closed stale trips", { requestId, count: closedTrips });
+    }
+  } catch (err) {
+    logger.error("trip reaper failed", { requestId, error: err instanceof Error ? err.message : String(err) });
   }
   // v2.17.1: фоновый прогрев corpus-калибровки EcoScore (см. комментарий выше)
   prewarmCorpusBaselines();

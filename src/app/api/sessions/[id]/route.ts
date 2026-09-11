@@ -9,6 +9,7 @@ import { logger } from "@/lib/logger";
 import { writeAudit } from "@/lib/audit";
 import { inc } from "@/lib/metrics";
 import { env } from "@/lib/env";
+import { recomputeAfterSessionDelete } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): пересчёт поездок при удалении записи
 
 export async function GET(
   request: NextRequest,
@@ -107,6 +108,11 @@ export async function DELETE(
       where: { id },
       data: { deletedAt: new Date(), status: "deleted" },
     });
+
+    // v2.26.0 (ТЗ §7): пересчёт поездок устройства после удаления записи —
+    // соседние поездки могут склеиться (каноническое правило на потоке без
+    // удалённой записи). Non-fatal: сбой пересчёта не роняет удаление.
+    await recomputeAfterSessionDelete(id);
 
     await writeAudit({
       action: "session.delete",

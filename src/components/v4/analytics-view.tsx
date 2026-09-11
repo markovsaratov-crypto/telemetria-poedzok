@@ -250,6 +250,14 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
       : [2, 3, 4].includes(agg.trips % 10) && ![12, 13, 14].includes(agg.trips % 100)
         ? "поездки"
         : "поездок";
+  // v2.26.0 (ТЗ §11): «N поездок · M записей» — поездки = серверные Trip
+  // (раньше — число записей: 3 куска одной поездки считались «3 поездками»)
+  const sessionsWord =
+    agg.sessionsCount % 10 === 1 && agg.sessionsCount % 100 !== 11
+      ? "запись"
+      : [2, 3, 4].includes(agg.sessionsCount % 10) && ![12, 13, 14].includes(agg.sessionsCount % 100)
+        ? "записи"
+        : "записей";
 
   return (
     <div className="session">
@@ -260,6 +268,11 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
         </b>
         <span>
           {fmtInt(agg.trips)} {tripsWord}
+          {agg.sessionsCount > agg.trips ? (
+            <span className="muted">
+              {" "}· {fmtInt(agg.sessionsCount)} {sessionsWord}
+            </span>
+          ) : null}
         </span>
         <span className="muted">
           · всего <b>{fmtDurMin(totalMin)}</b> · в поездках <b>{fmtDurMin(activeMin)}</b> ·{" "}

@@ -205,9 +205,13 @@ export interface SessionsQuery {
   deviceId?: string;
 }
 
-export function useSessions(params: SessionsQuery) {
+export function useSessions(params: SessionsQuery, opts?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ["sessions", params],
+    // v2.26.0 (ТЗ §11): enabled=false — вкладка «Поездки» перешла на серверные
+    // поездки (/api/trips), список записей не качается (expand-фаза: фолбэк-рендер
+    // держим наготове, но запрос не летит)
+    enabled: opts?.enabled !== false,
     queryFn: async () => {
       const data = await api.get<{ sessions: SessionListItem[]; nextCursor: string | null }>(
         "/api/sessions",

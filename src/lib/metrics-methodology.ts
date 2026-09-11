@@ -36,6 +36,7 @@ import { mulberry32 } from "./utils"; // v2.16.0 (D-7): единый PRNG (бы�
 import {
   computeMovingTime,
   computeActiveTrip,
+  inActiveLegs, // v2.25.0 (П.4): гейтинг метрик по legs (парковка между поездками исключена)
   type MethodologyPoint,
   type MotionResult,
   type ActiveTrip,
@@ -378,7 +379,7 @@ export function computeEcoScore(
   let prevA: number | null = null;
 
   for (let i = 1; i < points.length; i++) {
-    if (points[i].timestamp < activeTrip.activeStartTime || points[i].timestamp > activeTrip.activeEndTime) continue;
+    if (!inActiveLegs(activeTrip, points[i].timestamp)) { prevA = null; continue; } // v2.25.0 (П.4): только legs; prevA сброшен — рывок через парковку не считается
     const dt = (points[i].timestamp - points[i - 1].timestamp) / 1000;
     if (dt <= 0 || dt > 30) {
       prevA = null;
@@ -443,7 +444,7 @@ export function computeAccelerationRMS(points: MethodologyPoint[], activeTrip: A
   let sumSq = 0;
   let sumDt = 0;
   for (let i = 1; i < points.length; i++) {
-    if (points[i].timestamp < activeTrip.activeStartTime || points[i].timestamp > activeTrip.activeEndTime) continue;
+    if (!inActiveLegs(activeTrip, points[i].timestamp)) { continue; } // v2.25.0 (П.4): только legs — парковка между поездками исключена
     const dt = (points[i].timestamp - points[i - 1].timestamp) / 1000;
     if (dt <= 0 || dt > 30) continue;
     const v0 = points[i - 1].speed;
@@ -465,7 +466,7 @@ export function computeJerkRMS(points: MethodologyPoint[], activeTrip: ActiveTri
   let sumDt = 0;
   let prevA: number | null = null;
   for (let i = 1; i < points.length; i++) {
-    if (points[i].timestamp < activeTrip.activeStartTime || points[i].timestamp > activeTrip.activeEndTime) continue;
+    if (!inActiveLegs(activeTrip, points[i].timestamp)) { prevA = null; continue; } // v2.25.0 (П.4): только legs; prevA сброшен — рывок через парковку не считается
     const dt = (points[i].timestamp - points[i - 1].timestamp) / 1000;
     if (dt <= 0 || dt > 30) {
       prevA = null;
@@ -518,7 +519,7 @@ export function computeBearingConsistency(points: MethodologyPoint[], activeTrip
   if (!activeTrip.hasActiveTrip) return null;
   const deltas: number[] = [];
   for (let i = 1; i < points.length; i++) {
-    if (points[i].timestamp < activeTrip.activeStartTime || points[i].timestamp > activeTrip.activeEndTime) continue;
+    if (!inActiveLegs(activeTrip, points[i].timestamp)) { continue; } // v2.25.0 (П.4): только legs — парковка между поездками исключена
     const v = points[i].speed;
     if (v == null || v * 3.6 <= 5) continue;
     const b0 = points[i - 1].bearing;
@@ -549,7 +550,7 @@ export function computeUTurnCount(points: MethodologyPoint[], activeTrip: Active
   if (!activeTrip.hasActiveTrip) return 0;
   let count = 0;
   for (let i = 1; i < points.length; i++) {
-    if (points[i].timestamp < activeTrip.activeStartTime || points[i].timestamp > activeTrip.activeEndTime) continue;
+    if (!inActiveLegs(activeTrip, points[i].timestamp)) { continue; } // v2.25.0 (П.4): только legs — парковка между поездками исключена
     const dt = (points[i].timestamp - points[i - 1].timestamp) / 1000;
     if (dt <= 0 || dt > 10) continue;
     const v = points[i].speed;
@@ -570,7 +571,7 @@ export function computeTurnCount(points: MethodologyPoint[], activeTrip: ActiveT
   if (!activeTrip.hasActiveTrip) return 0;
   let count = 0;
   for (let i = 1; i < points.length; i++) {
-    if (points[i].timestamp < activeTrip.activeStartTime || points[i].timestamp > activeTrip.activeEndTime) continue;
+    if (!inActiveLegs(activeTrip, points[i].timestamp)) { continue; } // v2.25.0 (П.4): только legs — парковка между поездками исключена
     const dt = (points[i].timestamp - points[i - 1].timestamp) / 1000;
     if (dt <= 0 || dt > 5) continue;
     const v = points[i].speed;
@@ -591,7 +592,7 @@ export function computeHighSpeedCornering(points: MethodologyPoint[], activeTrip
   if (!activeTrip.hasActiveTrip) return 0;
   let count = 0;
   for (let i = 1; i < points.length; i++) {
-    if (points[i].timestamp < activeTrip.activeStartTime || points[i].timestamp > activeTrip.activeEndTime) continue;
+    if (!inActiveLegs(activeTrip, points[i].timestamp)) { continue; } // v2.25.0 (П.4): только legs — парковка между поездками исключена
     const dt = (points[i].timestamp - points[i - 1].timestamp) / 1000;
     if (dt <= 0 || dt > 5) continue;
     const v = points[i].speed;
@@ -915,9 +916,10 @@ function filterActivePoints(
   if (!activeTrip || !activeTrip.hasActiveTrip) {
     return points;
   }
-  return points.filter(
-    (p) => p.timestamp >= activeTrip.activeStartTime && p.timestamp <= activeTrip.activeEndTime
-  );
+  // v2.25.0 (П.4): мульти-leg записи — активная часть = объединение окон legs
+  // (долгие парковки между поездками исключаются). Legacy-объекты без legs
+  // (старые сериализованные ответы) падают на span — inActiveLegs обрабатывает.
+  return points.filter((p) => inActiveLegs(activeTrip, p.timestamp));
 }
 
 // === Главный композитный расчёт ===

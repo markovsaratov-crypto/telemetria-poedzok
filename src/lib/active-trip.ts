@@ -29,16 +29,71 @@ export interface MotionResult {
   states: MotionState[]; // длина = points.length − 1
 }
 
+export interface ActiveTripLeg {
+  startTime: number; // мс — timestamp левой точки первого moving-интервала leg
+  endTime: number; // мс — timestamp правой точки последнего moving-интервала leg
+  durationSec: number;
+  startCoord: { lat: number; lon: number };
+  endCoord: { lat: number; lon: number };
+}
+
 export interface ActiveTrip {
   hasActiveTrip: boolean;
   activeStartTime: number; // мс
   activeEndTime: number; // мс
+  // v2.25.0 (П.3): СУММА длительностей legs — настоящее «в поездке». Запись
+  // «утром доехал → 8,5 ч на парковке → вечером уехал» теперь даёт ~50 мин,
+  // а не 9 ч 21 мин (старая семантика — см. spanDuration).
   activeDuration: number; // сек
+  // v2.25.0 (П.3): СТАРАЯ семантика activeDuration — span от первого до
+  // последнего движения ВКЛЮЧАЯ внутренние долгие стоянки. Контрольная сумма
+  // preTripIdle + spanDuration + postTripIdle = Duration остаётся верной.
+  spanDuration: number; // сек
+  // v2.25.0 (П.3): запись разбита длинными стоянками на несколько поездок
+  legCount: number;
+  legs: ActiveTripLeg[];
+  longestInternalStopSec: number; // самая длинная внутренняя стоянка-разделитель
+  internalStopTime: number; // сек — суммарное время долгих стоянок между legs
   activeStartCoord: { lat: number; lon: number };
   activeEndCoord: { lat: number; lon: number };
   preTripIdle: number; // сек — хвост в начале
   postTripIdle: number; // сек — хвост в конце
-  activeIdleTime: number; // сек — стоянки внутри поездки (светофоры, пробки)
+  activeIdleTime: number; // сек — стоянки ВНУТРИ legs (светофоры, пробки)
+}
+
+const EMPTY_ACTIVE_TRIP: ActiveTrip = {
+  hasActiveTrip: false,
+  activeStartTime: 0,
+  activeEndTime: 0,
+  activeDuration: 0,
+  spanDuration: 0,
+  legCount: 0,
+  legs: [],
+  longestInternalStopSec: 0,
+  internalStopTime: 0,
+  activeStartCoord: { lat: 0, lon: 0 },
+  activeEndCoord: { lat: 0, lon: 0 },
+  preTripIdle: 0,
+  postTripIdle: 0,
+  activeIdleTime: 0,
+};
+
+/**
+ * v2.25.0 (П.3/П.4): точка с timestamp ts принадлежит активной части записи?
+ * Для мульти-leg записей — membership в объединении leg-окон (долгие парковки
+ * между legs исключены). Для legacy-объектов без legs — fallback на span.
+ * Единый предикат для EcoScore/событий/метрик: энергия и резкие события больше
+ * не интегрируются по 8-часовому джиттеру на парковке.
+ */
+export function inActiveLegs(activeTrip: ActiveTrip, ts: number): boolean {
+  if (!activeTrip.hasActiveTrip) return false;
+  if (activeTrip.legs && activeTrip.legs.length > 0) {
+    for (const l of activeTrip.legs) {
+      if (ts >= l.startTime && ts <= l.endTime) return true;
+    }
+    return false;
+  }
+  return ts >= activeTrip.activeStartTime && ts <= activeTrip.activeEndTime;
 }
 
 const KMH_TO_MS = 1 / 3.6;
@@ -194,30 +249,27 @@ export function computeMovingTime(points: MethodologyPoint[]): MotionResult {
 }
 
 /**
- * §4.11 computeActiveTrip — границы активной поездки.
+ * §4.11 computeActiveTrip — границы активной поездки + разбиение на legs.
  *
  * firstMovingIdx = первый индекс i где states[i] = "moving"
  * lastMovingIdx  = последний индекс i где states[i] = "moving"
  * ActiveStartTime = points[firstMovingIdx].timestamp
  * ActiveEndTime   = points[lastMovingIdx + 1].timestamp
- * preTripIdle + ActiveDuration + postTripIdle = Duration
+ * preTripIdle + spanDuration + postTripIdle = Duration
+ *
+ * v2.25.0 (П.3): ВНУТРЕННИЕ стоянки (последовательные idle/gap-интервалы суммарно
+ * ≥ ACTIVE_TRIP_STOP_SPLIT_SEC, по умолчанию 15 мин) разбивают активную поездку на
+ * legs: рабочая запись «утром доехал → 8,5 ч на парковке → вечером уехал» — это
+ * 2 поездки. activeDuration = Σ legs (настоящее «в поездке»), spanDuration —
+ * прежняя semantics «первое→последнее движение». Светофоры/пробки (< порога)
+ * остаются внутри legs — активная поездка по §4.11 их по-прежнему включает.
  */
 export function computeActiveTrip(points: MethodologyPoint[], motion: MotionResult): ActiveTrip {
   const firstMoving = motion.states.findIndex((s) => s === "moving");
   const lastMoving = motion.states.reduce<number>((acc, s, i) => (s === "moving" ? i : acc), -1);
 
   if (firstMoving === -1 || points.length === 0) {
-    return {
-      hasActiveTrip: false,
-      activeStartTime: 0,
-      activeEndTime: 0,
-      activeDuration: 0,
-      activeStartCoord: { lat: 0, lon: 0 },
-      activeEndCoord: { lat: 0, lon: 0 },
-      preTripIdle: 0,
-      postTripIdle: 0,
-      activeIdleTime: 0,
-    };
+    return { ...EMPTY_ACTIVE_TRIP, legs: [] };
   }
 
   const activeStartIdx = firstMoving;
@@ -228,16 +280,117 @@ export function computeActiveTrip(points: MethodologyPoint[], motion: MotionResu
   const lastTs = points[points.length - 1].timestamp;
   const preTripIdleSec = (activeStartTs - firstTs) / 1000;
   const postTripIdleSec = (lastTs - activeEndTs) / 1000;
+  const spanDurationSec = (activeEndTs - activeStartTs) / 1000;
+
+  // v2.25.0 (П.3): проход по состояниям активного окна — ищем длинные стоянки.
+  // states[i] описывает интервал points[i] → points[i+1]; «стоянка-run» — серия
+  // подряд идущих idle/gap-интервалов; run ≥ порога закрывает текущий leg.
+  // Для каждого leg-кандидата копим его внутренний idle (для activeIdleTime).
+  const splitSec = Math.max(60, env().ACTIVE_TRIP_STOP_SPLIT_SEC);
+  const minLegSec = Math.max(5, env().ACTIVE_TRIP_MIN_LEG_SEC);
+  const rawLegs: Array<{ startTime: number; endTime: number; idleSec: number }> = [];
+  let curLegStartState: number | null = null; // state idx первого moving текущего leg
+  let runStartState: number | null = null; // state idx начала текущей стоянки-run
+  let runSec = 0;
+  let legIdleSec = 0; // idle внутри текущего leg-кандидата
+
+  const closeLeg = (legStartState: number, legEndMoving: number, idleSec: number) => {
+    const startTs = points[legStartState].timestamp;
+    const endTs = points[legEndMoving + 1].timestamp;
+    if (endTs <= startTs) return; // вырожденный leg — пропускаем
+    rawLegs.push({ startTime: startTs, endTime: endTs, idleSec });
+  };
+
+  for (let i = firstMoving; i <= lastMoving; i++) {
+    const st = motion.states[i];
+    const dt = Math.max(0, (points[i + 1].timestamp - points[i].timestamp) / 1000);
+    if (st === "moving") {
+      if (curLegStartState == null) curLegStartState = i;
+      runStartState = null;
+      runSec = 0;
+      continue;
+    }
+    if (st === "idle" && curLegStartState != null) legIdleSec += dt;
+    // idle или gap — копим стоянку-run
+    if (runStartState == null) {
+      runStartState = i;
+      runSec = 0;
+    }
+    runSec += dt;
+    if (runSec >= splitSec && curLegStartState != null) {
+      // Долгая стоянка: закрываем текущий leg на последнем moving до run
+      closeLeg(curLegStartState, runStartState - 1, legIdleSec);
+      curLegStartState = null;
+      legIdleSec = 0;
+    }
+  }
+  if (curLegStartState != null) {
+    closeLeg(curLegStartState, lastMoving, legIdleSec);
+  }
+
+  // v2.25.0 (П.3): джиттер-микро-legs (GPS-дрейф дал «движение» на парковке
+  // 12–30 сек) — не поездки: отбрасываем в паузы. Если после фильтра ничего не
+  // осталось — оставляем самый длинный кандидат (движение в записи было).
+  const keptCandidates = rawLegs.filter((l) => (l.endTime - l.startTime) / 1000 >= minLegSec);
+  const finalRaw =
+    keptCandidates.length > 0
+      ? keptCandidates
+      : rawLegs.length > 0
+        ? [rawLegs.reduce((a, b) => (b.endTime - b.startTime > a.endTime - a.startTime ? b : a))]
+        : [{ startTime: activeStartTs, endTime: activeEndTs, idleSec: 0 }]; // degenerate: span одним leg
+
+  const legs: ActiveTripLeg[] = finalRaw.map((l) => ({
+    startTime: l.startTime,
+    endTime: l.endTime,
+    durationSec: (l.endTime - l.startTime) / 1000,
+    startCoord: findCoordAtOrAfter(points, l.startTime),
+    endCoord: findCoordAtOrBefore(points, l.endTime),
+  }));
+
+  const legCount = legs.length;
+  const legsDurationSec = legs.reduce((acc, l) => acc + l.durationSec, 0);
+  const activeDurationSec = legsDurationSec;
+  // Паузы = всё время span, не вошедшее в legs (стоянки + отброшенные микро-legs)
+  const internalStopSec = Math.max(0, spanDurationSec - legsDurationSec);
+  // Самая длинная пауза — между последовательными legs (включая съеденные микро-legs)
+  let longestStopSec = 0;
+  for (let i = 1; i < legs.length; i++) {
+    longestStopSec = Math.max(longestStopSec, (legs[i].startTime - legs[i - 1].endTime) / 1000);
+  }
+  const keptIdleSec = finalRaw.reduce((acc, l) => acc + l.idleSec, 0);
 
   return {
     hasActiveTrip: true,
     activeStartTime: activeStartTs,
     activeEndTime: activeEndTs,
-    activeDuration: (activeEndTs - activeStartTs) / 1000,
+    activeDuration: activeDurationSec,
+    spanDuration: spanDurationSec,
+    legCount,
+    legs,
+    longestInternalStopSec: Math.round(longestStopSec * 10) / 10,
+    internalStopTime: Math.round(internalStopSec * 10) / 10,
     activeStartCoord: { lat: points[activeStartIdx].lat, lon: points[activeStartIdx].lon },
     activeEndCoord: { lat: points[activeEndIdx].lat, lon: points[activeEndIdx].lon },
     preTripIdle: preTripIdleSec,
     postTripIdle: postTripIdleSec,
-    activeIdleTime: Math.max(0, motion.idleTime - preTripIdleSec - postTripIdleSec),
+    // стоянки внутри legs (светофоры/пробки < порога разбивки)
+    activeIdleTime: Math.round(Math.max(0, Math.min(motion.idleTime - preTripIdleSec - postTripIdleSec, keptIdleSec)) * 10) / 10,
   };
+}
+
+// v2.25.0 (П.3): координата точки с timestamp ≥ ts (для границ leg из raw-границ)
+function findCoordAtOrAfter(points: MethodologyPoint[], ts: number): { lat: number; lon: number } {
+  for (const p of points) {
+    if (p.timestamp >= ts) return { lat: p.lat, lon: p.lon };
+  }
+  return { lat: points[points.length - 1].lat, lon: points[points.length - 1].lon };
+}
+
+function findCoordAtOrBefore(points: MethodologyPoint[], ts: number): { lat: number; lon: number } {
+  let last = points[points.length - 1];
+  for (const p of points) {
+    if (p.timestamp > ts) break;
+    last = p;
+  }
+  return { lat: last.lat, lon: last.lon };
 }

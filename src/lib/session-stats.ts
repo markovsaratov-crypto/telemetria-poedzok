@@ -17,6 +17,7 @@
 //   planFactFromJobResult()— чистый разбор plan-факта (§6.3/§6.6/§6.8);
 //   EMPTY_PLAN_FACT        — «плана нет» (как было в computePlanFact).
 import { libsql } from "./db";
+import { env } from "./env"; // v2.25.0 (П.5): PLAN_MIN_COVERAGE — гейт сопоставимости плана
 import { computeMethodologyMetrics, type EcoScoreBaselines, type MethodologyMetrics } from "./metrics-methodology";
 import { computeMovingTime, computeActiveTrip, type MethodologyPoint } from "./active-trip";
 import { avgSpeedMs, meanPointSpeedMs, maxSpeedMs, normalizeSessionSpeeds } from "./kpi";
@@ -33,6 +34,16 @@ export interface RoutePlanFact {
   durationDeviationPct: number | null;
   distanceDeviationPct: number | null;
   speedDeviationPct: number | null;
+  // v2.13.0 (Ф4): число поездок с планом в период-агрегате — знаменатель
+  // для честного «мин/поездку» (§6.3 TimeSavingIndex). Одиночная сессия не проставляет.
+  planTripCount?: number | null;
+  // v2.25.0 (П.5): план сопоставим с фактом? План «дом→работа» 1,7 км не
+  // сопоставим с записью на весь день 36 км (покрытие 5%) — отклонения
+  // («+558,7 мин», «+21910%») в такой паре — мусор, UI показывает
+  // «план не сопоставим» вместо «перерасхода».
+  planComparable?: boolean | null;
+  // v2.25.0 (П.5): доля фактической дистанции, покрываемая планом (0..1).
+  planCoverage?: number | null;
 }
 
 export const EMPTY_PLAN_FACT: RoutePlanFact = {
@@ -45,6 +56,9 @@ export const EMPTY_PLAN_FACT: RoutePlanFact = {
   durationDeviationPct: null,
   distanceDeviationPct: null,
   speedDeviationPct: null,
+  planTripCount: null,
+  planComparable: null,
+  planCoverage: null,
 };
 
 export interface SessionStatsMeta {
@@ -53,6 +67,27 @@ export interface SessionStatsMeta {
   endTime: string | null;
   routeHash?: string | null;
   topologyHash?: string | null;
+}
+
+/**
+ * v2.25.0 (П.3): интервал [prevTs, ts] пересекает активную часть записи?
+ * Активная часть = объединение окон legs (для legacy без legs — span).
+ * Интервал считается движением, если правая точка ≥ старта окна, а левая ≤ финиша.
+ */
+function intervalInActiveLegs(
+  activeTrip: { hasActiveTrip: boolean; legs?: Array<{ startTime: number; endTime: number }>; activeStartTime: number; activeEndTime: number },
+  prevTs: number,
+  ts: number
+): boolean {
+  if (!activeTrip.hasActiveTrip) return false;
+  const legs = activeTrip.legs;
+  if (legs && legs.length > 0) {
+    for (const l of legs) {
+      if (ts >= l.startTime && prevTs <= l.endTime) return true;
+    }
+    return false;
+  }
+  return ts >= activeTrip.activeStartTime && prevTs <= activeTrip.activeEndTime;
 }
 
 // ——— v2.9.3: спидограмма — даунсемпл GPS-точек для графика скорость-время ———
@@ -250,14 +285,15 @@ export function computeSessionStats(
   for (let i = 0; i < points.length; i++) {
     const p = points[i];
 
-    // Distance: raw — по всем интервалам, active — только внутри активного окна
-    // (критерий тот же, что в route-comparison.ts: правая точка интервала ≥ старта,
-    // левая ≤ финиша; интервалы «хвостовой» стоянки с её дрейфом отбрасываются)
+    // Distance: raw — по всем интервалам, active — только внутри АКТИВНЫХ LEGS
+    // (v2.25.0 П.3: FIX-C1 дальше — долгая парковка внутри записи больше не
+    // накручивает дистанцию; критерий пересечения интервалом окна leg тот же,
+    // что был для span: правая точка ≥ старта, левая ≤ финиша)
     if (i > 0) {
       const prev = points[i - 1];
       const d = haversineM(prev.lat, prev.lon, p.lat, p.lon);
       rawDistance += d;
-      if (hasActive && p.timestamp >= activeTrip.activeStartTime && prev.timestamp <= activeTrip.activeEndTime) {
+      if (hasActive && intervalInActiveLegs(activeTrip, prev.timestamp, p.timestamp)) {
         distance += d;
       }
     }
@@ -419,28 +455,58 @@ export function planFactFromJobResult(
   let timeLostToTrafficSec: number | null = null;
 
   if (trafficFetched && durS && distM) {
-    const direct =
-      Array.isArray(plan.segments) && (plan.segments as Array<{ lat: number; lon: number }>).length >= 2
-        ? haversineM((plan.segments as Array<{ lat: number; lon: number }>)[0].lat, (plan.segments as Array<{ lat: number; lon: number }>)[0].lon, (plan.segments as Array<{ lat: number; lon: number }>)[(plan.segments as Array<{ lat: number; lon: number }>).length - 1].lat, (plan.segments as Array<{ lat: number; lon: number }>)[(plan.segments as Array<{ lat: number; lon: number }>).length - 1].lon)
-        : null;
-    if (direct && direct > 1) {
-      const baselineDur = Math.round((direct / 1000 / 40) * 3600); // гаверсинус @ 40 км/ч
+    // v2.25.0 (П.5): мульти-leg план (воркер маршрутизирует каждую поездку
+    // записи отдельно) — базовая линия считается по СУММЕ прямых участков legs
+    // (legDirectM от ворчера), а не по сквозному haversine первого→последнего
+    // сегмента (для «дом → работа → дом» сквозной спан ≈ 0 — план «3 мин»).
+    const legDirectM = Number(plan.legDirectM) || 0;
+    const legCount = Number(plan.legCount) || 0;
+    if (legCount > 1 && legDirectM > 1) {
+      const baselineDur = Math.round((legDirectM / 1000 / 40) * 3600); // Σ legs, гаверсинус @ 40 км/ч
       planDurationSec = baselineDur;
       timeLostToTrafficSec = durS - baselineDur; // §6.8
+    } else {
+      const direct =
+        Array.isArray(plan.segments) && (plan.segments as Array<{ lat: number; lon: number }>).length >= 2
+          ? haversineM((plan.segments as Array<{ lat: number; lon: number }>)[0].lat, (plan.segments as Array<{ lat: number; lon: number }>)[0].lon, (plan.segments as Array<{ lat: number; lon: number }>)[(plan.segments as Array<{ lat: number; lon: number }>).length - 1].lat, (plan.segments as Array<{ lat: number; lon: number }>)[(plan.segments as Array<{ lat: number; lon: number }>).length - 1].lon)
+          : null;
+      if (direct && direct > 1) {
+        const baselineDur = Math.round((direct / 1000 / 40) * 3600); // гаверсинус @ 40 км/ч
+        planDurationSec = baselineDur;
+        timeLostToTrafficSec = durS - baselineDur; // §6.8
+      }
     }
   }
 
+  // v2.25.0 (П.5): ГЕЙТ СОПОСТАВИМОСТИ. План — это маршрут «откуда→куда» одной
+  // поездки; если фактическая запись устроена иначе (целый день с парковкой:
+  // план «дом→работа» 1,7 км при факте 36 км), отклонения времени/дистанции
+  // не имеют смысла («+558,7 мин перерасхода» при движении 50 мин). Покрытие
+  // < PLAN_MIN_COVERAGE → отклонения не отдаются, UI показывает «план не
+  // сопоставим с поездкой». Провайдер/дистанции остаются для информации.
+  const minCoverage = env().PLAN_MIN_COVERAGE;
+  const coverage =
+    planDistanceM != null && actualDistanceM > 500
+      ? Math.min(1, planDistanceM / actualDistanceM)
+      : null;
+  const comparable =
+    coverage == null
+      ? // дистанция мала/плана нет — сравнение просто «по малому плану» допустимо
+        // (джиттер-сессии с фактом < 500 м не получают ложного «перерасхода» гейтом)
+        true
+      : coverage >= minCoverage;
+
   // v2.13.0 (Ф5): 2 знака после запятой (владелец: «должна иметь 2 знака»).
-  const pct = (actual: number, plan: number) =>
-    plan > 0 ? Math.round(((actual - plan) / plan) * 10000) / 100 : null;
+  const pct = (actual: number, planV: number) =>
+    planV > 0 ? Math.round(((actual - planV) / planV) * 10000) / 100 : null;
 
   let speedDeviationPct: number | null = null;
-  if (actualAvgSpeed != null && planDistanceM && planDurationSec && planDurationSec > 0) {
+  if (comparable && actualAvgSpeed != null && planDistanceM && planDurationSec && planDurationSec > 0) {
     const planSpeed = planDistanceM / planDurationSec;
     speedDeviationPct = planSpeed > 0 ? Math.round(((actualAvgSpeed - planSpeed) / planSpeed) * 1000) / 10 : null;
   }
   // §6.7: если план по времени недоступен (2ГИС-трафик) — скорость плана = дистанция плана / трафик-время
-  if (speedDeviationPct == null && actualAvgSpeed != null && planDistanceM && trafficDurationSec && trafficDurationSec > 0) {
+  if (speedDeviationPct == null && comparable && actualAvgSpeed != null && planDistanceM && trafficDurationSec && trafficDurationSec > 0) {
     const trafficSpeed = planDistanceM / trafficDurationSec;
     speedDeviationPct = trafficSpeed > 0 ? Math.round(((actualAvgSpeed - trafficSpeed) / trafficSpeed) * 1000) / 10 : null;
   }
@@ -448,13 +514,15 @@ export function planFactFromJobResult(
   return {
     provider,
     planDistanceM: planDistanceM ? Math.round(planDistanceM) : null,
-    planDurationSec,
+    planDurationSec, // само время плана остаётся (подпись «план 2ГИС …»), гейтятся только отклонения
     trafficFetched,
     trafficDurationSec,
     timeLostToTrafficSec: timeLostToTrafficSec != null ? Math.round(timeLostToTrafficSec) : null,
-    durationDeviationPct: planDurationSec ? pct(actualDurationSec, planDurationSec) : null,
-    distanceDeviationPct: planDistanceM ? pct(actualDistanceM, planDistanceM) : null,
+    durationDeviationPct: comparable && planDurationSec ? pct(actualDurationSec, planDurationSec) : null,
+    distanceDeviationPct: comparable && planDistanceM ? pct(actualDistanceM, planDistanceM) : null,
     speedDeviationPct,
+    planComparable: comparable,
+    planCoverage: coverage != null ? Math.round(coverage * 1000) / 1000 : null,
   };
 }
 

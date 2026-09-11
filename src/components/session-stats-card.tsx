@@ -469,18 +469,26 @@ interface RoutePlanFact {
   durationDeviationPct: number | null;
   distanceDeviationPct: number | null;
   speedDeviationPct: number | null;
+  // v2.25.0 (П.5): гейт сопоставимости (покрытие плана < 50% факта)
+  planComparable?: boolean | null;
+  planCoverage?: number | null;
 }
 
 function PlanFactBlock({ r }: { r: RoutePlanFact }) {
   // v2.13.0 (Ф5): отклонения — 2 знака после запятой (синхронно с v4-аналитикой)
   const dev = (v: number | null) => (v == null ? "—" : `${v > 0 ? "+" : ""}${fmtNumber(v, 2)}%`);
   const devColor = (v: number | null) => (v == null ? "" : v > 10 ? "text-red-600 dark:text-red-400" : v > 0 ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400");
+  // v2.25.0 (П.5): несопоставимый план — отклонения не показываем
+  const notComparable = r.planComparable === false;
+  const coveragePct = r.planCoverage != null ? Math.round(r.planCoverage * 100) : null;
+  const devShown = (v: number | null) => (notComparable ? "—" : dev(v));
+  const devColorShown = (v: number | null) => (notComparable ? "" : devColor(v));
   const items = [
     { icon: <RouteIcon className="h-3 w-3" />, label: "План · дистанция", value: r.planDistanceM != null ? `${fmtNumber(r.planDistanceM / 1000, 2)} км` : "—", sub: r.provider ? `провайдер: ${r.provider}` : "нет плана" },
     { icon: <TimerReset className="h-3 w-3" />, label: "План · время", value: r.planDurationSec != null ? formatDuration(r.planDurationSec) : "—", sub: r.trafficDurationSec != null ? "базовая линия 40 км/ч" : "свободный поток" },
-    { icon: <Clock className="h-3 w-3" />, label: "Δ по времени", value: dev(r.durationDeviationPct), sub: "факт vs план", color: devColor(r.durationDeviationPct) },
-    { icon: <RouteIcon className="h-3 w-3" />, label: "Δ по дистанции", value: dev(r.distanceDeviationPct), sub: "факт vs план", color: devColor(r.distanceDeviationPct) },
-    { icon: <Gauge className="h-3 w-3" />, label: "Δ по скорости", value: dev(r.speedDeviationPct), sub: "факт vs план", color: devColor(r.speedDeviationPct) },
+    { icon: <Clock className="h-3 w-3" />, label: "Δ по времени", value: devShown(r.durationDeviationPct), sub: notComparable ? `план не сопоставим${coveragePct != null ? ` (покрытие ${coveragePct}%)` : ""}` : "факт vs план", color: devColorShown(r.durationDeviationPct) },
+    { icon: <RouteIcon className="h-3 w-3" />, label: "Δ по дистанции", value: devShown(r.distanceDeviationPct), sub: notComparable ? "план не сопоставим" : "факт vs план", color: devColorShown(r.distanceDeviationPct) },
+    { icon: <Gauge className="h-3 w-3" />, label: "Δ по скорости", value: devShown(r.speedDeviationPct), sub: notComparable ? "план не сопоставим" : "факт vs план", color: devColorShown(r.speedDeviationPct) },
     { icon: <Car className="h-3 w-3" />, label: "Потери от пробок", value: r.timeLostToTrafficSec != null ? formatDuration(Math.max(r.timeLostToTrafficSec, 0)) : r.trafficFetched ? "—" : "нет данных", sub: r.trafficFetched ? "2ГИС vs базовая линия" : "трафик не запрошен" },
   ];
   return (

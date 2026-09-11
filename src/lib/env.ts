@@ -60,6 +60,18 @@ const schema = z.object({
   MOVING_TIME_HYSTERESIS_LOW_KMH: z.coerce.number().positive().default(2),
   MOVING_TIME_DEBOUNCE_SEC: z.coerce.number().positive().default(5),
   MOVING_TIME_GAP_SEC: z.coerce.number().positive().default(30),
+  // v2.25.0 (П.3): внутренняя стоянка ≥ этого порога разбивает «активную поездку»
+  // на отдельные legs (запись на весь рабочий день: утром доехал, 8,5 ч на парковке,
+  // вечером уехал — «в поездке» теперь сумма поездок, а не весь span). Светофоры и
+  // пробки (< порога) остаются внутри поездки, как требует §4.11.
+  ACTIVE_TRIP_STOP_SPLIT_SEC: z.coerce.number().positive().default(900),
+  // v2.25.0 (П.3): leg короче порога — джиттер-всплеск на парковке (GPS-дрейф
+  // дал «движение» 12–30 сек), не поездка. Такие legs отбрасываются в паузы.
+  ACTIVE_TRIP_MIN_LEG_SEC: z.coerce.number().positive().default(60),
+  // v2.25.0 (П.5): план маршрута сопоставим с фактом, только если плановая дистанция
+  // покрывает ≥ этой доли фактической (план «дом→работа» 1,7 км против факта 36 км =
+  // покрытие 5% → «план не сопоставим», без «+558,7 мин перерасхода»).
+  PLAN_MIN_COVERAGE: z.coerce.number().min(0.05).max(1).default(0.5),
   // v2.9 §7.3: CAP EcoScore — базовые линии калибруются по референсному корпусу (по умолчанию 0.5/0.4/0.3)
   ECO_SCORE_CAP_BASELINE: z.string().default(""),
   ECO_SCORE_CAP_PENALTY_EXPONENT: z.coerce.number().positive().default(1.5),

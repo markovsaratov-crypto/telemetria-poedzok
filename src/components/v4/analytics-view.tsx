@@ -366,6 +366,9 @@ function SessionHeader({
   );
   const idleMin = secToMin(stats.idleTime);
   const gapSec = stats.gapTime ?? 0;
+  // v2.25.0 (П.3): мульти-поездочная запись — legs/длинные паузы
+  const legCount = stats.methodology?.activeTrip?.legCount ?? 1;
+  const longestStop = stats.methodology?.activeTrip?.longestInternalStopSec ?? 0;
   // Доли движения/стоянок/разрывов на таймлайне (0..100%)
   const total = Math.max(1, stats.duration || 1);
   const movePct = ((stats.movingTime ?? 0) / total) * 100;
@@ -404,8 +407,18 @@ function SessionHeader({
         </span>
         <span className="muted">
           {/* v2.12.0 (округления): длительность — единый формат (мин/ч, секунды для коротких) */}
+          {/* v2.25.0 (П.3): активная длительность = Σ legs; для мульти-поездочных */}
+          {/* записей показываем число поездок и самую долгую паузу между ними */}
           · запись <b>{fmtDurMin(totalMin)}</b> · в поездке{" "}
-          <b>{fmtDurMin(activeMin)}</b> · {fmtInt(stats.pointCount)} {pluralRu(stats.pointCount, ["точка", "точки", "точек"])}
+          <b>{fmtDurMin(activeMin)}</b>
+          {legCount && legCount > 1 ? (
+            <span
+              data-tip={`Запись содержит ${legCount} ${pluralRu(legCount, ["поездку", "поездки", "поездок"])}: долгая стоянка ${fmtDurMin(secToMin(longestStop))} между ними не входит во «в поездке» (порог разбивки — стоянка ≥ 15 мин). Движение: ${fmtInt(moveMin)} мин.`}
+            >
+              {" "}· {legCount} {pluralRu(legCount, ["поездка", "поездки", "поездок"])} · пауза {fmtDurMin(secToMin(longestStop))}
+            </span>
+          ) : null}{" "}
+          · {fmtInt(stats.pointCount)} {pluralRu(stats.pointCount, ["точка", "точки", "точек"])}
         </span>
       </div>
       <div className="mline">
@@ -720,7 +733,12 @@ function DrivingScoreBlock({
   // v2.13.0 (Ф4): §6.3 TimeSavingIndex — среднее НА ПОЕЗДКУ. В период-режиме делим
   // на число записей с планом (planTripCount из агрегата; нулевые планы 2ГИС не
   // считаются). Раньше подпись «мин/поездку» показывала НЕДЕЛЁННУЮ сумму (−39,7).
-  const hasPlan = planDurationSec != null && planDurationSec > 0;
+  // v2.25.0 (П.5): план не сопоставим с записью (покрытие < 50% дистанции) →
+  // сравнение недоступно: «—» и «план не сопоставим», без «+558,7 мин/поездку».
+  const planNotComparable = stats?.route?.planComparable === false;
+  const hasPlan = planDurationSec != null && planDurationSec > 0 && !planNotComparable;
+  const planCoveragePct =
+    stats?.route?.planCoverage != null ? Math.round(stats.route.planCoverage * 100) : null;
   const planTrips = aggregated && stats?.route?.planTripCount && stats.route.planTripCount > 0 ? stats.route.planTripCount : 1;
   const eff = React.useMemo(() => {
     if (hasPlan && actualDuration != null) {
@@ -743,11 +761,19 @@ function DrivingScoreBlock({
         : "var(--amber)";
   // v2.12.0 (D-5): нет плана — «—» и нейтральная подпись (раньше «−0,0 мин/поездку»
   // при план/факт «—» выглядело как нулевая экономия)
+  // v2.25.0 (П.5): не сопоставимый план — отдельная подпись с покрытием
   const effBigValue = hasPlan
     ? `${eff > 0 ? "+" : "−"}${Math.abs(eff).toFixed(1).replace(".", ",")}`
     : "—";
-  const effBand = hasPlan ? ez.band : "нет данных о плане";
+  const effBand = hasPlan
+    ? ez.band
+    : planNotComparable
+      ? "план не сопоставим"
+      : "нет данных о плане";
   const effCls = hasPlan ? ez.cls : "c-amber";
+  // v2.25.0 (П.5): суффикс «мин/поездку» уместен только в период-агрегате;
+  // на странице ОДНОЙ записи — просто «мин»
+  const effUnit = hasPlan ? (aggregated ? "мин/поездку" : "мин") : "";
 
   return (
     <section>
@@ -820,9 +846,9 @@ function DrivingScoreBlock({
         {/* === Виджет 2: Эффективность · экономия к плану (v2.21.0: bullet chart) === */}
         <BulletChart
           title="Эффективность · экономия к плану"
-          helpTip="Метрика TimeSavingIndex (§6.3 DurationDeviation): среднее отклонение времени от плана маршрута в минутах на поездку. Отрицательное значение = экономия (слива), положительное = перерасход (алый). Источник: stats.route.planDurationSec vs активная длительность поездки (§4.11 ActiveDuration)."
+          helpTip="Метрика TimeSavingIndex (§6.3 DurationDeviation): среднее отклонение времени от плана маршрута в минутах на поездку. Отрицательное значение = экономия (слива), положительное = перерасход (алый). Источник: stats.route.planDurationSec vs активная длительность поездки (§4.11 ActiveDuration — сумма поездок записи)."
           bigValue={effBigValue}
-          bigValueSuffix={hasPlan ? "мин/поездку" : ""}
+          bigValueSuffix={effUnit}
           bandText={effBand}
           bandCls={effCls}
           min={-5}
@@ -850,7 +876,7 @@ function DrivingScoreBlock({
             { value: 2.5, label: "+2,5" },
             { value: 5, label: "+5" },
           ]}
-          emptyHint={hasPlan ? undefined : "план не рассчитан"}
+          emptyHint={hasPlan ? undefined : planNotComparable ? `план не сопоставим с поездкой${planCoveragePct != null ? ` (покрытие ${planCoveragePct}%)` : ""}` : "план не рассчитан"}
           note={
             <>
               Шкала bullet: −5…+5 мин/поездку, целевой маркер — 0 (план). Полоса-мера идёт от 0 влево —
@@ -858,7 +884,10 @@ function DrivingScoreBlock({
               {aggregated && hasPlan && planTrips > 1 && effTotalMin != null
                 ? ` За период — среднее на поездку: Σ отклонение ${(effTotalMin > 0 ? "+" : "−") + Math.abs(effTotalMin).toFixed(1).replace(".", ",")} мин делится на ${planTrips} ${pluralRu(planTrips, ["поездку", "поездки", "поездок"])} с планом.`
                 : ""}
-              {!hasPlan ? " Для этой записи план маршрута не рассчитан — сравнение с планом недоступно." : ""}
+              {!hasPlan && planNotComparable
+                ? ` Маршрут плана не покрывает фактическую дистанцию записи${planCoveragePct != null ? ` — покрытие ${planCoveragePct}%` : ""}: сравнение времени с планом для такой записи не имеет смысла.`
+                : ""}
+              {!hasPlan && !planNotComparable ? " Для этой записи план маршрута не рассчитан — сравнение с планом недоступно." : ""}
             </>
           }
           rows={[
@@ -1141,21 +1170,36 @@ function PlanFactBlock({
       ? pfActiveTrip.activeDuration
       : (stats?.duration ?? 0);
   const planDurSec = route?.planDurationSec ?? null;
+  // v2.25.0 (П.5): план не сопоставим (покрытие < 50% фактической дистанции) —
+  // отклонения по времени/дистанции не показываем: «план не сопоставим с поездкой».
+  const planNotComparable = route?.planComparable === false;
+  const planCoveragePct =
+    route?.planCoverage != null ? Math.round(route.planCoverage * 100) : null;
   let dtMin: number | null = null;
-  if (planDurSec != null && planDurSec > 0) {
+  if (planDurSec != null && planDurSec > 0 && !planNotComparable) {
     dtMin = (actualDurSec - planDurSec) / 60;
-  } else if (route?.durationDeviationPct != null) {
+  } else if (!planNotComparable && route?.durationDeviationPct != null) {
     dtMin = (route.durationDeviationPct * actualDurSec) / 100 / 60;
   }
   const heroCls = dtMin == null ? "c-amber" : dtMin <= 0 ? "c-plum" : dtMin <= 2 ? "c-amber" : "c-red";
   const heroSign = dtMin == null ? "" : dtMin > 0 ? "+" : "−";
   const heroVal = dtMin == null ? "—" : Math.abs(dtMin).toFixed(0).replace(".", ",");
-  const dtPct = route?.durationDeviationPct ?? (planDurSec && planDurSec > 0 ? Math.round(((actualDurSec - planDurSec) / planDurSec) * 1000) / 10 : null);
-  const heroChip = dtMin == null ? "chip-amber" : Math.abs(dtMin) <= Math.max(2, (planDurSec ?? actualDurSec) / 60 * 0.05) ? "chip-amber" : dtMin <= 0 ? "chip-plum" : "chip-red";
-  const heroLabel = dtMin == null ? "нет плана" : Math.abs(dtMin) <= (planDurSec ?? actualDurSec) / 60 * 0.05 ? "в пределах ±5%" : dtMin <= 0 ? "экономия" : "перерасход";
+  const dtPct = planNotComparable
+    ? null
+    : route?.durationDeviationPct != null
+      ? route.durationDeviationPct
+      : planDurSec && planDurSec > 0
+        ? Math.round(((actualDurSec - planDurSec) / planDurSec) * 1000) / 10
+        : null;
+  const heroChip = planNotComparable ? "chip-amber" : dtMin == null ? "chip-amber" : Math.abs(dtMin) <= Math.max(2, (planDurSec ?? actualDurSec) / 60 * 0.05) ? "chip-amber" : dtMin <= 0 ? "chip-plum" : "chip-red";
+  const heroLabel = planNotComparable
+    ? planCoveragePct != null
+      ? `план покрывает ${planCoveragePct}%`
+      : "план не сопоставим"
+    : dtMin == null ? "нет плана" : Math.abs(dtMin) <= (planDurSec ?? actualDurSec) / 60 * 0.05 ? "в пределах ±5%" : dtMin <= 0 ? "экономия" : "перерасход";
 
-  const distDevPct = route?.distanceDeviationPct ?? null;
-  const spdDevPct = route?.speedDeviationPct ?? null;
+  const distDevPct = !planNotComparable ? (route?.distanceDeviationPct ?? null) : null;
+  const spdDevPct = !planNotComparable ? (route?.speedDeviationPct ?? null) : null;
   const timeLostSec = route?.timeLostToTrafficSec ?? 0;
   const timeLostMin = timeLostSec / 60;
   const provider = route?.provider;
@@ -1260,7 +1304,12 @@ function PlanFactBlock({
             </div>
             <div className="pf-sub">
               {/* v2.13.0 (Ф5): 2 знака у процентов */}
-              {dtPct != null ? `${fmtNum(dtPct, 2)}% к плану` : "нет данных о плане"}{" "}
+              {/* v2.25.0 (П.5): несопоставимый план — честная подпись вместо «+21910%» */}
+              {planNotComparable
+                ? `план не сопоставим с поездкой${planCoveragePct != null ? ` — покрытие ${planCoveragePct}%` : ""}`
+                : dtPct != null
+                  ? `${fmtNum(dtPct, 2)}% к плану`
+                  : "нет данных о плане"}{" "}
               <span className={`chip ${heroChip}`}>{heroLabel}</span>
             </div>
           </div>

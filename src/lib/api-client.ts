@@ -257,6 +257,95 @@ export interface SessionDetail extends SessionListItem {
   tags?: string | null;
 }
 
+// ——— v2.26.0 (ТЗ «Поездка не рвётся», §10): ПОЕЗДКИ ———
+// Поездка = каноническая сущность сервера (граница = интервал/стоянка < 900 c);
+// записи (Session) — транспортные фрагменты состава. Карточки «Поездок»
+// рендерятся из /api/trips + /api/trips/batch (зеркально записям).
+
+export interface TripListItem {
+  id: string;
+  deviceId: string;
+  status: "recording" | "completed" | string;
+  startTime: string; // ISO — мс первого движения
+  endTime: string | null;
+  spanStart: string; // ISO — первый фикс среза поездки
+  spanEnd: string | null;
+  startLat: number | null;
+  startLon: number | null;
+  endLat: number | null;
+  endLon: number | null;
+  sessionCount: number;
+  sessionIds: string[];
+  interFragmentGapSec: number | null;
+  // кэш-агрегаты карточки (null = ещё не посчитано — доберёт /api/trips/batch)
+  distanceM: number | null;
+  activeDurationSec: number | null;
+  durationSec: number | null;
+  pointCountActual: number | null;
+  maxSpeedMs: number | null;
+  ecoScore: number | null;
+  planComparable: boolean | null;
+  planDeviationSec: number | null;
+}
+
+export interface TripFragment {
+  id: string;
+  deviceName: string | null;
+  startTime: string;
+  endTime: string | null;
+  pointCount: number;
+  status: string;
+}
+
+export interface TripStats {
+  tripId: string;
+  pointCount: number;
+  distance: number;
+  rawDistanceM: number;
+  duration: number;
+  activeDurationSec: number;
+  interFragmentGapSec: number;
+  movingTime: number;
+  idleTime: number;
+  gapTime: number;
+  internalStopTimeSec: number;
+  avgSpeed: number | null;
+  maxSpeed: number;
+  ecoScore: number | null;
+  speedProfile?: Array<{ t: number; v: number | null; st: 0 | 1 | 2; alt?: number | null; lat?: number; lng?: number }>;
+  startTime: string;
+  endTime: string | null;
+  spanStart: string;
+  spanEnd: string | null;
+  methodology?: Record<string, unknown> & {
+    ecoScore?: { value?: number | null; rating?: string } | null;
+    activeTrip?: {
+      hasActiveTrip?: boolean;
+      activeDuration?: number;
+      legCount?: number;
+      longestInternalStopSec?: number;
+      internalStopTime?: number;
+    } | null;
+    harshBrakingCount?: number;
+    harshAccelCount?: number;
+  };
+  route?: {
+    provider?: string | null;
+    planDistanceM?: number | null;
+    planDurationSec?: number | null;
+    trafficDurationSec?: number | null;
+    timeLostToTrafficSec?: number | null;
+    durationDeviationPct?: number | null;
+    distanceDeviationPct?: number | null;
+    planComparable?: boolean | null;
+    planCoverage?: number | null;
+  };
+  routingLegCount?: number | null;
+  fragments?: TripFragment[];
+  sessionIds?: string[];
+  tripStatus?: string;
+}
+
 export interface RouteItem {
   id: string;
   name: string;

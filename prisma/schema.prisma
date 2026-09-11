@@ -41,6 +41,11 @@ model Session {
   routeHash    String?   // v2.9 §10.0: deterministic 16-char hash for grouping conceptual-same routes (snap-to-grid + topology)
   topologyHash String?   // v2.9 §10.0: 8-char hash of key route points (intermediate value, indexed for debugging)
   trafficJobId String?
+  // v2.26.0 (ТЗ «Поездка не рвётся», §6): ПОСЛЕДНЯЯ поездка записи (навигация).
+  // Запись может входить в НЕСКОЛЬКО поездок (запись на весь рабочий день =
+  // утренняя + вечерняя поездки) — канонический состав хранит Trip.sessionIds
+  // (JSON-массив); это поле денормализовано для быстрых запросов/диагностики.
+  tripId       String?
   notes        String?
   tags         String?
   createdAt    DateTime  @default(now())
@@ -52,6 +57,7 @@ model Session {
   trafficJobs TrafficJob[]
   auditLogs   AuditLog[]
   exportJobs  ExportJob[]
+  trips       Trip[]      @relation("SessionTrips")
 
   @@unique([deviceId, clientId])
   @@index([status, endTime])
@@ -60,6 +66,65 @@ model Session {
   @@index([topologyHash])  // v2.9: для отладки и группировки по топологии
   @@index([deletedAt])
   @@index([startTime])
+  @@index([tripId])        // v2.26.0: поездка записи (навигация/диагностика)
+}
+
+// v2.26.0 (ТЗ «Поездка не рвётся на куски», §4/§6): каноническая сущность
+// «Поездка» = максимальная последовательность активного движения устройства.
+// Граница — ЧИСТАЯ ФУНКЦИЯ ПОТОКА ТОЧЕК: интервал между соседними точками
+// ≥ TRIP_SPLIT_SEC (900 c) ИЛИ стоянка (нулевое перемещение при точках)
+// ≥ TRIP_SPLIT_SEC. Единая семантика с ACTIVE_TRIP_STOP_SPLIT_SEC (v2.25 legs):
+// «остановка ≥ 15 минут = новая поездка» независимо от того, молчал логгер
+// (тишина/разрыв потока) или писал парковочный дрейф. Запись (Session)
+// остаётся ТРАНСПОРТНЫМ фрагментом: тишина пуша > SESSION_GAP_MS (60 c)
+// режет только записи. Кэш-поля метрик — конвенция Session §6.1: null =
+// «не посчитано», расчёт on-demand, инвалидация при изменении состава.
+model Trip {
+  id           String    @id @default(cuid())
+  deviceId     String
+  // Модель владения v2.23.0 (изоляция данных), копия с записей: NULL = хозяйские
+  userId       String?
+  status       String    @default("recording") // recording | completed
+  // Окно ПОЕЗДКИ (= leg-окно v2.25): от первого до последнего ДВИЖЕНИЯ;
+  // стоянки-«хвосты» записей и парковки между поездками НЕ входят
+  startTime    DateTime            // мс первого движения
+  endTime      DateTime?           // мс последнего движения
+  spanStart    DateTime            // первый фикс охватываемых записей
+  spanEnd      DateTime?           // последний фикс охватываемых записей
+  startLat     Float?
+  startLon     Float?
+  endLat       Float?
+  endLon       Float?
+  sessionIds   String    @default("[]") // JSON id записей — канонический состав
+  sessionCount Int       @default(0)
+  deletedAt    DateTime?
+  trafficJobId String?   // план-факт: один TrafficJob на поездку (§9 ТЗ)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  activeDurationSec   Float?
+  movingTimeSec       Float?
+  idleTimeSec         Float?
+  gapTimeSec          Float?
+  interFragmentGapSec Float?
+  internalStopTimeSec Float?
+  distanceM           Float?
+  pointCountActual    Int?
+  maxSpeedMs          Float?
+  ecoScore            Float?
+  planDistanceM       Float?
+  planDurationSec     Float?
+  planComparable      Boolean?
+  planCoverage        Float?
+  routingLegCount     Int?
+  statsComputedAt     DateTime?
+
+  sessions     Session[]   @relation("SessionTrips")
+
+  @@index([deviceId, spanStart])
+  @@index([userId, spanStart])
+  @@index([status, spanEnd])
+  @@index([deletedAt])
 }
 
 model GpsPoint {
@@ -115,7 +180,12 @@ model RouteCache {
 
 model TrafficJob {
   id           String    @id @default(cuid())
-  sessionId    String
+  // v2.26.0 (ТЗ §6): задание маршрутизации сессии ИЛИ поездки. Инвариант
+  // приложения (проверяется на записи, §16 ТЗ): заполнен РОВНО ОДИН из
+  // sessionId / tripId. Существующие строки — только sessionId (поездковых
+  // до v2.26 не существовало).
+  sessionId    String?
+  tripId       String?
   status       String    @default("pending")
   attempts     Int       @default(0)
   priority     Int       @default(0)
@@ -127,10 +197,11 @@ model TrafficJob {
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
-  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  session Session? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([status, scheduledFor, priority])
   @@index([sessionId])
+  @@index([tripId])
 }
 
 model AuditLog {

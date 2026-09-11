@@ -11,6 +11,7 @@ import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import pLimit from "p-limit";
 import { randomUUID } from "crypto";
+import { assignTripOnSessionFinalize } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): поездки после импорта
 
 const writeLock = pLimit(1);
 
@@ -161,6 +162,9 @@ export async function POST(request: NextRequest) {
           });
         });
         imported.push({ id: String(session.id), deviceId: String(session.deviceId), points: g.points.length });
+        // v2.26.0 (ТЗ §7): импорт создаёт completed-запись — назначаем поездки
+        // устройства (канонический пересчёт; non-fatal, ошибки не в errors[])
+        await assignTripOnSessionFinalize(String(session.id)).catch(() => null);
         inc("ingest_total", "Total ingest requests", 1, "csv");
       } catch (err) {
         errors.push({ deviceId: g.deviceId, error: err instanceof Error ? err.message : String(err) });

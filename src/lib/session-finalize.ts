@@ -12,6 +12,7 @@
 // completed» определяется rowsAffected самого UPDATE статуса.
 import { libsql } from "./db";
 import { logger } from "./logger";
+import { assignTripOnSessionFinalize } from "./trip-grouping"; // v2.26.0 (ТЗ §7): назначение поездок при финализации
 
 /**
  * Гарантирует наличие TrafficJob для сессии. Вставляет pending-джоб ТОЛЬКО если
@@ -51,6 +52,11 @@ export async function ensureTrafficJob(sessionId: string): Promise<void> {
  * Вызывается из инжеста (gap >60с), cron finalize-sessions и воркера-«жнеца».
  * Идемпотентна: повторный вызов для уже-completed сессии не чинит статус
  * (rowsAffected = 0) и не дублирует pending-джоб (см. ensureTrafficJob).
+ *
+ * v2.26.0 (ТЗ «Поездка не рвётся», §7): финализация — точка назначения
+ * поездок. assignTripOnSessionFinalize вызывает ЕДИНСТВУЮ реализацию правила
+ * (recomputeTripsForDevice) для затронутой цепочки устройства; сбой
+ * назначения НЕ роняет финализацию (warn-лог внутри, §16 ТЗ).
  */
 export async function finalizeSession(sessionId: string): Promise<void> {
   const now = new Date().toISOString();
@@ -59,5 +65,7 @@ export async function finalizeSession(sessionId: string): Promise<void> {
     args: [now, sessionId],
   });
   await ensureTrafficJob(sessionId);
+  // v2.26.0 (ТЗ §7): поездки — под флагом (expand-фаза ТЗ §13); non-fatal.
+  await assignTripOnSessionFinalize(sessionId);
   logger.info("Session finalized", { sessionId });
 }

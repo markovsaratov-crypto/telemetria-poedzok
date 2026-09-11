@@ -17,11 +17,15 @@ import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import { recordIngestAttempt, recordIngestRaw } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток; v2.10.8: сырой дамп
 import { finalizeSession } from "@/lib/session-finalize"; // v2.14.0 (Ф3): shared с воркером-«жнецом»
+import { joinNewSessionToTrip, extendTripOnPoints } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): живое вливание записи в поездку
 import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.16.0 (D-6): единый парсер времени
 import pLimit from "p-limit";
 import { randomUUID } from "crypto";
 
-const SESSION_GAP_MS = 60_000; // 60с gap = новая сессия
+// v2.26.0 (ТЗ §12): тишина пуша = граница ЗАПИСИ — из env (было хардкодом
+// 60_000). Транспортный уровень не меняется: быстрая финализация записей
+// сохраняется; ПОЕЗДКИ режутся только порогом TRIP_SPLIT_SEC (trip-grouping.ts).
+const SESSION_GAP_MS = () => env().SESSION_GAP_MS;
 // v2.16.0 (R7): окно правдоподобия времени точки (±24 ч от серверного now):
 // мусорные/будущие/доисторические таймстемпы не должны попадать в БД и метрики
 const TS_PLAUSIBILITY_MS = 24 * 60 * 60 * 1000;
@@ -261,6 +265,10 @@ function describePayloadShape(body: unknown): string {
 }
 
 // v2.23.0: userId — привязка сессии к владельцу инжест-канала (null = владелец сервера)
+// v2.26.0 (ТЗ §7 «поздние данные»): новая запись сразу вливается в существующую
+// поездку устройства, если её первая точка < TRIP_SPLIT_SEC от последней точки
+// поездки (решение ДО вставки точек, под тем же writeLock). Полный пересчёт
+// состава выполнит финализация; здесь — навигационное tripId + живой span.
 async function createRecordingSession(deviceId: string, deviceName: string, firstTsMs: number, userId: string | null): Promise<string> {
   const id = randomUUID();
   const now = new Date().toISOString();
@@ -272,6 +280,12 @@ async function createRecordingSession(deviceId: string, deviceName: string, firs
       ? [id, deviceId, randomUUID(), deviceName, startTime, startTime, now, now, userId]
       : [id, deviceId, randomUUID(), deviceName, startTime, startTime, now, now],
   });
+  const tripId = await joinNewSessionToTrip(deviceId, firstTsMs);
+  if (tripId) {
+    await libsql
+      .execute({ sql: `UPDATE Session SET tripId = ? WHERE id = ?`, args: [tripId, id] })
+      .catch(() => null);
+  }
   return id;
 }
 
@@ -479,7 +493,7 @@ export async function POST(request: NextRequest) {
         const gapMs = Number.isFinite(sessionEndMs)
           ? firstBatchTs - sessionEndMs
           : now - new Date(String(row.updatedAt)).getTime();
-        if (gapMs < SESSION_GAP_MS) {
+        if (gapMs < SESSION_GAP_MS()) {
           // Продолжаем ту же сессию (в т.ч. поздние батчи с отрицательным гэпом —
           // они хронологически принадлежат этой записи)
           sessionId = String(row.id);
@@ -526,6 +540,10 @@ export async function POST(request: NextRequest) {
               WHERE id = ?`,
         args: [new Date(newStart).toISOString(), new Date(newEnd).toISOString(), points.length, payloadBytes, new Date().toISOString(), sessionId],
       });
+      // v2.26.0 (ТЗ §7): живое расширение окна поездки последней точкой батча
+      // (сессия привязана — поездка «дышит» вместе с записью; состав/кэши — при
+      // финализации). Под тем же writeLock; сбой — не роняет инжест.
+      await extendTripOnPoints(sessionId, lastTs);
       // v2.16.0 (R2): идемпотентность-запись — ПОСЛЕ успешной вставки точек
       // (atomic INSERT OR IGNORE — защита и от межинстансовых гонок)
       if (msgId != null && (typeof msgId === "number" || typeof msgId === "string")) {

@@ -10,6 +10,7 @@ import { writeAudit } from "@/lib/audit";
 import { randomUUID } from "crypto";
 import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.11.0 (C-12): ISO-время в CSV
 import AdmZip from "adm-zip";
+import { assignTripOnSessionFinalize } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): поездки после импорта
 
 function parseCSV(text: string): { headers: string[]; rows: string[][] } {
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
@@ -190,6 +191,9 @@ export async function POST(request: NextRequest) {
     });
     // v2.19.0: noImplicitAny — id транзакционного результата unknown → String()
     const sessionId = String(session.id);
+    // v2.26.0 (ТЗ §7): импорт создаёт completed-запись — назначаем поездки
+    // устройства (канонический пересчёт затронутой цепочки; non-fatal)
+    await assignTripOnSessionFinalize(sessionId);
     await writeAudit({ action: "session.import", targetId: sessionId, targetType: "Session", actorType: "user", actorId: "owner", sessionId, metadata: { source: "zip", fileName: file.name, pointCount: filtered.length, deviceName } });
     inc("ingest_total", "Total ingest requests", 1, "zip");
     logger.info("ZIP import success", { requestId, sessionId, points: filtered.length, deviceName });

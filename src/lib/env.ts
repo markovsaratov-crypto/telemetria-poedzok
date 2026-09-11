@@ -64,6 +64,8 @@ const schema = z.object({
   // на отдельные legs (запись на весь рабочий день: утром доехал, 8,5 ч на парковке,
   // вечером уехал — «в поездке» теперь сумма поездок, а не весь span). Светофоры и
   // пробки (< порога) остаются внутри поездки, как требует §4.11.
+  // v2.26.0 (ТЗ «Поездка не рвётся», §4): deprecated-алиас TRIP_SPLIT_SEC —
+  // инвариант равенства проверяется при старте (assertTripInvariants).
   ACTIVE_TRIP_STOP_SPLIT_SEC: z.coerce.number().positive().default(900),
   // v2.25.0 (П.3): leg короче порога — джиттер-всплеск на парковке (GPS-дрейф
   // дал «движение» 12–30 сек), не поездка. Такие legs отбрасываются в паузы.
@@ -72,6 +74,25 @@ const schema = z.object({
   // покрывает ≥ этой доли фактической (план «дом→работа» 1,7 км против факта 36 км =
   // покрытие 5% → «план не сопоставим», без «+558,7 мин перерасхода»).
   PLAN_MIN_COVERAGE: z.coerce.number().min(0.05).max(1).default(0.5),
+  // v2.26.0 (ТЗ «Поездка не рвётся», §12/§13): feature flag сущности Trip.
+  // false = код назначения поездок молчит (expand-фаза §13 ТЗ), потребители
+  // (API/UI/воркер) работают по записям, как в v2.25. Финальный релиз 2.26.0 —
+  // true (включение): схема запушена до кода, backfill выполняется POST
+  // /api/admin/backfill-trips после деплоя.
+  TRIP_ENABLED: z.string().default("true"),
+  // v2.26.0 (ТЗ §4): КАНОНИЧЕСКАЯ граница поездки: интервал между точками ИЛИ
+  // стоянка ≥ порога = новая поездка. Дефолт 900 с == ACTIVE_TRIP_STOP_SPLIT_SEC
+  // (инвариант assertTripInvariants) — единая семантика «остановка ≥ 15 минут =
+  // новая поездка» независимо от того, молчал логгер или писал парковочный дрейф.
+  TRIP_SPLIT_SEC: z.coerce.number().positive().default(900),
+  // v2.26.0 (ТЗ §12): тишина пуша = граница ЗАПИСИ (транспортный уровень; вынесен
+  // из хардкода 60_000 в инжест-роуте). Быстрая финализация записей сохраняется.
+  SESSION_GAP_MS: z.coerce.number().int().positive().default(60000),
+  // v2.26.0 (ТЗ §9/§12): лимит routing legs план-факта поездки (методология v2.25
+  // legCount ≤ 5); свыше — сливаются соседние кратчайшие.
+  TRIP_MAX_ROUTING_LEGS: z.coerce.number().int().min(1).max(10).default(5),
+  // v2.26.0 (ТЗ §13): pacing backfill поездок (записей за батч устройства).
+  TRIP_BACKFILL_BATCH: z.coerce.number().int().positive().default(50),
   // v2.9 §7.3: CAP EcoScore — базовые линии калибруются по референсному корпусу (по умолчанию 0.5/0.4/0.3)
   ECO_SCORE_CAP_BASELINE: z.string().default(""),
   ECO_SCORE_CAP_PENALTY_EXPONENT: z.coerce.number().positive().default(1.5),
@@ -124,6 +145,28 @@ function assertProdSecrets(e: Env): void {
   }
 }
 
+// v2.26.0 (ТЗ §12): инварианты порогов поездок — fail-fast ПРИ ЛЮБОМ окружении:
+// конфигурационная ошибка (не секрет), приложение обязано упасть на старте
+// с понятным сообщением, а не молча резать поездки по неверной границе.
+//   I1: TRIP_SPLIT_SEC == ACTIVE_TRIP_STOP_SPLIT_SEC — единая семантика границы
+//       (иначе стоянки режут legs и поездки по РАЗНЫМ порогам — расхождение методологии).
+//   I2: TRIP_SPLIT_SEC > SESSION_GAP_MS/1000 — граница поездки не может быть
+//       мельче транспортного разрыва записей (иначе каждая запись = своя поездка).
+function assertTripInvariants(e: Env): void {
+  if (e.TRIP_SPLIT_SEC !== e.ACTIVE_TRIP_STOP_SPLIT_SEC) {
+    throw new Error(
+      `[env] TRIP INVARIANT: TRIP_SPLIT_SEC=${e.TRIP_SPLIT_SEC} != ACTIVE_TRIP_STOP_SPLIT_SEC=${e.ACTIVE_TRIP_STOP_SPLIT_SEC}. ` +
+        "Единая граница поездки/leg — обязательный инвариант v2.26 (ТЗ §4): задайте равные значения."
+    );
+  }
+  if (e.TRIP_SPLIT_SEC * 1000 <= e.SESSION_GAP_MS) {
+    throw new Error(
+      `[env] TRIP INVARIANT: TRIP_SPLIT_SEC=${e.TRIP_SPLIT_SEC} c ≤ SESSION_GAP_MS=${e.SESSION_GAP_MS} мс — ` +
+        "граница поездки мельче транспортного разрыва записей; каждая запись станет отдельной поездкой."
+    );
+  }
+}
+
 export function env(): Env {
   if (cached) return cached;
   // Use safeParse with defaults — never throw, always return a valid Env.
@@ -132,6 +175,7 @@ export function env(): Env {
     // v2.7: APP_VERSION всегда из package.json (единый источник; env дашборда не может перекрыть релиз)
     cached = { ...parsed.data, APP_VERSION: pkg.version };
     assertProdSecrets(cached);
+    assertTripInvariants(cached);
     return cached;
   }
   // v2.16.0 (D-1): lenient-фолбэк БЕЗ дубля схемы. Раньше сюда был скопирован
@@ -150,6 +194,7 @@ export function env(): Env {
   }
   cached = { ...lenient, APP_VERSION: pkg.version } as Env;
   assertProdSecrets(cached);
+  assertTripInvariants(cached);
   return cached;
 }
 

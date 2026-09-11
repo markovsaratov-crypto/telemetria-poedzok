@@ -21,6 +21,9 @@ services:
       # Новые аккаунты — строго role="user" (AUDIT B-1), админ только вручную в БД.
       - key: REGISTRATION_ENABLED
         value: "true"
+      # v2.26.0 (ТЗ §13): сущность Trip включена — поездки назначаются сервером
+      - key: TRIP_ENABLED
+        value: "true"
       - key: SESSION_SECRET
         sync: false
       - key: API_KEY

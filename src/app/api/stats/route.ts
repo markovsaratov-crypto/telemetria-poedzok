@@ -14,6 +14,30 @@ import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { env } from "@/lib/env";
 import { readIngestTrace, readIngestRaw } from "@/lib/ingest-trace"; // DIAG-1: трассировка; v2.10.8: сырой дамп по ?ingestRaw=1
+import { tripsEnabled } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §10): счётчики поездок
+import { libsql } from "@/lib/db";
+import type { DataScope } from "@/lib/scope";
+
+// v2.26.0: число поездок в зоне видимости (опционально от fromMs — «сегодня»)
+async function countTripsForScope(scope: DataScope, from?: Date): Promise<number> {
+  const cond: string[] = ["deletedAt IS NULL"];
+  const args: unknown[] = [];
+  if (scope.mode === "own") {
+    cond.push("userId = ?");
+    args.push(scope.userId);
+  } else if (scope.mode === "unclaimed") {
+    cond.push("userId IS NULL");
+  }
+  if (from) {
+    cond.push("spanStart >= ?");
+    args.push(from.toISOString());
+  }
+  const res = await libsql.execute({
+    sql: `SELECT COUNT(*) AS c FROM Trip WHERE ${cond.join(" AND ")}`,
+    args: args as never[],
+  });
+  return Number((res.rows[0] as Record<string, unknown>).c);
+}
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -32,13 +56,16 @@ export async function GET(request: NextRequest) {
     // Раньше считались все строки GpsPoint, включая осиротевшие точки
     // софт-делетнутых сессий → «GPS-точек (всего)» в админке расходилось
     // с суммой по поездкам в других разделах.
-    const [totalSessions, totalPoints, totalRoutes, totalTrafficJobs, deadJobs, pendingJobs] = await Promise.all([
+    // v2.26.0 (ТЗ §10): + счётчики ПОЕЗДОК (tripsCount) — «поездки» = Trip;
+    // totalSessions/todaySessions сохраняются как «записи» (обратная совместимость).
+    const [totalSessions, totalPoints, totalRoutes, totalTrafficJobs, deadJobs, pendingJobs, totalTrips] = await Promise.all([
       db.session.count({ where: { deletedAt: null, ...scopeW } }),
       db.gpsPoint.count({ where: { session: { deletedAt: null, ...scopeW } } }),
       db.route.count(),
       db.trafficJob.count(),
       db.trafficJob.count({ where: { status: "dead" } }),
       db.trafficJob.count({ where: { status: "pending" } }),
+      tripsEnabled() ? countTripsForScope(scope) : Promise.resolve(0),
     ]);
 
     // Today
@@ -56,7 +83,7 @@ export async function GET(request: NextRequest) {
     sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     const twelveWeeksAgo = new Date();
     twelveWeeksAgo.setDate(twelveWeeksAgo.getDate() - 84); // v2.16.0 (V4): имя = суть (12 недель, не «30 дней»)
-    const [todaySessions, recentSessions, totalBytesResult, heatmapSessions, ingestTrace] = await Promise.all([
+    const [todaySessions, recentSessions, totalBytesResult, heatmapSessions, ingestTrace, todayTrips] = await Promise.all([
       db.session.count({
         where: { startTime: { gte: new Date(todayStartMs) }, deletedAt: null, ...scopeW },
       }),
@@ -85,6 +112,11 @@ export async function GET(request: NextRequest) {
       scope.mode === "own"
         ? Promise.resolve({ last: null, recent: [], updatedAt: null })
         : readIngestTrace().catch(() => ({ last: null, recent: [], updatedAt: null })),
+      // v2.26.0 (ТЗ §10): «сегодня» = поездки со spanStart в клиентском дне
+      // (включая recording — «Сегодня» видит идущую поездку), scope-фильтр — тот же
+      tripsEnabled()
+        ? countTripsForScope(scope, new Date(todayStartMs))
+        : Promise.resolve(0),
     ]);
 
     // v2.10.8: полный дамп последнего нераспознанного батча — ТОЛЬКО по
@@ -104,6 +136,10 @@ export async function GET(request: NextRequest) {
         deadJobs,
         pendingJobs,
         todaySessions,
+        // v2.26.0 (ТЗ §10): счётчики поездок; sessionsCount-поля сохранены
+        // (обратная совместимость потребителей «записей»)
+        totalTrips,
+        todayTrips,
         totalPayloadBytes: totalBytesResult._sum.payloadBytes || 0,
         heatmapSessions: heatmapSessions.map((s) => ({
           startTime: String(s.startTime ?? ""),

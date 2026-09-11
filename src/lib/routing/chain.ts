@@ -23,7 +23,9 @@ export interface RouteSegment {
 }
 
 export interface RouteResult {
-  provider: "2gis" | "osrm" | "haversine";
+  // v2.25.0 (П.5): string — мульти-leg план может комбинировать провайдеров
+  // («2gis+osrm», каждая поездка записи маршрутизируется своим каналом)
+  provider: string;
   distanceM: number;
   durationSec: number;
   polyline: [number, number][];
@@ -36,6 +38,11 @@ export interface RouteResult {
   planDurationSec?: number | null;
   trafficDistanceM?: number | null; // с учётом пробок (2ГИС)
   trafficDurationSec?: number | null;
+  // v2.25.0 (П.5): мульти-leg план — ворчер маршрутизирует каждую поездку
+  // записи отдельно; дистанции/времена — суммы по legs, legDirectM — Σ прямых
+  // участков для базовой линии §3.2 (без сквозного спана).
+  legCount?: number;
+  legDirectM?: number;
 }
 
 async function route2Gis(

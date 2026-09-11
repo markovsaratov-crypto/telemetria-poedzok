@@ -8,6 +8,7 @@
 
 import { normalizeSessionSpeeds, medianSmooth3, isUsableSpeedPoint, HARSH_THRESHOLD_MS2 } from "./kpi";
 import { haversineM } from "./geo"; // v2.16.0 (D-9): канонический гаверсинус
+import { computeMovingTime, computeActiveTrip, inActiveLegs } from "./active-trip"; // v2.25.0 (П.4): события только внутри legs
 
 // v2.13.0 (Ф3): порог приведён к методологии §7.1/§7.2 — 10 км/ч за секунду
 // = 2,78 м/с². Раньше было 10 м/с² (≈1g — экстренное торможение): счётчик блока
@@ -76,10 +77,21 @@ export function computeSessionEvents(sessionId: string, deviceId: string, rawPoi
   // v2.12.0 (D-6): тот же конвейер подготовки скоростей, что и в /stats —
   // normalizeSessionSpeeds (AUDIT B-4) + 3-точечная медиана против GPS-выбросов.
   // Непригодные/отсутствующие скорости → 0 (как раньше «?? 0»), спайки гасятся медианой.
+  // v2.25.0 (П.2): normalizeSessionSpeeds теперь ЕЩЁ и отбраковывает спайки по
+  // несовместимости с геометрией (138 км/ч на парковке — позиция не двигается).
   const points = normalizeSessionSpeeds(rawPoints);
   const speeds = medianSmooth3(
     points.map((p) => (isUsableSpeedPoint(p) ? (p.speed as number) : 0))
   ) as number[];
+
+  // v2.25.0 (П.4): события — только внутри АКТИВНЫХ ПОЕЗДОК (legs). Запись на
+  // весь день с 8,5-часовой парковкой раньше давала фантомные резкие события
+  // из джиттера стоящего авто (15 торможений + 10 разгонов при 50 мин движения).
+  // Гейтинг — тот же канонический конвейер §4.6/§4.11 из active-trip.ts.
+  const motion = computeMovingTime(points);
+  const active = computeActiveTrip(points, motion);
+  const inLegs = (ts: number): boolean =>
+    active.hasActiveTrip ? inActiveLegs(active, ts) : true;
 
   // Вычисление longitudinal accel + lateral accel для каждой точки (кроме первых/последних 2)
   const maneuvers: { lat: number; lng: number; t: number; longA: number; latA: number; speed: number; bearing: number }[] = [];
@@ -93,6 +105,13 @@ export function computeSessionEvents(sessionId: string, deviceId: string, rawPoi
     const p2 = points[i];
     const p3 = points[i + 1];
     const p4 = points[i + 2];
+
+    // v2.25.0 (П.4): центр окна вне поездки → интервал не считается (и рывок
+    // через парковку не тянется — prevA сбрасывается)
+    if (!inLegs(Number(p2.timestamp))) {
+      prevA = null;
+      continue;
+    }
 
     const dt1 = (Number(p2.timestamp) - Number(p0.timestamp)) / 1000;
     const dt2 = (Number(p4.timestamp) - Number(p2.timestamp)) / 1000;

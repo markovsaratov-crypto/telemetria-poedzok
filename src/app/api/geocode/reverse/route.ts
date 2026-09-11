@@ -5,7 +5,7 @@ import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
-import { setSetting, getSettingDirect } from "@/lib/settings"; // v2.18.0: точечный read (без full-table refresh)
+import { setSetting, getSettingDirect, getSettingSync } from "@/lib/settings"; // v2.18.0: точечный read (без full-table refresh); v2.25.0: getSettingSync — ключ 2ГИС
 
 export const dynamic = "force-dynamic";
 
@@ -115,43 +115,113 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Call Nominatim (public, polite usage).
-    const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
-      lat
-    )}&lon=${encodeURIComponent(lon)}&zoom=18&addressdetails=1`;
-    const res = await fetch(nominatimUrl, {
-      headers: {
-        "User-Agent": "telemetria-poedzok/2.12 (https://github.com/markovsaratov-crypto/telemetria-poedzok)",
-        "Accept-Language": "ru",
-      },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) {
-      // Fall back to coordinates only
-      const coords = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
-      return json(
-        { address: coords, short: coords, cached: false, error: `nominatim_${res.status}` },
-        200,
-        { "X-Request-Id": requestId }
-      );
-    }
-    const data = (await res.json()) as { display_name?: string; address?: Record<string, string> };
-    const address = data.display_name || `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
-    const short = shortAddress(data.address ?? null, address);
+    // v2.25.0 (П.1): цепочка провайдеров Nominatim → 2ГИС → координаты.
+    // Прод-кейс 10.09: Nominatim с Render-франкфурта недоступен (таймаут/429) —
+    // заголовки поездок показывали «→ 51.48900, 46.12461» сырыми координатами,
+    // при том что адрес (Тельмана улица, 23а, Энгельс) существует в 2ГИС.
+    // 2ГИС-геокодер использует уже настроенный ключ каталога (TWO_GIS_API_KEY),
+    // работает из любой точки мира и знает адреса РФ/СНГ детальнее Nominatim.
 
-    // Save to Setting table
-    const cachedAt = new Date().toISOString();
-    const cacheValue = JSON.stringify({ address, short, cachedAt, raw: data.address ?? null });
+    // --- Провайдер 1: Nominatim (OSM) ---
+    let nominatimData: { display_name?: string; address?: Record<string, string> } | null = null;
     try {
-      await setSetting(key, cacheValue, "geocode-cache");
+      const nominatimUrl = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
+        lat
+      )}&lon=${encodeURIComponent(lon)}&zoom=18&addressdetails=1`;
+      const res = await fetch(nominatimUrl, {
+        headers: {
+          "User-Agent": "telemetria-poedzok/2.25 (https://github.com/markovsaratov-crypto/telemetria-poedzok)",
+          "Accept-Language": "ru",
+        },
+        signal: AbortSignal.timeout(8000),
+      });
+      // v2.25.0: прежний код при !res.ok возвращал координаты СРАЗУ; при
+      // network-ошибке (таймаут) вообще валился в 500. Теперь оба случая —
+      // просто «провайдер недоступен», пробуем следующий.
+      if (res.ok) {
+        nominatimData = (await res.json()) as { display_name?: string; address?: Record<string, string> };
+      } else {
+        logger.warn("Nominatim reverse geocode failed", { requestId, status: res.status });
+      }
     } catch (e) {
-      logger.warn("Geocode cache write failed", {
+      logger.warn("Nominatim reverse geocode error", {
         requestId,
         error: e instanceof Error ? e.message : String(e),
       });
     }
 
-    return json({ address, short, cachedAt, cached: false }, 200, { "X-Request-Id": requestId });
+    if (nominatimData && nominatimData.display_name) {
+      const address = nominatimData.display_name;
+      const short = shortAddress(nominatimData.address ?? null, address);
+
+      // Save to Setting table
+      const cachedAt = new Date().toISOString();
+      const cacheValue = JSON.stringify({ address, short, cachedAt, raw: nominatimData.address ?? null });
+      try {
+        await setSetting(key, cacheValue, "geocode-cache");
+      } catch (e) {
+        logger.warn("Geocode cache write failed", {
+          requestId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+
+      return json({ address, short, cachedAt, cached: false, provider: "nominatim" }, 200, { "X-Request-Id": requestId });
+    }
+
+    // --- Провайдер 2: 2ГИС (ключ каталога, РФ/СНГ-адреса) ---
+    try {
+      const dgisKey = getSettingSync("TWO_GIS_API_KEY");
+      if (dgisKey) {
+        const proxyUrl = getSettingSync("TWO_GIS_PROXY_URL") || process.env.TWO_GIS_PROXY_URL || "";
+        const baseUrl = proxyUrl || "https://catalog.api.2gis.ru";
+        // 2ГИС 3.0 items/geocode: q={lon},{lat} — обратное геокодирование координат
+        const url = `${baseUrl}/3.0/items/geocode?q=${encodeURIComponent(lon)},${encodeURIComponent(lat)}&key=${dgisKey}`;
+        const res = await fetch(url, {
+          headers: { Accept: "application/json" },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as {
+            result?: { items?: Array<{ type?: string; full_name?: string; name?: string; address_name?: string }> };
+          };
+          const items = data.result?.items ?? [];
+          // items[0] — «coordinates»-заглушка; первый осмысленный — building/street/place
+          const item = items.find((it) => it.type !== "coordinates" && (it.full_name || it.name));
+          if (item && (item.full_name || item.name)) {
+            const address = item.full_name || (item.name as string);
+            const short = item.address_name || item.name || shortAddress(null, address);
+            const cachedAt = new Date().toISOString();
+            const cacheValue = JSON.stringify({ address, short, cachedAt, raw: null, provider: "2gis" });
+            try {
+              await setSetting(key, cacheValue, "geocode-cache");
+            } catch (e) {
+              logger.warn("Geocode cache write failed (2gis)", {
+                requestId,
+                error: e instanceof Error ? e.message : String(e),
+              });
+            }
+            return json({ address, short, cachedAt, cached: false, provider: "2gis" }, 200, { "X-Request-Id": requestId });
+          }
+        } else {
+          logger.warn("2GIS reverse geocode failed", { requestId, status: res.status });
+        }
+      }
+    } catch (e) {
+      logger.warn("2GIS reverse geocode error", {
+        requestId,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+
+    // --- Оба провайдера недоступны: координаты (НЕ кэшируем — при следующем
+    // запросе попробуем снова, провайдеры могут подняться) ---
+    const coords = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+    return json(
+      { address: coords, short: coords, cached: false, provider: "none", error: "geocode_unavailable" },
+      200,
+      { "X-Request-Id": requestId }
+    );
   } catch (err) {
     logger.error("Geocode reverse error", {
       requestId,

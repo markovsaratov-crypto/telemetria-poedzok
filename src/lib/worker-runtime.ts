@@ -4,7 +4,8 @@ import { libsql, toCamel } from "./db"; // v2.16.0: toCamel — единая р�
 import { env } from "./env";
 import { logger } from "./logger";
 import { inc, set } from "./metrics";
-import { routeRequest, type RouteResult } from "./routing/chain";
+import { routeRequest, type RouteResult, type RouteSegment } from "./routing/chain";
+import { haversineM } from "./geo"; // v2.25.0 (П.5): Σ прямых участков мульти-leg плана
 import { finalizeSession } from "./session-finalize"; // v2.14.0 (Ф3): «жнец» зависших recording-сессий
 import { computeMovingTime, computeActiveTrip } from "./active-trip"; // v2.16.0 (B-10): каноническое активное окно §4.11
 import { getCorpusEcoBaselines } from "./eco-corpus"; // v2.17.1: фоновый прогрев corpus-калибровки
@@ -61,7 +62,15 @@ interface JobWithPoints {
   id: string;
   sessionId: string;
   attempts: number;
-  session: { id: string; deviceId: string; gpsPoints: Array<{ lat: number; lon: number }> };
+  session: {
+    id: string;
+    deviceId: string;
+    gpsPoints: Array<{ lat: number; lon: number }>;
+    // v2.25.0 (П.5): координаты границ каждой поездки (leg) записи — для
+    // мульти-leg маршрутизации (запись «утром доехал → 8,5 ч парковка →
+    // вечером уехал» больше не получает единый маршрут «дом→ почти дом» 1,7 км).
+    legEnds?: Array<{ startLat: number; startLon: number; endLat: number; endLon: number }>;
+  };
 }
 
 async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoints[]> {
@@ -144,8 +153,26 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
           .filter((p) => p.timestamp >= active.activeStartTime && p.timestamp <= active.activeEndTime)
           .map((p) => ({ lat: p.lat, lon: p.lon }))
       : allPoints.map((p) => ({ lat: p.lat, lon: p.lon }));
+    // v2.25.0 (П.5): границы каждой поездки — мульти-leg маршрутизация в processOneJob.
+    // legs всегда непусты при hasActiveTrip (computeActiveTrip гарантирует);
+    // для legacy-ответов без legs — fallback на span-границы.
+    const legEnds = active.hasActiveTrip
+      ? (active.legs.length > 0
+          ? active.legs.map((l) => ({
+              startLat: l.startCoord.lat,
+              startLon: l.startCoord.lon,
+              endLat: l.endCoord.lat,
+              endLon: l.endCoord.lon,
+            }))
+          : [{
+              startLat: active.activeStartCoord.lat,
+              startLon: active.activeStartCoord.lon,
+              endLat: active.activeEndCoord.lat,
+              endLon: active.activeEndCoord.lon,
+            }])
+      : undefined;
 
-    jobs.push({ id: c.id, sessionId: c.sessionId, attempts: c.attempts, session: { id: c.sessionId, deviceId, gpsPoints } });
+    jobs.push({ id: c.id, sessionId: c.sessionId, attempts: c.attempts, session: { id: c.sessionId, deviceId, gpsPoints, ...(legEnds ? { legEnds } : {}) } });
   }
   return jobs;
 }
@@ -200,10 +227,82 @@ async function processOneJob(job: JobWithPoints, parentRequestId: string) {
   }
   const start = points[0];
   const end = points[points.length - 1];
-  logger.info("job started", { requestId, parentRequestId, jobId: job.id, sessionId: job.sessionId, points: points.length });
+  const legEnds = job.session.legEnds;
+  logger.info("job started", { requestId, parentRequestId, jobId: job.id, sessionId: job.sessionId, points: points.length, legs: legEnds?.length ?? 1 });
   try {
+    // v2.25.0 (П.5): МУЛЬТИ-LEG МАРШРУТИЗАЦИЯ. Запись на весь день («утром
+    // доехал → 8,5 ч на парковке → вечером уехал») раньше получала ОДИН маршрут
+    // от первой до последней точки — «дом → почти дом», 1,7 км, план 3 мин — и
+    // план-факт показывал «+558,7 мин перерасхода» при факте 36 км. Теперь каждая
+    // поездка (leg) маршрутизируется отдельно: дистанции/времена суммируются,
+    // сегменты конкатенируются, legDirectM = Σ прямых участков (для базовой
+    // линии §3.2 без сквозного спана). Лимит 5 legs; свыше — берём 5 крупнейших
+    // (по расстоянию старт→финиш) — экстремальный случай спама поездками.
+    if (legEnds && legEnds.length > 1) {
+      const MAX_LEGS = 5;
+      const selected =
+        legEnds.length <= MAX_LEGS
+          ? legEnds
+          : [...legEnds]
+              .sort((a, b) => haversineM(a.startLat, a.startLon, a.endLat, a.endLon) - haversineM(b.startLat, b.startLon, b.endLat, b.endLon))
+              .reverse()
+              .slice(0, MAX_LEGS);
+      const MULTI_TIMEOUT_MS = 45000; // 5 legs × (2ГИС 15с + OSRM 8с) — щедрый общий бюджет
+      const routeAllLegs = async (): Promise<RouteResult> => {
+        let distanceM = 0;
+        let durationSec = 0;
+        let legDirectM = 0;
+        let anyTraffic = false;
+        const providers = new Set<string>();
+        const segments: RouteSegment[] = [];
+        for (const leg of selected) {
+          const r = await routeRequest(leg.startLat, leg.startLon, leg.endLat, leg.endLon);
+          if (!r) continue;
+          distanceM += r.distanceM;
+          durationSec += r.durationSec;
+          anyTraffic = anyTraffic || !!r.trafficFetched;
+          providers.add(r.provider);
+          legDirectM += haversineM(leg.startLat, leg.startLon, leg.endLat, leg.endLon);
+          if (Array.isArray(r.segments)) segments.push(...r.segments);
+        }
+        if (distanceM <= 0) {
+          // все legs не замаршрутизировались — честный fallback одним спаном
+          const fallback = await routeRequest(start.lat, start.lon, end.lat, end.lon);
+          return (
+            fallback ?? {
+              provider: "haversine",
+              distanceM: haversineM(start.lat, start.lon, end.lat, end.lon),
+              durationSec: 0,
+              polyline: [],
+              segments: [],
+              trafficFetched: false,
+            }
+          );
+        }
+        const provider = providers.size === 1 ? [...providers][0] : [...providers].sort().join("+");
+        return {
+          provider,
+          distanceM,
+          durationSec,
+          polyline: [],
+          segments,
+          trafficFetched: anyTraffic,
+          legCount: selected.length,
+          legDirectM: Math.round(legDirectM),
+        };
+      };
+      const result = await Promise.race<RouteResult>([
+        routeAllLegs(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("routeRequest multi-leg timeout 45s")), MULTI_TIMEOUT_MS)),
+      ]);
+      await completeJob(job.id, "completed", result, null, job.attempts, requestId);
+      return;
+    }
+    // Одиночная поездка: активные (leg) границы вместо сырых первой/последней точки.
+    const routeStart = legEnds && legEnds.length === 1 ? { lat: legEnds[0].startLat, lon: legEnds[0].startLon } : start;
+    const routeEnd = legEnds && legEnds.length === 1 ? { lat: legEnds[0].endLat, lon: legEnds[0].endLon } : end;
     const result = await Promise.race<RouteResult | null>([
-      routeRequest(start.lat, start.lon, end.lat, end.lon),
+      routeRequest(routeStart.lat, routeStart.lon, routeEnd.lat, routeEnd.lon),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("routeRequest timeout 15s")), 15000)),
     ]);
     await completeJob(job.id, "completed", result, null, job.attempts, requestId);

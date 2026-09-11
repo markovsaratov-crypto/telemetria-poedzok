@@ -186,13 +186,18 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
   const activeIdleTotal = sum(m.map((x) => x.activeTrip?.activeIdleTime ?? 0));
   const anyActive = activeDurations.some((d) => d > 0);
 
-  const planDistanceM = sum(routes.map((r) => r.planDistanceM));
-  const planDurationSec = sum(routes.map((r) => r.planDurationSec));
-  const trafficDurationSec = sum(routes.map((r) => r.trafficDurationSec));
-  const timeLostToTrafficSec = sum(routes.map((r) => r.timeLostToTrafficSec));
+  // v2.25.0 (П.5): в агрегат плана идут ТОЛЬКО сопоставимые планы (покрытие ≥ 50%
+  // фактической дистанции записи). План «дом→работа» 1,7 км против записи на весь
+  // день 36 км раньше загромождал период-агрегат «перерасходом +558 мин/поездку».
+  const comparableRoutes = routes.filter((r) => r.planComparable !== false);
+  const anyRouteMarkedNotComparable = routes.some((r) => r.planComparable === false);
+  const planDistanceM = sum(comparableRoutes.map((r) => r.planDistanceM));
+  const planDurationSec = sum(comparableRoutes.map((r) => r.planDurationSec));
+  const trafficDurationSec = sum(comparableRoutes.map((r) => r.trafficDurationSec));
+  const timeLostToTrafficSec = sum(comparableRoutes.map((r) => r.timeLostToTrafficSec));
   // v2.13.0 (Ф4): знаменатель «мин/поездку» — только записи с реальным планом
   // (planDurationSec > 0; нулевые планы 2ГИС для джиттер-сессий не считаются).
-  const planTripCount = routes.filter((r) => (r.planDurationSec ?? 0) > 0).length;
+  const planTripCount = comparableRoutes.filter((r) => (r.planDurationSec ?? 0) > 0).length;
 
   const ecoScoreValue = wavg(
     m.map((x) => ({ v: x.ecoScore?.value ?? null, w: x.activeTrip?.activeDuration ?? 0 })) as Array<{ v: number | null; w: number }>
@@ -330,6 +335,9 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       speedDeviationPct: null,
       // v2.13.0 (Ф4): для честного «мин/поездку» в виджете эффективности (v2.21.0 — bullet chart)
       planTripCount,
+      // v2.25.0 (П.5): были планы, но все несопоставимы → UI покажет
+      // «план не сопоставим», а не «нет данных о плане»
+      planComparable: planTripCount > 0 ? true : anyRouteMarkedNotComparable ? false : null,
     },
   };
 }

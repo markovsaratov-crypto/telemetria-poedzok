@@ -327,7 +327,20 @@ export interface SessionStats {
       hasActiveTrip: boolean;
       activeStartTime: number;
       activeEndTime: number;
+      // v2.25.0 (П.3): СУММА длительностей legs (настоящее «в поездке»);
+      // spanDuration — старая семантика «первое→последнее движение»
       activeDuration: number;
+      spanDuration?: number;
+      legCount?: number;
+      longestInternalStopSec?: number;
+      internalStopTime?: number;
+      legs?: Array<{
+        startTime: number;
+        endTime: number;
+        durationSec: number;
+        startCoord: { lat: number; lon: number };
+        endCoord: { lat: number; lon: number };
+      }>;
       activeStartCoord: { lat: number; lon: number };
       activeEndCoord: { lat: number; lon: number };
       preTripIdle: number;
@@ -354,6 +367,11 @@ export interface SessionStats {
     // v2.13.0 (Ф4): число поездок с планом в период-агрегате — знаменатель
     // для честного «мин/поездку» (§6.3 TimeSavingIndex). Одиночная сессия не проставляет.
     planTripCount?: number | null;
+    // v2.25.0 (П.5): план сопоставим с фактом? (покрытие ≥ 50% фактической
+    // дистанции; план «дом→работа» 1,7 км против факта 36 км — не сопоставим)
+    planComparable?: boolean | null;
+    // v2.25.0 (П.5): доля фактической дистанции под планом (0..1)
+    planCoverage?: number | null;
   };
 }
 

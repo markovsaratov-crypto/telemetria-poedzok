@@ -106,17 +106,10 @@
     var el = document.getElementById("content");
 
     // value + label пары для сетки 2×N
+    // v2.31.0 (NIT-2): дистанция/длительность/скорости удалены — эти поля
+    // никогда не записывались в снимок (useStats/useSessions пишут только
+    // счётчики и последнюю запись), пустые ячейки не показывались вовсе.
     var cells = [];
-    if (s.totalDistanceKm != null)
-      cells.push([s.totalDistanceKm.toFixed(1), "км", "ДИСТАНЦИЯ"]);
-    if (s.totalDurationMin != null) {
-      var h = Math.floor(s.totalDurationMin / 60), m = Math.round(s.totalDurationMin % 60);
-      cells.push([h > 0 ? h + " ч " + m : "" + m, "мин", "В ДВИЖЕНИИ"]);
-    }
-    if (s.avgSpeedKmh != null)
-      cells.push([s.avgSpeedKmh.toFixed(1), "км/ч", "СР. СКОРОСТЬ"]);
-    if (s.maxSpeedKmh != null)
-      cells.push(["" + Math.round(s.maxSpeedKmh), "км/ч", "МАКС. СКОРОСТЬ"]);
     if (s.totalSessions != null)
       cells.push(["" + s.totalSessions, "", "ПОЕЗДОК"]);
     if (s.totalPoints != null)

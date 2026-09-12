@@ -19,6 +19,7 @@ import {
 } from "./api-client";
 import { useSessions, fetchSessionsStatsBatch, seedSessionsStatsFromBatch, type SessionStats } from "./hooks";
 import { useTrips } from "./trip-hooks"; // v2.26.0: счётчик ПОЕЗДОК периода
+import { haversineM } from "./geo"; // v2.31.0 (MAJ-10): §8.2 в период-режиме
 import { type PeriodKey } from "./v4-utils";
 
 // /api/stats/speed-record — §4.5 MaxSpeedAllTime (v2.13.0 Ф1).
@@ -66,7 +67,11 @@ export function useV4Events(sessionId: string | null) {
 
 // === Период-агрегат (v2.10.2) ===
 
-const MAX_PERIOD_SESSIONS = 30;
+// v2.31.0 (MIN-9): 30 → 50 — скоуп агрегата = скоупу списка записей (useSessions
+// limit 50) и вкладки «Поездки» (useTrips limit 50): шапка «N поездок · M записей»
+// и Σ-статы покрывают один и тот же набор, счётчики вкладок сходятся. Все батч-роуты
+// принимают ≤50 id (BATCH_MAX_IDS); статы — предрасчёт из персистентного кэша.
+const MAX_PERIOD_SESSIONS = 50;
 
 export function periodStartMs(period: PeriodKey, now = Date.now()): number {
   const d = new Date(now);
@@ -180,6 +185,26 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
     SessionStats["route"]
   >[];
 
+  // v2.31.0 (MAJ-4): согласованные популяции числителя/знаменателя план-факта
+  // периода. Раньше числитель Δ по времени = Σ активных длительностей ВСЕХ
+  // записей периода, а знаменатель = Σ планов только сопоставимых (coverage
+  // ≥ 50%) — активное время записей без плана систематически завышало «+N
+  // мин/поездку» и hero «Отклонение по времени». Теперь и числитель, и
+  // знаменатель — только записи с сопоставимым планом (как в §6.3).
+  const comparableActualDurTotal = sum(
+    sorted
+      .filter((s) => s.route && s.route.planComparable !== false)
+      .map((s) => {
+        const at = s.methodology?.activeTrip;
+        return at?.hasActiveTrip && (at.activeDuration ?? 0) > 0
+          ? at.activeDuration
+          : (s.duration ?? 0);
+      })
+  );
+  const comparableDistTotal = sum(
+    sorted.filter((s) => s.route && s.route.planComparable !== false).map((s) => s.distance ?? 0)
+  );
+
   // FIX-C1/C2: активные составляющие периода — сумма активных длительностей/хвостов
   // поездок (§4.11). Раньше агрегат avgSpeed и Δ по времени считались от полной
   // длительности записей — стоянки-хвосты занижали среднюю и завышали отклонение от плана.
@@ -206,6 +231,18 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
   const ecoScoreValue = wavg(
     m.map((x) => ({ v: x.ecoScore?.value ?? null, w: x.activeTrip?.activeDuration ?? 0 })) as Array<{ v: number | null; w: number }>
   );
+  // v2.31.0 (MIN-8): средняя надёжность периода + рейтинг по порогам §11.6
+  const relValue = avg(m.map((x) => x.sessionReliability?.value ?? null));
+  const relRating =
+    relValue == null
+      ? "insufficient_data"
+      : relValue >= 0.85
+        ? "high"
+        : relValue >= 0.6
+          ? "medium"
+          : relValue >= 0.3
+            ? "low"
+            : "unreliable";
   // v2.26.1: подписи рейтинга — та же шкала стиля вождения, что и в ecoLab
   // (плавно / умеренно / агрессивно); старое «резко» было непонятно пользователю.
   const rating =
@@ -223,6 +260,22 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
   // (согласовано с поездиным KPI §4.3). Fallback на полную длительность — для legacy-данных.
   const avgSpeedBase = activeDurTotal > 0 ? activeDurTotal : duration;
 
+  // v2.31.0 (MAJ-10): §8.2 в период-режиме — путь/прямая(старт→финиш), как в
+  // одиночном. Раньше агрегат подменял смысл на факт/план (Σ дистанций/Σ
+  // планов), а тултип «Путь против прямой» врал. Прямая = от старта первой
+  // активной поездки до финиша последней.
+  const firstActive = m.find((x) => x.activeTrip?.hasActiveTrip)?.activeTrip;
+  const lastActive = [...m].reverse().find((x) => x.activeTrip?.hasActiveTrip)?.activeTrip;
+  const directM =
+    firstActive && lastActive
+      ? haversineM(
+          firstActive.activeStartCoord.lat,
+          firstActive.activeStartCoord.lon,
+          lastActive.activeEndCoord.lat,
+          lastActive.activeEndCoord.lon
+        )
+      : 0;
+
   return {
     sessionId,
     pointCount,
@@ -235,7 +288,9 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
     hasAltitude: sorted.some((s) => s.hasAltitude),
     routeHash: null,
     topologyHash: null,
-    avgSpeed: avgSpeedBase > 0 ? distance / avgSpeedBase : null,
+    // v2.31.0 (MIN-15б): дистанция 0 (период из одних джиттер-записей) — «—»,
+    // а не «0,0 км/ч»
+    avgSpeed: distance > 0 && avgSpeedBase > 0 ? distance / avgSpeedBase : null,
     maxSpeed: Math.max(0, ...sorted.map((s) => s.maxSpeed ?? 0)),
     avgAltitude: wavg(
       sorted.map((s) => ({ v: s.avgAltitude, w: s.pointCount ?? 0 })) as Array<{ v: number | null; w: number }>
@@ -253,7 +308,8 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       gapTime,
       speedP50: avg(m.map((x) => x.speedP50)),
       speedStdDev: avg(m.map((x) => x.speedStdDev)),
-      // Распределение по 5 бакетам — ВЗВЕШЕННОЕ среднее гистограмм.
+      // Распределение по бакетам §5.3 (v2.31.0: 6 бакетов 0-20…100+) —
+      // ВЗВЕШЕННОЕ среднее гистограмм.
       // v2.29.0 (MI-11 кодревью): раньше проценты сессий складывались как равные
       // (2 сессии → до 200%; короткая поездка весила как длинная). Теперь вес =
       // активная длительность записи (гистограммы — доли активных точек);
@@ -304,8 +360,9 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       uTurnCount: sum(m.map((x) => x.uTurnCount)),
       turnCount: sum(m.map((x) => x.turnCount)),
       highSpeedCornering: sum(m.map((x) => x.highSpeedCornering)),
-      // Общая эффективность: факт против плана по всем поездкам с маршрутом.
-      routeEfficiency: planDistanceM > 0 ? distTotal / planDistanceM : null,
+      // v2.31.0 (MAJ-10): §8.2 — путь/прямая (см. directM выше); факт/план
+      // остаётся в route.durationDeviationPct/distanceDeviationPct
+      routeEfficiency: distTotal > 0 && directM > 1 ? Math.round((distTotal / directM) * 100) / 100 : null,
       avgAccuracy: avg(m.map((x) => x.avgAccuracy)),
       pointDensity: duration > 0 ? pointCount / duration : null,
       gapCount: sum(m.map((x) => x.gapCount)),
@@ -313,11 +370,15 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       accuracyP90: avg(m.map((x) => x.accuracyP90)),
       completenessScore: avg(m.map((x) => x.completenessScore)) ?? 0,
       sessionReliability: {
-        value: avg(m.map((x) => x.sessionReliability?.value ?? null)),
+        value: relValue,
         completenessScore: avg(m.map((x) => x.sessionReliability?.completenessScore ?? null)),
         driftScore: avg(m.map((x) => x.sessionReliability?.driftScore ?? null)),
         plausibilityScore: avg(m.map((x) => x.sessionReliability?.plausibilityScore ?? null)),
-        rating: avg(m.map((x) => x.sessionReliability?.value ?? null)) != null ? rating : "н/д",
+        // v2.31.0 (MIN-8): честный рейтинг надёжности периода — пороги §11.6
+        // (0,85/0,6/0,3) от среднего value. Раньше сюда попадал eco-рейтинг
+        // («плавно/умеренно/агрессивно») — тайл «Надёжность записи» показывал
+        // стиль вождения вместо качества GPS.
+        rating: relRating,
       },
       activeTrip: {
         // FIX-C1/C2: агрегат активных поездок периода (суммы по поездкам §4.11) —
@@ -344,18 +405,28 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       // v2.13.0 (Ф5): 2 знака после запятой — раньше агрегат отдавал сырой float
       // («-5,987384005838807%» в UI). Синхронно с pct() одиночной сессии.
       durationDeviationPct:
-        // FIX-C2: факт = Σ активных длительностей (§6.2), а не полные записи
-        planDurationSec > 0
-          ? Math.round(((activeDurTotal > 0 ? activeDurTotal : duration) - planDurationSec) / planDurationSec * 10000) / 100
+        // FIX-C2 + v2.31.0 (MAJ-4): факт = Σ активных длительностей ТОЛЬКО
+        // записей с сопоставимым планом (§6.2) — популяции числителя/знаменателя
+        // совпадают, записи без плана не завышают отклонение
+        planDurationSec > 0 && comparableActualDurTotal > 0
+          ? Math.round((comparableActualDurTotal - planDurationSec) / planDurationSec * 10000) / 100
           : null,
       distanceDeviationPct:
-        planDistanceM > 0 ? Math.round((distance - planDistanceM) / planDistanceM * 10000) / 100 : null,
+        // v2.31.0 (MAJ-4): числитель — дистанции только сопоставимых записей
+        planDistanceM > 0 && comparableDistTotal > 0
+          ? Math.round((comparableDistTotal - planDistanceM) / planDistanceM * 10000) / 100
+          : null,
       speedDeviationPct: null,
       // v2.13.0 (Ф4): для честного «мин/поездку» в виджете эффективности (v2.21.0 — bullet chart)
       planTripCount,
       // v2.25.0 (П.5): были планы, но все несопоставимы → UI покажет
       // «план не сопоставим», а не «нет данных о плане»
       planComparable: planTripCount > 0 ? true : anyRouteMarkedNotComparable ? false : null,
+      // v2.31.0 (MAJ-4): Σ активных длительностей записей с сопоставимым планом —
+      // «факт» план-факта периода в UI (hero «Отклонение по времени», bullet
+      // «Эффективность»). Только агрегат; одиночная сессия не проставляет.
+      planActualDurationSec:
+        comparableActualDurTotal > 0 ? Math.round(comparableActualDurTotal) : null,
     },
   };
 }
@@ -478,7 +549,9 @@ export function usePeriodStats(period: PeriodKey) {
   // v2.26.0 (ТЗ §11): счётчик ПОЕЗДОК — из /api/trips (spanStart в периоде);
   // записи — транспортные фрагменты. Пока поездки не заведены (expand-фаза:
   // TRIP_ENABLED=false / backfill не выполнен) — честный fallback на записи.
-  const tripsQ = useTrips({ limit: 100 });
+  // v2.31.0 (MIN-9): limit 100 → 50 — тот же скоуп, что вкладка «Поездки»:
+  // счётчик шапки Аналитики = числу карточек вкладки.
+  const tripsQ = useTrips({ limit: 50 });
   const qc = useQueryClient();
   const list = sessions.data?.sessions ?? [];
   const inPeriod = useMemo(() => sessionsInPeriod(list, period), [list, period]);
@@ -490,7 +563,14 @@ export function usePeriodStats(period: PeriodKey) {
     if (tl.length === 0) return 0; // поездки не заведены — fallback ниже
     return tl.filter((t) => {
       const ts = new Date(t.spanStart).getTime();
-      return Number.isFinite(ts) && ts >= periodFromMs;
+      const te = t.spanEnd != null ? new Date(t.spanEnd).getTime() : null;
+      // v2.31.0 (MIN-15а): поездка, начавшаяся до периода и продолжающаяся
+      // в нём, тоже входит — пересечение [spanStart, spanEnd] с [from, ∞),
+      // а не только spanStart ≥ from (раньше «вчера→сегодня» не считалась)
+      return (
+        Number.isFinite(ts) &&
+        (ts >= periodFromMs || (te != null && Number.isFinite(te) && te >= periodFromMs))
+      );
     }).length;
   }, [tripsQ.data, periodFromMs]);
   const tripsCount = tripsInPeriod > 0 || (tripsQ.data?.trips?.length ?? 0) > 0 ? tripsInPeriod : inPeriod.length;

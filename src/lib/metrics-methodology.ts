@@ -31,7 +31,7 @@
 
 import { env } from "./env";
 import { haversineM } from "./geo";
-import { medianSmooth3, isUsableSpeedPoint, medianOf } from "./kpi"; // v2.12.0 (D-6): медиан-фильтр; v2.16.0: единая median
+import { medianSmooth3, isUsableSpeedPoint, medianOf, MAX_PLAUSIBLE_SPEED_MS } from "./kpi"; // v2.12.0 (D-6): медиан-фильтр; v2.16.0: единая median; v2.31.0 (MIN-13): единый кап правдоподобной скорости
 import { mulberry32 } from "./utils"; // v2.16.0 (D-7): единый PRNG (была копия в v4-utils)
 import {
   computeMovingTime,
@@ -50,7 +50,6 @@ import {
 const KMH_10 = 10 / 3.6; // м/с — порог пробки
 const KMH_60 = 60 / 3.6; // м/с — порог крейсера
 const KMH_5 = 5 / 3.6; // м/с — минимальная скорость движения
-const KMH_200 = 200 / 3.6; // м/с — максимальная правдоподобная
 const HARSH_KMH_PER_SEC = 10; // км/ч за 1 сек — резкость
 const SPEED_VAR_KMH = 10; // км/ч за окно
 const SPEED_VAR_WINDOW_SEC = 10; // сек
@@ -59,7 +58,6 @@ const BEARING_UTURN_DEG = 150;
 const BEARING_TURN_DEG = 30;
 const CORNERING_BEARING_DEG = 45;
 const HIGH_SPEED_KMH = 60;
-const SPEED_MAX_PLAUSIBLE_KMH = 200;
 
 function median(values: number[]): number {
   if (values.length === 0) return NaN;
@@ -110,22 +108,27 @@ export function speedStdDev(points: MethodologyPoint[], activeTrip?: ActiveTrip)
 }
 
 /**
- * §5.3 SpeedDistribution — распределение по корзам (%, [0-10, 10-30, 30-60, 60-90, 90+] км/ч).
+ * §5.3 SpeedDistribution — распределение по корзам (%, 6 бакетов
+ * 0-20 / 20-40 / 40-60 / 60-80 / 80-100 / 100+ км/ч).
+ * v2.31.0 (MAJ-7): бакеты канонизированы по доке §5.3/§22 («Единые пороги»).
+ * Раньше код считал 5 бакетов [0-10,10-30,30-60,60-90,90+] с комментарием «§5.3» —
+ * докa и подписи блоков 07/08 UI ("0–40 км/ч" = бакеты 0+1) расходились с фактом.
  */
 export function speedDistribution(points: MethodologyPoint[], activeTrip?: ActiveTrip): number[] {
-  const buckets = [0, 0, 0, 0, 0]; // [0-10, 10-30, 30-60, 60-90, 90+]
+  const buckets = [0, 0, 0, 0, 0, 0]; // [0-20, 20-40, 40-60, 60-80, 80-100, 100+]
   let total = 0;
   for (const p of filterActivePoints(points, activeTrip)) {
     if (p.speed == null || p.speed < 0) continue;
     const kmh = p.speed * 3.6;
-    if (kmh < 10) buckets[0]++;
-    else if (kmh < 30) buckets[1]++;
+    if (kmh < 20) buckets[0]++;
+    else if (kmh < 40) buckets[1]++;
     else if (kmh < 60) buckets[2]++;
-    else if (kmh < 90) buckets[3]++;
-    else buckets[4]++;
+    else if (kmh < 80) buckets[3]++;
+    else if (kmh < 100) buckets[4]++;
+    else buckets[5]++;
     total++;
   }
-  if (total === 0) return [0, 0, 0, 0, 0];
+  if (total === 0) return [0, 0, 0, 0, 0, 0];
   return buckets.map((c) => Math.round((c / total) * 1000) / 10); // % с 1 знаком
 }
 
@@ -702,7 +705,9 @@ export interface SessionReliabilityResult {
 
 function isPlausiblePoint(points: MethodologyPoint[], i: number): boolean {
   const p = points[i];
-  if (p.speed != null && p.speed * 3.6 > SPEED_MAX_PLAUSIBLE_KMH) return false;
+  // v2.31.0 (MIN-13): единая константа с kpi.ts (§11.6 = §4.4 — 200 км/ч;
+  // раньше здесь был свой SPEED_MAX_PLAUSIBLE_KMH=200, а в kpi — 70 м/с = 252 км/ч)
+  if (p.speed != null && p.speed > MAX_PLAUSIBLE_SPEED_MS) return false;
   if (p.accuracy != null && p.accuracy > ACCURACY_BAD_M) return false;
   if (i > 0) {
     const prev = points[i - 1];

@@ -7,13 +7,14 @@ export interface OfflineSummary {
   version?: string;
   totalSessions?: number;
   totalPoints?: number;
-  totalDistanceKm?: number;
-  totalDurationMin?: number;
-  avgSpeedKmh?: number | null;
-  maxSpeedKmh?: number;
   lastSessionAt?: string; // ISO startTime самой свежей поездки
   lastDevice?: string; // deviceName/parentId последней поездки
 }
+
+// v2.31.0 (NIT-2): поля avgSpeedKmh/maxSpeedKmh/totalDistanceKm/totalDurationMin
+// удалены — их никто не писал (снимок обновляют только useStats/useSessions:
+// счётчики и последняя запись), а /api/stats не отдаёт дистанционных агрегатов.
+// offline.html показывал их никогда (null-guard) — мёртвый контракт.
 
 const KEY = "telem:offline-summary";
 

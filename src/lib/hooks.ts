@@ -376,6 +376,10 @@ export interface SessionStats {
     planComparable?: boolean | null;
     // v2.25.0 (П.5): доля фактической дистанции под планом (0..1)
     planCoverage?: number | null;
+    // v2.31.0 (MAJ-4): «факт» план-факта ПЕРИОДА — Σ активных длительностей
+    // только записей с сопоставимым планом (популяция = популяции планов).
+    // Проставляет только период-агрегат (v4-hooks); одиночная сессия — нет.
+    planActualDurationSec?: number | null;
   };
 }
 

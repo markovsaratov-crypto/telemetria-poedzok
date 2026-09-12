@@ -382,7 +382,7 @@ export function TelematikaLayout(props: LayoutProps) {
                     // v2.10.2: клик по периоду → период-режим (все поездки периода).
                     onSelectedSessionChange(null);
                   }}
-                  title={`Период: ${p.label} — метрики по всем поездкам за период`}
+                  title={`Период: ${p.label} — метрики по всем записям за период`}
                 >
                   {p.label}
                 </button>
@@ -400,7 +400,7 @@ export function TelematikaLayout(props: LayoutProps) {
                   setTripFilterOpen((v) => !v);
                   setTripFilterQuery("");
                 }}
-                title="Выбрать конкретную поездку"
+                title="Выбрать конкретную запись"
               >
                 {selectedSession ? (
                   <>
@@ -412,9 +412,12 @@ export function TelematikaLayout(props: LayoutProps) {
                 ) : sessions.isLoading ? (
                   <span>Загрузка…</span>
                 ) : sessionsList.length === 0 ? (
-                  <span>Нет поездок</span>
+                  <span>Нет записей</span>
                 ) : (
-                  <span>Все поездки · период</span>
+                  /* v2.31.0 (MAJ-11): фильтр листает ЗАПИСИ (сессии) — слово «поездка»
+                      осталось за вкладкой «Поездки» (серверные Trip, 15-мин склейка);
+                      раньше одно слово значило две сущности с разными цифрами */
+                  <span>Все записи · период</span>
                 )}
                 <ChevronDown className="chev h-3 w-3" />
               </button>
@@ -438,7 +441,7 @@ export function TelematikaLayout(props: LayoutProps) {
                       }}
                     >
                       <span>
-                        <b>Все поездки периода</b>
+                        <b>Все записи периода</b>
                         <br />
                         <span className="mono">агрегат за выбранный период</span>
                       </span>
@@ -446,7 +449,7 @@ export function TelematikaLayout(props: LayoutProps) {
                     </button>
                     {filteredSessions.length === 0 ? (
                       <div className="trip-filter-empty">
-                        {sessionsList.length === 0 ? "Список поездок пуст" : "Ничего не найдено"}
+                        {sessionsList.length === 0 ? "Список записей пуст" : "Ничего не найдено"}
                       </div>
                     ) : (
                       filteredSessions.map((s) => (

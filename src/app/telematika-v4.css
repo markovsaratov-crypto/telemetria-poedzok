@@ -180,6 +180,10 @@ html.dark .v4-app {
   flex: 1 1 auto;
   min-width: 0;
   margin-left: 4px;
+  /* v2.26.2: на узких десктопах (768–1000px) флекс сжимал слово в ноль,
+     а nowrap рисовал текст ПОВЕРХ кнопок — деградация многоточием вместо наложения */
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .v4-app .topbar-actions {
   display: flex;
@@ -216,6 +220,8 @@ html.dark .v4-app {
   border-radius: 3px;
   padding: 1px 4px;
   margin-left: 4px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 .v4-app .textbtn {
   font-family: var(--cond);
@@ -1937,7 +1943,11 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
   border-radius: 8px;
   font-size: 13px;
 }
-/* Прячем kbd-mini «⌘K» / «⌘⇧F» бейджи на мобильном — иконка-only */
+/* Прячем kbd-mini «⌘K» / «Ctrl+Shift+F» бейджи на мобильном и узком десктопе —
+   иконка-only. v2.26.2: бейдж показываем только ≥1200px, где места хватает на
+   авторастущие кнопки (раньше на 768–1199px бейдж «Ctrl⇧F» вылезал за фикс-
+   ширину 32px в обе стороны — на Windows читалось как «СтрF»). Шорткаты
+   остаются в tooltip кнопок и в «Справка (?)». */
 .v4-app .iconbtn .kbd-mini { display: none; }
 @media (min-width: 768px) {
   .v4-app .iconbtn {
@@ -1946,7 +1956,16 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
     border-radius: 6px;
     font-size: 12px;
   }
+}
+@media (min-width: 1200px) {
   .v4-app .iconbtn .kbd-mini { display: inline-block; }
+  /* v2.26.2: кнопка с бейджем растёт под контент — иконка+бейдж входят целиком,
+     без обрезания. Чисто-иконочные кнопки остаются 32×32. */
+  .v4-app .iconbtn:has(.kbd-mini) {
+    width: auto;
+    min-width: 32px;
+    padding: 0 8px;
+  }
 }
 
 /* Logout button: icon-only на <768px (текст спрятан, title=«Выйти» для тултипа) */

@@ -130,6 +130,16 @@ function wavg(items: Array<{ v: number | null; w: number }>): number | null {
   return ws > 0 ? vs / ws : null;
 }
 
+// v2.31.1 (MAJ-10): медиана массива — робастный агрегат для §8.2 (отношение
+// не ограничено сверху: круговые поездки дают путь/прямая 19–50, и взвешенное
+// среднее ломается об них — 10,04 «извилистости» из-за одной 32,6-км петли).
+function medianArr(values: number[]): number | null {
+  if (!values.length) return null;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
 function mergeBbox(boxes: SessionStats["bbox"][]): SessionStats["bbox"] {
   const valid = boxes.filter(Boolean);
   if (!valid.length) return { minLat: 0, maxLat: 0, minLon: 0, maxLon: 0 };
@@ -343,15 +353,17 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       uTurnCount: sum(m.map((x) => x.uTurnCount)),
       turnCount: sum(m.map((x) => x.turnCount)),
       highSpeedCornering: sum(m.map((x) => x.highSpeedCornering)),
-      // v2.31.0 (MAJ-10): §8.2 в период-режиме — СРЕДНЕЕ по записям (вес =
-      // дистанция), каждая запись против СВОЕЙ прямой старт→финиш. Раньше
-      // агрегат подменял смысл на факт/план (Σ дистанций/Σ планов), а тултип
-      // «Путь против прямой» врал. Доводка по данным прод-QA: путь/прямая всего
-      // периода бессмысленна в обе стороны — период Сочи→Саратов даёт 0,07
-      // («путь короче прямой»), 7 городских поездок — 7+ («путь в 7 раз длиннее
-      // прямой»); среднее по поездкам сохраняет смысл §8.2.
-      routeEfficiency: wavg(
-        sorted.map((s) => ({ v: s.methodology?.routeEfficiency ?? null, w: s.distance ?? 0 })) as Array<{ v: number | null; w: number }>
+      // v2.31.1 (MAJ-10, медиана вместо среднего): §8.2 в период-режиме — МЕДИАНА
+      // routeEfficiency по записям. Раньше агрегат подменял смысл на факт/план
+      // (Σ дистанций/Σ планов), а тултип «Путь против прямой» врал. Доводки по
+      // данным прод-QA: (1) путь/прямая всего периода бессмысленна (период
+      // Сочи→Саратов — 0,07 «путь короче прямой»; 7 городских поездок — 7+);
+      // (2) взвешенное среднее ломается об круговые поездки — §8.2 неограничена
+      // сверху (петля 32,6 км даёт 18,95 и утягивает среднее до 10,04). Медиана
+      // робастна к тяжёлому хвосту — типичная извилистость поездки периода
+      // (как медиана скоростей §5.1 для тяжёлого хвоста выбросов).
+      routeEfficiency: medianArr(
+        sorted.map((s) => s.methodology?.routeEfficiency ?? null).filter((v): v is number => v != null)
       ),
       avgAccuracy: avg(m.map((x) => x.avgAccuracy)),
       pointDensity: duration > 0 ? pointCount / duration : null,

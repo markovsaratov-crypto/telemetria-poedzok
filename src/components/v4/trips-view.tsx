@@ -40,6 +40,11 @@ import { bindTips } from "./use-v4-tipbox";
 // поездки (утром и вечером) разделены часами.
 const TRIP_MERGE_GAP_MS = 10 * 60_000;
 
+// v2.26.1: тултип бейджа EcoScore — простым языком (что это за балл и как
+// читать зоны). Раньше подпись «резко» висела без объяснений.
+const ECO_SCORE_TIP =
+  "Оценка плавности вождения: 0–100 | Чем плавнее разгоны, торможения и повороты — тем выше балл | 80 и выше — плавно · 60–79 — умеренно · ниже 60 — агрессивный стиль";
+
 interface SessionGroup {
   device: string;
   /** asc по startTime — хронологический порядок показа */
@@ -375,7 +380,7 @@ function TripsSummary({
           {/* v2.14.0 (Ф1): считаем ПОЕЗДКИ (склеенные группы), рядом — сколько
               в них записей. Раньше «12 поездок» при 5 кусках одной поездки. */}
           <b
-            data-tip={`Поездка = записи одного устройства с паузами < 10 минут (Ф1, v2.14.0). Одна поездка может состоять из нескольких записей — iOS приостанавливает логгер, сервер режет запись при разрыве >60 сек`}
+            data-tip="Что считается одной поездкой | Записи с паузами короче 10 минут объединяются в одну поездку | Телефон иногда приостанавливает приложение, и запись делится на части — здесь они показаны вместе"
           >
             {fmtNumber(groups.length)} {pluralRu(groups.length, ["поездка", "поездки", "поездок"])}
             {groups.length < list.length ? (
@@ -599,15 +604,16 @@ function TripCard({
             <span
               className={`chip chip-amber${session.status === "recording" ? " chip-live" : ""}`}
               style={{ marginLeft: 6, fontSize: 10 }}
-              data-tip={`Статус записи: ${SESSION_STATUS_RU[session.status] ?? session.status} | ${fmtNumber(session.pointCountActual ?? session.pointCount)} ${pluralRu(session.pointCountActual ?? session.pointCount, ["точка", "точки", "точек"])} GPS`}
+              data-tip={`Статус: ${SESSION_STATUS_RU[session.status] ?? session.status} | ${fmtNumber(session.pointCountActual ?? session.pointCount)} ${pluralRu(session.pointCountActual ?? session.pointCount, ["точка", "точки", "точек"])} GPS`}
             >
               {SESSION_STATUS_RU[session.status] ?? session.status}
             </span>
           </div>
           <div className="t-sub">{sub}</div>
         </div>
-        <div className={`t-eco ${eco != null ? ecoCls(eco) : ""}`}>
-          {/* v2.12.0 (V-5): единицы в бейдже — «39 / 100 · резко» вместо «39 РЕЗКО» */}
+        <div className={`t-eco ${eco != null ? ecoCls(eco) : ""}`} data-tip={ECO_SCORE_TIP}>
+          {/* v2.12.0 (V-5): единицы в бейдже — «39 / 100 · агрессивно»; v2.26.1 —
+              понятная шкала стиля + тултип-пояснение на самом бейдже */}
           <b>{eco ?? "—"}</b>
           <small>{eco != null ? `${ecoLab(eco)} · из 100` : "—"}</small>
         </div>
@@ -717,7 +723,7 @@ function GroupedTripCard({
             <span
               className="chip chip-plum"
               style={{ marginLeft: 6, fontSize: 10 }}
-              data-tip={`Одна поездка из ${sessions.length} ${pluralRu(sessions.length, ["записи", "записей", "записей"])}: паузы между ними меньше 10 минут. iOS приостанавливает логгер, сервер начинает новую запись при разрыве >60 сек`}
+              data-tip={`Одна поездка из ${sessions.length} ${pluralRu(sessions.length, ["записи", "записей", "записей"])} | Паузы между ними короче 10 минут — записи объединены в одну поездку`}
             >
               {sessions.length} {pluralRu(sessions.length, ["запись", "записи", "записей"])}
             </span>
@@ -726,7 +732,7 @@ function GroupedTripCard({
               <span
                 className="chip chip-amber chip-live"
                 style={{ marginLeft: 4, fontSize: 10 }}
-                data-tip="Последняя запись поездки ещё пишется — статистика обновляется каждые 15 секунд"
+                data-tip="Идёт запись | Показатели поездки обновляются каждые 15 секунд"
               >
                 идёт запись
               </span>
@@ -734,7 +740,7 @@ function GroupedTripCard({
           </div>
           <div className="t-sub">{sub}</div>
         </div>
-        <div className={`t-eco ${agg?.ecoAvg != null ? ecoCls(agg.ecoAvg) : ""}`}>
+        <div className={`t-eco ${agg?.ecoAvg != null ? ecoCls(agg.ecoAvg) : ""}`} data-tip={ECO_SCORE_TIP}>
           <b>{agg?.ecoAvg ?? "—"}</b>
           <small>{agg?.ecoAvg != null ? `${ecoLab(agg.ecoAvg)} · из 100` : "—"}</small>
         </div>
@@ -883,7 +889,7 @@ function GroupedTripBody({
           <span>куда:</span>
           <b
             style={{ fontWeight: 600 }}
-            data-tip={`Адрес конечной точки последней записи (Nominatim, кэш на сервере) | ${dest.data.cached ? "из кэша" : "свежий запрос"}`}
+            data-tip={`Адрес финиша поездки | Определён по координатам GPS${dest.data.cached ? " · взят из кэша" : ""}`}
           >
             → {dest.data.short}
           </b>
@@ -892,52 +898,52 @@ function GroupedTripBody({
       <div className="stats-grid" style={{ marginTop: 0, marginBottom: 10 }}>
         <Stat
           value={computing ? "…" : `${fmtNumber(agg.totalPoints)}`}
-          tip="Сумма GPS-точек всех записей поездки (после фильтрации выбросов и дедупликации)"
+          tip="Сколько точек GPS записано | Повторяющиеся и ошибочные точки отброшены"
           label="GPS-точек"
         />
         <Stat
           value={computing ? "…" : `${(agg.totalDistanceM / 1000).toFixed(1).replace(".", ",")} км`}
-          tip="Сумма дистанций активных частей всех записей (§4.2)"
+          tip="Пройденный путь | Считается только во время движения — стоянки не учитываются"
           label="Дистанция"
         />
         <Stat
           value={computing ? "…" : fmtDurMin(agg.sumDurSec / 60)}
-          tip="Σ длительностей записей (§4.1): от первой до последней точки каждой записи, включая стоянки-хвосты. Синхронизировано с KPI «Длительность» и «всего» в Аналитике"
+          tip="Суммарная длительность записей | От первой до последней точки, включая остановки | Совпадает с цифрой «всего» на вкладке «Аналитика»"
           label="Длительность"
         />
         <Stat
           value={computing ? "…" : fmtDurMin(agg.sumActiveSec / 60)}
-          tip="Σ активных частей поездки (§4.11): от начала до конца движения, включая светофоры и пробки. Синхронизировано с «в поездках» в шапке Аналитики"
+          tip="Время в поездке | От начала до конца движения, включая светофоры и пробки | Совпадает с цифрой «в поездках» на вкладке «Аналитика»"
           label="В поездке"
         />
         <Stat
           value={avgKmh != null ? `${avgKmh.toFixed(1).replace(".", ",")} км/ч` : "—"}
-          tip="Средняя скорость (§4.3, FIX-C1): Σ дистанций / Σ активных длительностей — как в Аналитике: светофоры и пробки в знаменателе, хвосты-стоянки отброшены"
+          tip="Средняя скорость | Путь делится на время в поездке: светофоры и пробки учтены, длительные стоянки — нет"
           label="Ср. скорость"
         />
         <Stat
           value={maxKmh != null ? `${maxKmh.toFixed(1).replace(".", ",")} км/ч` : "—"}
-          tip="Максимальная скорость по записям поездки (§4.4) — пик с фильтрацией выбросов"
+          tip="Максимальная скорость | Самый высокий момент скорости за поездку; ошибки GPS отфильтрованы"
           label="Макс. скорость"
         />
         <Stat
           value={computing ? "…" : fmtSecFull(agg.sumMovingSec)}
-          tip="Суммарное время в движении (§4.6) по всем записям поездки"
+          tip="Время в движении | Всё время, когда скорость была выше 2 км/ч"
           label="В движении"
         />
         <Stat
           value={computing ? "…" : fmtSecFull(agg.sumIdleSec)}
-          tip="Суммарное время стоянок (§4.7) внутри записей"
+          tip="Время стоянок | Скорость ниже 2 км/ч: светофоры, ожидание, парковка"
           label="Стоянки"
         />
         <Stat
           value={computing ? "…" : fmtSecFull(pausesSec)}
-          tip="Паузы МЕЖДУ записями: логгер приостанавливался (iOS), сервер начинал новую запись — теперь они склеены в одну поездку (Ф1, v2.14.0)"
+          tip="Паузы между записями | Телефон приостанавливал отправку данных — записи объединены в одну поездку, паузы внутри неё показаны здесь"
           label="Паузы между записями"
         />
         <Stat
           value={computing ? "…" : fmtDurMin(agg.spanSec / 60)}
-          tip="От начала первой записи до конца последней, включая паузы между записями и стоянки-хвосты (v2.14.0 это была «Длительность» карточки)"
+          tip="От старта до финиша | Время от начала первой записи до конца последней, включая паузы между ними"
           label="От старта до финиша"
         />
       </div>
@@ -950,11 +956,11 @@ function GroupedTripBody({
         <FragmentRows sessions={sessions} />
       </div>
       <div className="t-ev">
-        Записи склеены автоматически: паузы между ними меньше 10 минут, сервер
-        режет запись на сессии при разрыве данных &gt;60 сек (iOS приостанавливает
-        логгер при блокировке экрана). Параметры карточки — дистанция, длительность,
-        «в поездке», скорость, EcoScore — считаются теми же формулами §4.1/§4.3/§4.11,
-        что и «Аналитика»: суммы по записям этой поездки совпадают с её цифрами.
+        Записи объединены автоматически: паузы между ними короче 10 минут.
+        Приложение на телефоне иногда приостанавливается (например, при
+        блокировке экрана), и запись делится на части — здесь они показаны одной
+        поездкой. Путь, длительность, скорость и оценка плавности считаются так
+        же, как на вкладке «Аналитика», поэтому цифры совпадают.
       </div>
     </div>
   );
@@ -983,7 +989,7 @@ function FragmentRow({ session }: { session: SessionListItem }) {
   return (
     <div
       className="frag-row"
-      data-tip={`Запись ${session.id.slice(0, 8)} · ${fmtNumber(pts)} ${pluralRu(pts, ["точка", "точки", "точек"])} GPS · статус: ${SESSION_STATUS_RU[session.status] ?? session.status}`}
+      data-tip={`Запись ${session.id.slice(0, 8)} | ${fmtNumber(pts)} ${pluralRu(pts, ["точка", "точки", "точек"])} GPS · ${SESSION_STATUS_RU[session.status] ?? session.status}`}
     >
       <b className="mono">
         {t(st)}–{en ? t(en) : "…"}
@@ -1062,7 +1068,7 @@ function TripBody({
           <span>куда:</span>
           <b
             style={{ fontWeight: 600 }}
-            data-tip={`Адрес конечной точки записи (Nominatim, кэш на сервере) | ${dest.data.cached ? "из кэша" : "свежий запрос"}`}
+            data-tip={`Адрес финиша записи | Определён по координатам GPS${dest.data.cached ? " · взят из кэша" : ""}`}
           >
             → {dest.data.short}
           </b>
@@ -1071,44 +1077,44 @@ function TripBody({
       <div className="stats-grid" style={{ marginTop: 0, marginBottom: 10 }}>
         <Stat
           value={`${fmtNumber(stats.pointCount)}`}
-          tip="Количество GPS-точек в записи (после фильтрации выбросов и дедупликации)"
+          tip="Сколько точек GPS записано | Повторяющиеся и ошибочные точки отброшены"
           label="GPS-точек"
         />
         <Stat
           // v2.12.0 (округления): 1 знак после запятой (Math.round давал «1 км»
           // и «1,3 км» на одном экране; .replace после round был мёртвым кодом)
           value={hasMovement ? `${(stats.distance / 1000).toFixed(1).replace(".", ",")} км` : "нет данных"}
-          tip="Дистанция (§4.2): сумма гаверсинусов между соседними точками активной части. 0 и отсутствие активной поездки = GPS-запись без движения"
+          tip="Пройденный путь | Считается только во время движения | «Нет данных» — запись без движения: телефон лежал на месте"
           label="Дистанция"
         />
         <Stat
           value={fmtDurMin(stats.duration / 60)}
-          tip="Длительность записи (§4.1): от первой до последней точки, включая стоянки-«хвосты». Аналитика (дистанция, скорость) — по активной поездке (§4.11)"
+          tip="Длительность записи | От первой до последней точки, включая остановки | Путь и скорость считаются только по времени движения"
           label="Длительность"
         />
         <Stat
           value={avgKmh != null ? `${avgKmh.toFixed(1).replace(".", ",")} км/ч` : "—"}
-          tip="Средняя скорость активной части (§4.3)"
+          tip="Средняя скорость | Путь, поделённый на время в поездке"
           label="Ср. скорость"
         />
         <Stat
           value={maxKmh != null ? `${maxKmh.toFixed(1).replace(".", ",")} км/ч` : "—"}
-          tip="Максимальная скорость (§4.4) — пик с фильтрацией выбросов и сглаживанием"
+          tip="Максимальная скорость | Пик за запись; ошибки GPS отфильтрованы"
           label="Макс. скорость"
         />
         <Stat
           value={moveStr}
-          tip="Время в движении (§4.6): скорость выше 2 км/ч после гистерезиса"
+          tip="Время в движении | Всё время со скоростью выше 2 км/ч"
           label="В движении"
         />
         <Stat
           value={idleStr}
-          tip="Время стоянок (§4.7): скорость ниже 2 км/ч"
+          tip="Время стоянок | Скорость ниже 2 км/ч: светофоры, ожидание, парковка"
           label="Стоянки"
         />
         <Stat
           value={fmtSecFull(gapSec)}
-          tip="Разрывы записи (§4.6): интервалы между точками длиннее 30 сек — время без данных GPS"
+          tip="Разрывы сигнала | Паузы в данных GPS длиннее 30 секунд — в это время данных не было"
           label="Разрывы"
         />
       </div>
@@ -1129,7 +1135,7 @@ function TripBody({
           <b
             className="mono"
             style={{ fontSize: 10, fontWeight: 400 }}
-            data-tip={`Детерминированный хэш маршрута (§10.0). Используется для группировки концептуально одинаковых поездок и расчёта P75-хотспотов.`}
+            data-tip={`Код маршрута | Один и тот же у поездок «откуда → куда» одним маршрутом | Нужен для сравнения ваших похожих поездок между собой`}
           >
             {routeHash}
           </b>
@@ -1209,7 +1215,7 @@ function PersonalIngestCard({ user }: { user: TripsUserInfo }) {
         <span
           className="chip"
           style={{ fontSize: 10, fontWeight: 600 }}
-          data-tip={`Аккаунт ${user.email}: поездки с этого адреса привязываются к вам и видны только вам`}
+          data-tip={`Личный канал | Поездки с этого адреса привязаны к аккаунту ${user.email} и видны только вам`}
         >
           личный канал
         </span>
@@ -1370,7 +1376,7 @@ function TripSummaryServer({ trips }: { trips: import("@/lib/api-client").TripLi
     <div className="card tsum">
       <div className="tsum-main">
         <b
-          data-tip={`Поездка = движение устройства с паузами/остановками < 15 минут (серверное правило v2.26, ТЗ §4): iOS-разрывы пуша больше не режут поездку — сервер склеивает записи автоматически. Пауза/остановка ≥ 15 минут = новая поездка`}
+          data-tip="Что считается одной поездкой | Паузы и остановки короче 15 минут не разрывают поездку — сервер сам объединяет записи | Стоянка 15 минут и дольше — начинается новая поездка"
         >
           {fmtNumber(trips.length)} {pluralRu(trips.length, ["поездка", "поездки", "поездок"])}
           {totalSessions > trips.length ? (
@@ -1487,7 +1493,7 @@ function TripEntryCard({
               <span
                 className="chip chip-plum"
                 style={{ marginLeft: 6, fontSize: 10 }}
-                data-tip={`Одна поездка из ${trip.sessionCount} ${pluralRu(trip.sessionCount, ["записи", "записей", "записей"])}: паузы между ними < 15 минут — iOS приостанавливает логгер, сервер склеивает записи автоматически (v2.26)`}
+                data-tip={`Одна поездка из ${trip.sessionCount} ${pluralRu(trip.sessionCount, ["записи", "записей", "записей"])} | Паузы между ними короче 15 минут — записи объединены в одну поездку`}
               >
                 {trip.sessionCount} {pluralRu(trip.sessionCount, ["запись", "записи", "записей"])}
               </span>
@@ -1496,7 +1502,7 @@ function TripEntryCard({
               <span
                 className="chip chip-amber chip-live"
                 style={{ marginLeft: 4, fontSize: 10 }}
-                data-tip="Поездка ещё пишется — статистика обновляется каждые 15 секунд"
+                data-tip="Идёт запись | Показатели поездки обновляются каждые 15 секунд"
               >
                 идёт запись
               </span>
@@ -1504,7 +1510,7 @@ function TripEntryCard({
           </div>
           <div className="t-sub">{sub}</div>
         </div>
-        <div className={`t-eco ${eco != null ? ecoCls(eco) : ""}`}>
+        <div className={`t-eco ${eco != null ? ecoCls(eco) : ""}`} data-tip={ECO_SCORE_TIP}>
           <b>{eco ?? "—"}</b>
           <small>{eco != null ? `${ecoLab(eco)} · из 100` : "—"}</small>
         </div>
@@ -1578,7 +1584,7 @@ function TripEntryBody({
           <span>куда:</span>
           <b
             style={{ fontWeight: 600 }}
-            data-tip={`Адрес конечной точки поездки (Nominatim→2ГИС, кэш на сервере) | ${to.data.cached ? "из кэша" : "свежий запрос"}`}
+            data-tip={`Адрес финиша поездки | Определён по координатам GPS${to.data.cached ? " · взят из кэша" : ""}`}
           >
             → {to.data.short}
           </b>
@@ -1587,52 +1593,52 @@ function TripEntryBody({
       <div className="stats-grid" style={{ marginTop: 0, marginBottom: 10 }}>
         <Stat
           value={`${fmtNumber(st.pointCount)}`}
-          tip="Сумма GPS-точек всех записей поездки (после фильтрации выбросов)"
+          tip="Сколько точек GPS записано | Повторяющиеся и ошибочные точки отброшены"
           label="GPS-точек"
         />
         <Stat
           value={`${(st.distance / 1000).toFixed(1).replace(".", ",")} км`}
-          tip="Дистанция активной части поездки (§4.2): сумма гаверсинусов активных окон — хвосты и парковки не считаются"
+          tip="Пройденный путь | Считается только во время движения — стоянки и парковка не учитываются"
           label="Дистанция"
         />
         <Stat
           value={fmtDurMin(spanSec / 60)}
-          tip="От старта до финиша: включая паузы между записями и короткие остановки (< 15 минут)"
+          tip="От старта до финиша | Включая паузы между записями и остановки короче 15 минут"
           label="Длительность"
         />
         <Stat
           value={fmtDurMin(st.activeDurationSec / 60)}
-          tip="«В поездке» (§4.11): активные окна всех записей — светофоры и пробки включены, стоянки-хвосты нет"
+          tip="Время в поездке | Движение, светофоры и пробки — без длительных стоянок"
           label="В поездке"
         />
         <Stat
           value={avgKmh != null ? `${avgKmh.toFixed(1).replace(".", ",")} км/ч` : "—"}
-          tip="Средняя скорость (§4.3, FIX-C1): дистанция / активная длительность поездки"
+          tip="Средняя скорость | Путь делится на время в поездке: светофоры и пробки учтены, стоянки — нет"
           label="Ср. скорость"
         />
         <Stat
           value={maxKmh != null ? `${maxKmh.toFixed(1).replace(".", ",")} км/ч` : "—"}
-          tip="Максимальная скорость (§4.4) — пик с фильтрацией выбросов по конкатенированному потоку поездки"
+          tip="Максимальная скорость | Пик за всю поездку; ошибки GPS отфильтрованы"
           label="Макс. скорость"
         />
         <Stat
           value={fmtSecFull(st.movingTime)}
-          tip="Суммарное время в движении (§4.6) по потоку поездки"
+          tip="Время в движении | Всё время, когда скорость была выше 2 км/ч"
           label="В движении"
         />
         <Stat
           value={fmtSecFull(st.idleTime)}
-          tip="Суммарное время стоянок (§4.7) внутри записей"
+          tip="Время стоянок | Скорость ниже 2 км/ч: светофоры, ожидание, парковка"
           label="Стоянки"
         />
         <Stat
           value={fmtSecFull(pausesSec)}
-          tip="Паузы МЕЖДУ записями: логгер приостанавливался (iOS), сервер резал запись при тишине >60 сек — поездка склеена сервером (v2.26)"
+          tip="Паузы между записями | Телефон приостанавливал отправку данных — записи объединены в одну поездку"
           label="Паузы между записями"
         />
         <Stat
           value={fmtSecFull(st.gapTime)}
-          tip="Разрывы потока точек внутри записей (§4.6): интервалы > 30 сек без данных GPS"
+          tip="Разрывы сигнала | Паузы в данных GPS длиннее 30 секунд"
           label="Разрывы"
         />
       </div>
@@ -1642,7 +1648,7 @@ function TripEntryBody({
           <span>план:</span>
           <b
             style={{ fontWeight: 600 }}
-            data-tip={`План поездки (один маршрут на все записи): провайдер ${r.provider ?? "—"}${r.planCoverage != null ? ` · покрытие ${(r.planCoverage * 100).toFixed(0)}%` : ""}${r.planComparable === false ? " · НЕ сопоставим с фактом (гейт PLAN_MIN_COVERAGE)" : ""}`}
+            data-tip={`План поездки | Маршрут по дорогам для всей поездки целиком${r.planCoverage != null ? ` · покрытие ${(r.planCoverage * 100).toFixed(0)}%` : ""}${r.planComparable === false ? " · слишком мало данных GPS — честное сравнение с фактом невозможно" : ""}`}
           >
             {r.planDurationSec != null ? `${fmtDurMin(r.planDurationSec / 60)}` : "—"}
             {r.planDurationSec != null && st.activeDurationSec > 0 && r.planComparable !== false
@@ -1668,10 +1674,10 @@ function TripEntryBody({
         </>
       ) : null}
       <div className="t-ev">
-        Поездка собрана сервером: записи одного устройства с паузами &lt; 15 минут
-        склеиваются автоматически (v2.26) — iOS-разрывы пуша больше не режут
-        поездку на куски. Параметры считаются конвейером §4.2/§4.3/§4.11 по
-        конкатенированному потоку точек — цифры совпадают с «Аналитикой».
+        Поездка собрана автоматически: записи одного устройства с паузами
+        короче 15 минут объединены в одну. Путь, скорость и оценка плавности
+        считаются по всей поездке целиком — цифры совпадают с вкладкой
+        «Аналитика».
       </div>
     </div>
   );
@@ -1700,7 +1706,7 @@ function TripFragmentRow({
   return (
     <div
       className="frag-row"
-      data-tip={`Запись ${sessionId.slice(0, 8)} · ${fmtNumber(pointCount)} ${pluralRu(pointCount, ["точка", "точки", "точек"])} GPS · статус: ${SESSION_STATUS_RU[status] ?? status}`}
+      data-tip={`Запись ${sessionId.slice(0, 8)} | ${fmtNumber(pointCount)} ${pluralRu(pointCount, ["точка", "точки", "точек"])} GPS · ${SESSION_STATUS_RU[status] ?? status}`}
     >
       <b className="mono">
         {t(st)}–{en ? t(en) : "…"}

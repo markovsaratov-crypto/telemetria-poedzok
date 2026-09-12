@@ -25,10 +25,12 @@ export { mulberry32 } from "@/lib/utils";
 // v2.16.0: gauss удалён — 0 потребителей (Box-Muller остался только в git-истории).
 
 // EcoScore zone classifier (§7.3 CAP formula).
+// v2.26.1: подписи зон — шкала стиля вождения (плавно / умеренно / агрессивно)
+// вместо старой «резко» — слово не понимали пользователи.
 export function ecoZone(s: number): { c: string; cls: string; band: string } {
-  if (s >= 80) return { c: "#8E2D4E", cls: "c-plum", band: "отлично · 80+" };
-  if (s >= 60) return { c: "#B47516", cls: "c-amber", band: "неплохо · 60–79" };
-  return { c: "#D93A3A", cls: "c-red", band: "резко · ниже 60" };
+  if (s >= 80) return { c: "#8E2D4E", cls: "c-plum", band: "плавно · 80+" };
+  if (s >= 60) return { c: "#B47516", cls: "c-amber", band: "умеренно · 60–79" };
+  return { c: "#D93A3A", cls: "c-red", band: "агрессивно · ниже 60" };
 }
 
 // Efficiency zone classifier (TimeSavingIndex §6.3 DurationDeviation).
@@ -55,7 +57,9 @@ export function ecoCls(s: number): string {
   return s >= 80 ? "s-plum" : s >= 60 ? "s-amber" : "s-red";
 }
 
-// EcoScore human-readable label (отлично / неплохо / резко).
+// EcoScore human-readable label (плавно / умеренно / агрессивно).
+// v2.26.1: «резко» заменено на «агрессивно» — понятно без словаря;
+// шкала стала единой по смыслу: все три слова описывают стиль вождения.
 export function ecoLab(s: number): string {
-  return s >= 80 ? "отлично" : s >= 60 ? "неплохо" : "резко";
+  return s >= 80 ? "плавно" : s >= 60 ? "умеренно" : "агрессивно";
 }

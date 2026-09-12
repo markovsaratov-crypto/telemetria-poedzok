@@ -283,17 +283,17 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
         <i
           className="ml-move"
           style={{ width: `${movePct}%` }}
-          data-tip={`Движение (сумма MovingTime всех поездок периода): ${fmtInt(moveMin)} мин`}
+          data-tip={`В движении | ${fmtInt(moveMin)} мин за весь период`}
         />
         <i
           className="ml-idle"
           style={{ width: `${idlePct}%` }}
-          data-tip={`Стоянки (сумма IdleTime всех поездок периода): ${fmtInt(idleMin)} мин`}
+          data-tip={`На стоянках | ${fmtInt(idleMin)} мин за весь период`}
         />
         <i
           className="ml-gap"
           style={{ width: `${gapPct}%`, minWidth: gapSec > 0 ? "3px" : "0" }}
-          data-tip={`Разрывы записи за период (§4.6 states='gap', >30 сек): суммарно ${fmtSecFull(gapSec)}`}
+          data-tip={`Без сигнала GPS | ${fmtSecFull(gapSec)} за период — паузы в данных длиннее 30 секунд`}
         />
       </div>
       <div className="mline-cap">
@@ -426,7 +426,7 @@ function SessionHeader({
           <b>{fmtDurMin(activeMin)}</b>
           {legCount && legCount > 1 ? (
             <span
-              data-tip={`Запись содержит ${legCount} ${pluralRu(legCount, ["поездку", "поездки", "поездок"])}: долгая стоянка ${fmtDurMin(secToMin(longestStop))} между ними не входит во «в поездке» (порог разбивки — стоянка ≥ 15 мин). Движение: ${fmtInt(moveMin)} мин.`}
+              data-tip={`Одна запись — ${legCount} ${pluralRu(legCount, ["поездка", "поездки", "поездок"])} | Стоянка ${fmtDurMin(secToMin(longestStop))} между ними длинная — поездки считаются раздельно | Порог — 15 минут | В движении: ${fmtInt(moveMin)} мин`}
             >
               {" "}· {legCount} {pluralRu(legCount, ["поездка", "поездки", "поездок"])} · пауза {fmtDurMin(secToMin(longestStop))}
             </span>
@@ -438,17 +438,17 @@ function SessionHeader({
         <i
           className="ml-move"
           style={{ width: `${movePct}%` }}
-          data-tip={`Движение (§4.6 MovingTime): ${fmtInt(moveMin)} мин — интервалы со сглаженной скоростью выше 2 км/ч после гистерезиса 5/2 км/ч`}
+          data-tip={`В движении | ${fmtInt(moveMin)} мин — всё время со скоростью выше 2 км/ч`}
         />
         <i
           className="ml-idle"
           style={{ width: `${idlePct}%` }}
-          data-tip={`Время стоянок (§4.7 IdleTime): ${fmtInt(idleMin)} мин, включая «хвосты» до старта и после финиша — они не входят в активную поездку`}
+          data-tip={`На стоянках | ${fmtInt(idleMin)} мин — скорость ниже 2 км/ч, включая паузы до старта и после финиша`}
         />
         <i
           className="ml-gap"
           style={{ width: `${gapPct}%`, minWidth: gapSec > 0 ? "3px" : "0" }}
-          data-tip={`Разрывы записи (§4.6 states='gap'): ${fmtInt(stats.methodology?.gapCount ?? 0)} разрыва суммарно ${fmtSecFull(gapSec)} — интервалы между точками длиннее 30 сек`}
+          data-tip={`Без сигнала GPS | ${fmtInt(stats.methodology?.gapCount ?? 0)} пауз суммарно ${fmtSecFull(gapSec)} — интервалы длиннее 30 секунд без данных`}
         />
       </div>
       <div className="mline-cap">
@@ -528,7 +528,7 @@ function KpiBlock({
       <div className="kpi-grid">
         <KpiCard
           label="Длительность"
-          tip={`Длительность записи (§4.1 Duration): от первой до последней точки, включая стоянки-«хвосты» | Аналитические метрики ниже (дистанция, скорость, план-факт) считаются по активной поездке — см. «в поездке» в шапке`}
+          tip={`Длительность записи | От первой до последней точки, включая остановки | Путь и скорость ниже считаются только по времени в поездке`}
           value={stats ? fmtDurMin(dur) : "—"}
           unit=""
           trend={["—", "neu"]}
@@ -537,7 +537,7 @@ function KpiBlock({
         />
         <KpiCard
           label="Дистанция"
-          tip={`Дистанция (§4.2 Distance): сумма гаверсинусов между соседними точками АКТИВНОЙ поездки (§4.11) — дрейф стоянок-«хвостов» до старта и после финиша исключён | Точность ±1–3% от накопления погрешностей GPS`}
+          tip={`Пройденный путь | Считается только по времени движения — стоянки не учитываются | Погрешность GPS накапливается: точность ±1–3%`}
           value={stats ? fmtNum(dist, 1) : "—"}
           unit="км"
           trend={["—", "neu"]}
@@ -546,7 +546,7 @@ function KpiBlock({
         />
         <KpiCard
           label="Средняя скорость"
-          tip="Средняя скорость (§4.3 AvgSpeed): дистанция, делённая на длительность активной поездки | Как читать: больше — лучше"
+          tip="Средняя скорость | Путь, поделённый на время в поездке | Больше — лучше"
           value={stats ? fmtNum(avgKmh, 1) : "—"}
           unit="км/ч"
           trend={["—", "neu"]}
@@ -555,7 +555,7 @@ function KpiBlock({
         />
         <KpiCard
           label="Макс. скорость"
-          tip="Максимальная скорость (§4.4 MaxSpeed): пик за поездку с фильтрацией GPS-выбросов | Цвет по методологии: до 60 — норма, 60–100 — внимание, выше 100 — опасно"
+          tip="Максимальная скорость | Самый высокий момент за поездку; ошибки GPS отфильтрованы | До 60 км/ч — норма · 60–100 — внимание · выше 100 — опасно"
           value={stats ? fmtNum(maxKmh, 1) : "—"}
           unit="км/ч"
           trend={["—", "neu"]}
@@ -565,7 +565,7 @@ function KpiBlock({
         />
         <KpiCard
           label="Рекорд скорости"
-          tip={`Рекорд скорости за всё время (§4.5 MaxSpeedAllTime): максимум по всем вашим записям за всё время, с той же фильтрацией GPS-выбросов, что и «Макс. скорость»${recordDateLabel ? ` | Установлен ${recordDateLabel}` : ""} | Ваш личный рекорд — сравните с максимумом выбранного периода/поездки слева`}
+          tip={`Ваш рекорд скорости за всё время | Сравните с максимумом выбранного периода слева${recordDateLabel ? ` | Установлен ${recordDateLabel}` : ""}`}
           value={recordKmh != null ? fmtNum(recordKmh, 1) : "—"}
           unit="км/ч"
           trend={[recordDateLabel ?? "—", "neu"]}
@@ -575,7 +575,7 @@ function KpiBlock({
         />
         <KpiCard
           label="В движении"
-          tip="Время в движении (§4.6 MovingTime): интервалы со скоростью выше 2 км/ч после сглаживания и гистерезиса | Контрольная сумма: движение + стоянки + разрывы = длительность записи"
+          tip="Время в движении | Всё время со скоростью выше 2 км/ч | Движение + стоянки + разрывы = длительность записи"
           value={stats ? fmtDurMin(moveMin) : "—"}
           unit=""
           trend={["—", "neu"]}
@@ -585,7 +585,7 @@ function KpiBlock({
         />
         <KpiCard
           label="Время стоянок"
-          tip="Время стоянок (§4.7 IdleTime): интервалы со скоростью ниже 2 км/ч, включая «хвосты» записи | Как читать: меньше — лучше"
+          tip="Время стоянок | Всё время со скоростью ниже 2 км/ч: светофоры, ожидание, парковка | Меньше — лучше"
           value={stats ? fmtDurMin(idleMin) : "—"}
           unit=""
           trend={["—", "neu"]}
@@ -795,14 +795,14 @@ function DrivingScoreBlock({
         <span className="sec-title">Оценка вождения</span>
         <span className="sec-sub">
           {/* v2.12.0 (D-9): плюрализация «1 манёвр / 2 манёвра / 5 манёвров» */}
-          {events ? `${fmtNumber(mn)} ${pluralRu(mn, ["манёвр", "манёвра", "манёвров"])} · ${fmtNumber(hb + ha)} ${pluralRu(hb + ha, ["резкий", "резких", "резких"])} · базлайн: ${baselineVersion}` : "загрузка событий…"}
+          {events ? `${fmtNumber(mn)} ${pluralRu(mn, ["манёвр", "манёвра", "манёвров"])} · ${fmtNumber(hb + ha)} ${pluralRu(hb + ha, ["резкий", "резких", "резких"])} · норма: ${baselineVersion}` : "загрузка событий…"}
         </span>
       </div>
       <div className="score-grid">
         {/* === Виджет 1: Плавность · EcoScore (v2.21.0: bullet chart) === */}
         <BulletChart
           title="Плавность · EcoScore"
-          helpTip="Оценка плавности вождения (§7.3, методика CAP). Формула: 100×(1 − 0.45·penalty(braking) − 0.30·penalty(accel) − 0.25·penalty(jerk)), где penalty = 1 − 1/(1+(actual/baseline)^1.5). Baseline = корпус-медиана ≥30 поездок по routeHash × 1.2 (margin для малого корпуса). Зоны: 80+ отлично · 60–79 неплохо · ниже 60 резко"
+          helpTip="Оценка плавности вождения: 0–100 | Балл снижается за резкие торможения (вес 45%), разгоны (30%) и рывки (25%) | Сравнение — с вашими же обычными поездками по этому же маршруту | Зоны: 80+ плавно · 60–79 умеренно · ниже 60 агрессивный стиль"
           bigValue={String(ecoScore)}
           bigValueSuffix="/ 100"
           bandText={z.band}
@@ -810,17 +810,17 @@ function DrivingScoreBlock({
           min={0}
           max={100}
           ranges={[
-            { from: 0, to: 60, color: "var(--red-dim)", label: "резко · ниже 60" },
-            { from: 60, to: 80, color: "var(--amber-dim)", label: "неплохо · 60–79" },
-            { from: 80, to: 100, color: "var(--plum-dim)", label: "отлично · 80+" },
+            { from: 0, to: 60, color: "var(--red-dim)", label: "агрессивно · ниже 60" },
+            { from: 60, to: 80, color: "var(--amber-dim)", label: "умеренно · 60–79" },
+            { from: 80, to: 100, color: "var(--plum-dim)", label: "плавно · 80+" },
           ]}
           measure={{
             from: 0,
             to: ecoScore,
             color: z.cls === "c-plum" ? "var(--plum)" : z.cls === "c-amber" ? "var(--amber)" : "var(--red)",
-            tip: `EcoScore: ${ecoScore} из 100 · цель 80 (порог «отлично»)`,
+            tip: `EcoScore: ${ecoScore} из 100 · цель 80 — от этой отметки езда считается плавной`,
           }}
-          target={{ value: 80, tip: "Цель: 80 баллов — порог зоны «отлично» (§7.3)" }}
+          target={{ value: 80, tip: "Цель: 80 баллов — порог «плавной» езды" }}
           ticks={[
             { value: 0, label: "0" },
             { value: 20, label: "20" },
@@ -831,25 +831,25 @@ function DrivingScoreBlock({
           ]}
           note={
             <>
-              Шкала штрафа — доля от максимума компонента (45 / 30 / 25 баллов за плавность торможения / разгона / рывка. Breakdown показывает вклад каждого компонента в итоговый EcoScore, базлайн {baselineVersion}.
+              Штраф за каждый манёвр — до 45 / 30 / 25 баллов (торможения / разгоны / рывки). Полосы ниже показывают вклад каждого манёвра в итоговый балл; норма для сравнения — {baselineVersion}.
             </>
           }
           rows={[
             {
               label: "Торможения",
-              tip: `Энергия торможения на километр против базовой линии | Вклад в оценку с весом 0,45 — самый опасный манёвр (риск удара сзади) | перерасход относительно нормы → штраф ${fmtPointsRu(-brakingPenalty)}`,
+              tip: `Как энергично вы тормозите | Самый весомый вклад в оценку — 45%: резкое торможение опаснее всего (риск удара сзади) | Штраф: ${fmtPointsRu(-brakingPenalty)}`,
               barPct: brakingBarPct,
               value: fmtPointsRu(-brakingPenalty),
             },
             {
               label: "Разгоны",
-              tip: `Энергия разгона на километр против базовой линии | Вклад с весом 0,30 — расход топлива | перерасход относительно нормы → штраф ${fmtPointsRu(-accelPenalty)}`,
+              tip: `Как энергично вы разгоняетесь | Вклад в оценку — 30%: сильные разгоны повышают расход топлива | Штраф: ${fmtPointsRu(-accelPenalty)}`,
               barPct: accelBarPct,
               value: fmtPointsRu(-accelPenalty),
             },
             {
               label: "Рывки",
-              tip: `Энергия рывков на километр против базовой линии | Вклад с весом 0,25 — комфорт пассажиров (ISO 2631-1) | перерасход относительно нормы → штраф ${fmtPointsRu(-jerkPenalty)}`,
+              tip: `Насколько «дёрганая» езда — как быстро меняется ускорение | Вклад в оценку — 25%: комфорт пассажиров | Штраф: ${fmtPointsRu(-jerkPenalty)}`,
               barPct: jerkBarPct,
               value: fmtPointsRu(-jerkPenalty),
             },
@@ -859,7 +859,7 @@ function DrivingScoreBlock({
         {/* === Виджет 2: Эффективность · экономия к плану (v2.21.0: bullet chart) === */}
         <BulletChart
           title="Эффективность · экономия к плану"
-          helpTip="Метрика TimeSavingIndex (§6.3 DurationDeviation): среднее отклонение времени от плана маршрута в минутах на поездку. Отрицательное значение = экономия (слива), положительное = перерасход (алый). Источник: stats.route.planDurationSec vs активная длительность поездки (§4.11 ActiveDuration — сумма поездок записи)."
+          helpTip="Насколько быстрее или медленнее плана вы проезжаете | Минус — приехали раньше (экономия времени), плюс — опоздание | План — время того же маршрута по дорогам; берётся активная часть поездки без длительных стоянок"
           bigValue={effBigValue}
           bigValueSuffix={effUnit}
           bandText={effBand}
@@ -1099,29 +1099,29 @@ function SpeedProfileBlock({
         <div className="stats-grid">
           <Stat
             value={`${sp.p50} км/ч`}
-            tip="Медианная скорость (§5.1 SpeedP50): половину времени в движении вы ехали быстрее этого значения | Устойчива к выбросам GPS, в отличие от среднего"
+            tip="Медианная скорость | Половину времени в движении вы ехали быстрее этого значения | Не искажается редкими ошибками GPS, в отличие от среднего"
             label="Медиана скорости"
           />
           <Stat
             value={`${sp.std} км/ч`}
-            tip="Разброс скорости (§5.2 SpeedStdDev): стандартное отклонение по алгоритму Уэлфорда | Как читать: меньше — ровнее езда"
+            tip="Разброс скорости | Насколько скорость «прыгает» вверх-вниз | Меньше — ровнее езда"
             label="Разброс скорости"
           />
           <Stat
             value={sp.vr}
-            tip="Перепады скорости (§5.6 SpeedVariation): отношение разброса к средней скорости | 0 — идеально ровно, выше 1 — рваный ритм"
+            tip="Перепады скорости | Разброс относительно вашей средней скорости | 0 — идеально ровно · выше 1 — рваный ритм"
             label="Перепады скорости"
           />
           <Stat
             value={sp.jam}
             cls="c-red"
-            tip="Время в пробках (§5.4 TimeInTraffic): движение со сглаженной скоростью ниже 10 км/ч | Считается по вашим точкам GPS, стоянки не входят"
+            tip="Время в пробках | Движение медленнее 10 км/ч | Стоянки не учитываются"
             label="Время в пробках"
           />
           <Stat
             value={sp.cruise}
             cls="c-plum"
-            tip="Время крейсерского хода (§5.5 TimeAtCruise): движение быстрее 60 км/ч | Доля загородного и магистрального режима"
+            tip="Крейсерский ход | Доля времени на скорости выше 60 км/ч — загородные и магистральные участки"
             label="Крейсерский ход"
           />
         </div>
@@ -1300,13 +1300,13 @@ function PlanFactBlock({
           <div>
             <div className="pf-label">
               <span
-                data-tip="Отклонение по времени (§6.3 DurationDeviation): факт минус план, в минутах и процентах | Факт — активная поездка, план — расчёт маршрутизатора (2ГИС или OSRM) или baseline гаверсинус/40 км/ч | Обратная шкала: экономия — слива, перерасход — алый"
+                data-tip="Отклонение по времени | Разница «факт минус план» в минутах и процентах | План — маршрут по дорогам с учётом пробок | Минус — приехали раньше, плюс — опоздали"
               >
                 Отклонение по времени
               </span>
               <span
                 className="help"
-                data-tip="Главный показатель пунктуальности поездки | Как читать: −4 мин — приехали раньше, +4 мин — опоздали | Норма по методологии: ±5%"
+                data-tip="Главный показатель пунктуальности | −4 мин — приехали раньше, +4 мин — опоздали | В пределах ±5% — норма"
               >
                 ?
               </span>
@@ -1329,7 +1329,7 @@ function PlanFactBlock({
           <div className="pf-side">
             <div className="pf-mini">
               <span
-                data-tip={`Отклонение по дистанции (§6.6 DistanceDeviation): факт ${(stats.distance / 1000).toFixed(1).replace(".", ",")} км против плана ${route?.planDistanceM ? (route.planDistanceM / 1000).toFixed(1).replace(".", ",") : "—"} км | Обратная шкала: короче плана — слива, длиннее — алый`}
+                data-tip={`Отклонение по дистанции | Проехали ${(stats.distance / 1000).toFixed(1).replace(".", ",")} км против ${route?.planDistanceM ? (route.planDistanceM / 1000).toFixed(1).replace(".", ",") : "—"} км по плану | Короче плана — слива, длиннее — алый`}
               >
                 Откл. по дистанции
               </span>
@@ -1340,7 +1340,7 @@ function PlanFactBlock({
             </div>
             <div className="pf-mini">
               <span
-                data-tip="Отклонение скорости (§6.7 SpeedDeviation): средняя фактическая vs плановая (planDist/planDur) | Прямая шкала: быстрее плана — слива, медленнее — алый"
+                data-tip="Отклонение по скорости | Ваша средняя против плановой на этом маршруте | Быстрее плана — слива, медленнее — алый"
               >
                 Откл. по скорости
               </span>
@@ -1351,7 +1351,7 @@ function PlanFactBlock({
             </div>
             <div className="pf-mini">
               <span
-                data-tip="Потери времени из-за пробок (§6.8 TimeLostToTraffic): на сколько минут пробки удлинили поездку относительно плана | Алый — безусловная потеря"
+                data-tip="Потери в пробках | На сколько минут пробки удлинили поездку против плана | Это чистая потеря времени"
               >
                 Потери в пробках
               </span>
@@ -1429,37 +1429,37 @@ function PlanFactBlock({
               <Stat
                 value={cmpRank != null ? `#${cmpRank}` : "—"}
                 cls="c-plum"
-                tip={`Ранг сессии в группе (§10.2): 1 = лучшая (самая быстрая) | Группа из ${cmpGroupSize} поездок по тому же routeHash`}
+                tip={`Место среди ваших поездок по этому маршруту | 1 — самая быстрая из ${cmpGroupSize}`}
                 label="Ранг в группе"
               />
               <Stat
                 value={cmpPercentile != null ? `${cmpPercentile}%` : "—"}
-                tip="Перцентиль (§10.2): позиция в группе, 0% = лучшая, 100% = худшая"
+                tip="Позиция среди своих | 0% — лучшая, 100% — худшая поездка на этом маршруте"
                 label="Перцентиль"
               />
               <Stat
                 value={cmpVsAvgPct != null ? `${cmpVsAvgPct > 0 ? "+" : ""}${fmtNum(cmpVsAvgPct, 2)}%` : "—"}
                 cls={cmpVsAvgPct == null ? "c-faint" : cmpVsAvgPct <= 0 ? "c-plum" : "c-red"}
-                tip="Отклонение от среднего (§10.2): отрицательное — быстрее среднего, положительное — медленнее"
+                tip="Отклонение от среднего | Минус — быстрее вашей средней, плюс — медленнее"
                 label="vs среднего"
               />
               <Stat
                 value={cmpStats?.best != null ? `${fmtInt(cmpStats.best / 60)} мин` : "—"}
                 cls="c-plum"
-                tip="Лучшее время в группе (§10.2): минимальная активная длительность по всем сессиям с надёжностью ≥ 0.6"
+                tip="Ваше лучшее время на этом маршруте | Самая быстрая из надёжно записанных поездок"
                 label="Лучшее в группе"
               />
               <Stat
                 value={cmpStats?.worst != null ? `${fmtInt(cmpStats.worst / 60)} мин` : "—"}
                 cls="c-red"
-                tip="Худшее время в группе (§10.2): максимальная активная длительность"
+                tip="Самое медленное время на этом маршруте"
                 label="Худшее в группе"
               />
               <Stat
                 value={cmpTrend?.slope != null ? `${trendSlopeWord} сек/день` : "—"}
                 cls={cmpTrend?.slope == null ? "c-faint" : cmpTrend.slope < 0 ? "c-plum" : cmpTrend.slope > 0 ? "c-red" : "c-amber"}
-                tip={`Тренд Theil-Sen (§10.5): наклон изменения времени по дням | CI 95%: ${cmpTrend?.ci95 ? `[${cmpTrend.ci95[0].toFixed(2)}, ${cmpTrend.ci95[1].toFixed(2)}]` : "—"} | Рейтинг: ${trendWord}`}
-                label="Тренд Theil-Sen"
+                tip={`Тренд времени | Изменение времени поездки по дням, в секундах в день | Минус — поездки становятся быстрее, плюс — медленнее | Точность (95%): ${cmpTrend?.ci95 ? `[${cmpTrend.ci95[0].toFixed(2)}, ${cmpTrend.ci95[1].toFixed(2)}]` : "—"} | ${trendWord}`}
+                label="Тренд времени"
               />
             </div>
           </div>
@@ -1558,7 +1558,7 @@ function BehaviorBlock({
             Диаграмма манёвров
             <span
               className="help"
-              data-tip="Каждая точка — манёвр: по горизонтали боковое ускорение latA/g (влево — отрицательное, вправо — положительное), по вертикали продольное longA/g (разгон вверх, торможение вниз). Визуализация метрик §7.4 AccelerationRMS и §7.5 JerkRMS. Алые кольца — события резких торможений и разгонов (§7.1, §7.2). Внутри 0,4g — плавная езда. Источник: /events.gg.points[] (x=longA/g, y=latA/g, отрисовка — с поворотом осей: X экрана = latA, Y экрана = longA)."
+              data-tip="Диаграмма манёвров | Каждая точка — один манёвр: по горизонтали боковое ускорение (повороты), по вертикали продольное (разгон — вверх, торможение — вниз) | Точки внутри пунктирного круга (0,4g) — плавная езда | Алые кольца — резкие торможения и разгоны"
             >
               ?
             </span>
@@ -1577,7 +1577,7 @@ function BehaviorBlock({
               <div className="ev hot">
                 <b>{fmtNumber(hb)}</b>
                 <span
-                  data-tip="Резкие торможения (§7.1 HarshBrakingCount): замедление сильнее −10 км/ч за секунду | Цвет: 0 — норма, 1 — внимание, 2+ — опасно"
+                  data-tip="Резкие торможения | Замедление сильнее 10 км/ч за секунду | 0 — норма · 1 — внимание · 2+ — опасно"
                 >
                   {/* v2.12.0 (D-9): «1 резкое торможение» вместо «1 резких торможения» */}
                   {pluralRu(hb, ["резкое торможение", "резких торможения", "резких торможений"])}
@@ -1586,7 +1586,7 @@ function BehaviorBlock({
               <div className="ev hot">
                 <b>{fmtNumber(ha)}</b>
                 <span
-                  data-tip="Резкие разгоны (§7.2 HarshAccelCount): ускорение сильнее +10 км/ч за секунду | Симметрично торможениям; старт с места не считается"
+                  data-tip="Резкие разгоны | Ускорение сильнее 10 км/ч за секунду | Старт с места не считается"
                 >
                   {pluralRu(ha, ["резкий разгон", "резких разгона", "резких разгонов"])}
                 </span>
@@ -1594,7 +1594,7 @@ function BehaviorBlock({
               <div className="ev hot">
                 <b>{fmtNumber(hscCount)}</b>
                 <span
-                  data-tip="Резкие манёвры на высокой скорости (§7.10 HighSpeedCornering): смена курса больше 45° за 5 сек при скорости выше 60 км/ч | Риск заноса"
+                  data-tip="Резкие манёвры на скорости | Смена направления больше 45° за 5 секунд на скорости выше 60 км/ч | Риск заноса"
                 >
                   {pluralRu(hscCount, ["манёвр", "манёвра", "манёвров"])} &gt;60 км/ч
                 </span>
@@ -1607,19 +1607,19 @@ function BehaviorBlock({
               <Stat
                 value={fmtNum(accelRMS, 2)}
                 cls={accelRMS > 1.5 ? "c-red" : accelRMS > 0.5 ? "c-amber" : "c-plum"}
-                tip="Интенсивность ускорений (§7.4 AccelerationRMS): среднеквадратичное ускорение, м/с² | Зоны: до 0,5 — плавно · 0,5–1,5 — умеренно · выше 1,5 — резко"
+                tip="Среднее ускорение | Насколько энергичны разгоны и торможения | До 0,5 — плавно · 0,5–1,5 — умеренно · выше 1,5 — агрессивно"
                 label="Ср. ускорение"
               />
               <Stat
                 value={fmtNum(jerkRMS, 2)}
                 cls={jerkRMS > 2 ? "c-red" : jerkRMS > 0.5 ? "c-amber" : "c-plum"}
-                tip="Резкость рывков (§7.5 JerkRMS): среднеквадратичная скорость изменения ускорения, м/с³ | Зоны: до 0,5 — плавно · 0,5–2,0 — умеренно · выше 2,0 — резко"
+                tip="Средний рывок | Как быстро меняется ускорение — «дёрганость» езды | До 0,5 — плавно · 0,5–2,0 — умеренно · выше 2,0 — агрессивно"
                 label="Ср. рывок"
               />
               <Stat
                 value={fmtNum(uniformity, 2)}
                 cls={uniformity > 0.8 ? "c-plum" : uniformity > 0.4 ? "c-amber" : "c-red"}
-                tip="Равномерность (§7.6 SpeedConsistencyIndex): единица минус отношение разброса к средней скорости | Зоны: выше 0,8 — ровно · 0,4–0,8 — умеренно · ниже 0,4 — рвано"
+                tip="Равномерность | Насколько ровно вы держите скорость | Выше 0,8 — ровно · 0,4–0,8 — средне · ниже 0,4 — рвано"
                 label="Равномерность"
               />
             </div>
@@ -1630,18 +1630,18 @@ function BehaviorBlock({
               <Stat
                 value={fmtNum(stats?.methodology?.bearingConsistency ?? null, 2)}
                 cls="c-amber"
-                tip="Прямолинейность маршрута (§7.7 BearingConsistency): единица минус нормированное рассеяние курса | Зоны: выше 0,85 — трасса · 0,5–0,85 — город · ниже 0,5 — серпантин"
+                tip="Прямолинейность маршрута | Насколько маршрут прямой | 0,85+ — трасса · 0,5–0,85 — город · ниже 0,5 — серпантин"
                 label="Прямолинейность"
               />
               <Stat
                 value={fmtInt(stats?.methodology?.uTurnCount ?? 0)}
                 cls="c-amber"
-                tip="Развороты (§7.8 UTurnCount): смена курса на 150–210° — пересечение встречной полосы | Цвет: 0 — норма · 1 — внимание · 2+ — опасно"
+                tip="Развороты | Поворот на 150–210° с пересечением встречной полосы | 0 — норма · 1 — внимание · 2+ — опасно"
                 label="Развороты"
               />
               <Stat
                 value={fmtInt(stats?.methodology?.turnCount ?? 0)}
-                tip="Повороты (§7.9 TurnCount): смены курса 30–150° | Информативная метрика — характеризует сложность маршрута, а не стиль вождения"
+                tip="Повороты | Смены направления на 30–150° | Показывают сложность маршрута, а не стиль вождения"
                 label="Повороты"
               />
             </div>
@@ -1833,17 +1833,17 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
           <div
             className="jb jb-move"
             style={{ width: `${movePct}%` }}
-            data-tip={`Движение вне пробок (§5.4): ${fmtInt(moveNoJamMin)} мин из ${fmtInt((moveSec + idleSec) / 60)} мин активной поездки`}
+            data-tip={`Движение вне пробок | ${fmtInt(moveNoJamMin)} мин из ${fmtInt((moveSec + idleSec) / 60)} мин в поездке`}
           />
           <div
             className="jb jb-jam"
             style={{ width: `${jamPct}%` }}
-            data-tip={`Время в пробках (§5.4 TimeInTraffic): ${fmtInt(jamMin)} мин — по вашей скорости ниже 10 км/ч | Считается по точкам GPS`}
+            data-tip={`В пробках | ${fmtInt(jamMin)} мин — движение медленнее 10 км/ч`}
           />
           <div
             className="jb jb-idle"
             style={{ width: `${idlePct}%` }}
-            data-tip={`Остановки внутри поездки (§4.7 IdleTime): ${fmtInt(idleMin)} мин — светофоры, ожидание, парковка`}
+            data-tip={`Остановки в поездке | ${fmtInt(idleMin)} мин — светофоры, ожидание, парковка`}
           />
         </div>
         <div className="jbar-leg">
@@ -1864,30 +1864,30 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
           <Stat
             value={`${fmtInt(congMinVal)} мин`}
             cls="c-red"
-            tip={`Время в заторах (§9.5 TimeInCongestion): ${trafficFetched ? `${fmtInt(timeLostMin)} мин — потери от 2ГИС (§6.8)` : `approx ${fmtInt(jamMin / 2)} мин — половина jam-времени как оценка`} | Считается по сегментам, где скорость ниже половины плановой`}
+            tip={`Время в заторах | ${trafficFetched ? `${fmtInt(timeLostMin)} мин — на столько пробки удлинили поездку` : `примерно ${fmtInt(jamMin / 2)} мин — оценка по медленным участкам`} | Учитываются участки, где скорость ниже половины плановой`}
             label="Время в заторах"
           />
           <Stat
             value={trafficSeverity != null ? fmtNum(trafficSeverity, 2) : "—"}
             cls={trafficSeverity == null ? "c-faint" : trafficSeverity >= 0.8 ? "c-plum" : trafficSeverity >= 0.5 ? "c-amber" : "c-red"}
-            tip="Индекс загруженности (§9.3 TrafficSeverity): среднее отношение фактической скорости сегментов к плановой | 1,0 — свободно · 0,5 — пробка · 0,0 — глухой затор"
+            tip="Индекс загруженности | Средняя скорость относительно свободной дороги | 1,0 — свободно · 0,5 — пробка · 0,0 — глухой затор"
             label="Индекс загруженности"
           />
           <Stat
             value={`${fmtNum(avgTrafficSpeed, 1)} км/ч`}
-            tip={`Средняя скорость с учётом пробок (§9.2 AvgTrafficSpeed): медианная скорость (§5.1) — ближе всего к «скорости с пробками» | План: ${fmtNum(planSpeedKmh, 1)} км/ч`}
+            tip={`Скорость с учётом пробок | Медианная скорость поездки — типичная, без учёта редких разгонов | План: ${fmtNum(planSpeedKmh, 1)} км/ч`}
             label="Скорость с пробками"
           />
           <Stat
             value={fmtNum(congestedPct, 1) + "%"}
             cls={congestedPct > 30 ? "c-red" : congestedPct > 15 ? "c-amber" : "c-plum"}
-            tip="Перегруженные сегменты (§9.4 CongestedSegments): доля точек в бакетах 0–20 и 20–40 км/ч | Чем выше процент — тем больше доля медленного движения"
+            tip="Доля медленных участков | Процент точек на скорости 0–40 км/ч | Больше процент — больше медленного движения"
             label="Перегруж. сегменты"
           />
           <Stat
             value={coverageText}
             cls={trafficFetched ? "c-plum" : "c-amber"}
-            tip={`Сегменты с данными о пробках (§9.1 TrafficFetchedSegments): покрытие маршрута данными 2ГИС | ${trafficFetched ? "трафик получен из TrafficJob" : "трафик не получен — расчёт только по GPS-скорости"}`}
+            tip={`Покрытие данными о пробках | Насколько маршрут покрыт данными о дорожной обстановке | ${trafficFetched ? "данные о пробках получены" : "данных о пробках нет — расчёт только по вашей GPS-скорости"}`}
             label="Покрытие данными"
           />
         </div>
@@ -1998,30 +1998,30 @@ function GeoBlock({ stats, aggregated = false }: { stats: SessionStats | null | 
           <Stat
             value={routeEfficiency != null ? fmtNum(routeEfficiency, 2) : "—"}
             cls={routeEfficiency == null ? "c-faint" : routeEfficiency <= 1.15 ? "c-plum" : routeEfficiency <= 1.4 ? "c-amber" : "c-red"}
-            tip="Извилистость маршрута (§8.2 RouteEfficiency): фактический путь к прямой дистанции старта и финиша | 1,0 — по прямой; больше — больше крюк"
+            tip="Извилистость маршрута | Путь против прямой «от старта до финиша» | 1,0 — почти по прямой · больше — больше крюк"
             label="Извилистость маршрута"
           />
           <Stat
             value={`${urbanRatio}%`}
             cls={urbanRatio > 60 ? "c-amber" : "c-plum"}
-            tip={`Доля городской зоны (§8.5 UrbanRatio): heuristic по bbox (${fmtNum(bboxAreaKm2, 1)} км²) и доле низкоскоростных точек (${fmtNum(lowSpeedPct, 0)}% <40 км/ч) | Остальные ${100 - urbanRatio}% — загород`}
+            tip={`Доля города | Оценка по площади маршрута (${fmtNum(bboxAreaKm2, 1)} км²) и доле медленных точек (${fmtNum(lowSpeedPct, 0)}% ниже 40 км/ч) | Остальные ${100 - urbanRatio}% — загород`}
             label="Городская зона"
           />
           <Stat
             value={`+${elevGain} м`}
             cls="c-plum"
-            tip="Набор высоты (§8.4 AltitudeGain): сумма только подъёмов | Спуски в зачёт не идут — это «работа в гору»"
+            tip="Набор высоты | Суммарный подъём в гору | Спуски в зачёт не идут"
             label="Набор высоты"
           />
           <Stat
             value={elevRangeVal}
-            tip={`Перепад высот (§8.3 AltitudeRange): разница max-min по ${altProfile.length} высотным точкам | ${altRange != null ? `min ${fmtNum(altMin!, 0)} м · max ${fmtNum(altMax!, 0)} м` : "высотных данных нет — approximation из набора/спуска"}`}
+            tip={`Перепад высот | Разница минимальной и максимальной высот маршрута | ${altRange != null ? `от ${fmtNum(altMin!, 0)} м до ${fmtNum(altMax!, 0)} м` : "данных о высоте нет — оценка по подъёмам и спускам"}`}
             label="Перепад высот"
           />
           <Stat
             value={avgAccuracy != null ? `${fmtNum(avgAccuracy, 1)} м` : "—"}
             cls={avgAccuracy == null ? "c-faint" : avgAccuracy <= 5 ? "c-plum" : avgAccuracy <= 15 ? "c-amber" : "c-red"}
-            tip="Средняя точность GPS (§8.6 AvgAccuracy): средний радиус погрешности сигнала | До 5 м — точно, 5–15 м — приемлемо, выше — осторожно с выводами"
+            tip="Точность GPS | Средний радиус погрешности сигнала | До 5 м — точно · 5–15 м — приемлемо · выше — осторожнее с выводами"
             label="Точность GPS"
           />
         </div>
@@ -2143,7 +2143,7 @@ function HeavySegmentsBlock({
       <div className="acc-body">
         <p className="acc-note">
           <span
-            data-tip="Хронически пробочные участки (§10.6 HotspotSegments): сегменты, где медианная скорость стабильно ниже типичной для маршрута | Скорость участка — отношение к обычной скорости маршрута (P75): ниже 0,25 — тяжёлый, 0,25–0,4 — средний, выше 0,4 — лёгкий | Устойчиво к аномалиям: одна снежная поездка рейтинг не портит"
+            data-tip="Скорость участка | Насколько медленнее обычного для этого маршрута | 0,25 и ниже — тяжёлый · 0,25–0,4 — средний · выше 0,4 — лёгкий | Одна аномальная поездка (снег, ДТП) оценку не портит"
           >
             Скорость участка
           </span>{" "}
@@ -2224,7 +2224,7 @@ function HeavyGroupRow({
             <i
               key={i}
               style={{ background: dotColor(p) }}
-              data-tip={`Сегмент ${g.worstHotspots[i].segmentId} · P75=${fmtNum(p, 2)} · ${dotLabel(p)}`}
+              data-tip={`Участок №${g.worstHotspots[i].segmentId} | Скорость ${fmtNum(p, 2)} от обычной · ${dotLabel(p)}`}
             />
           ))}
           {dots.length === 0 ? (
@@ -2431,7 +2431,7 @@ function RouteComparison({ routeGroup }: { routeGroup: RouteGroupInfo }) {
       </div>
       <p className="acc-note" style={{ margin: "0 0 4px" }}>
         Стабильность времени: <b>±{stdDevMin != null ? fmtInt(stdDevMin) : "—"} мин</b> —{" "}
-        {stdDevMin == null ? "—" : stdDevMin <= 5 ? "высокопредсказуемый" : stdDevMin <= 10 ? "предсказуемый" : "волатильный"} маршрут ({routeGroup.sessionCount} поездок).
+        {stdDevMin == null ? "—" : stdDevMin <= 5 ? "высокопредсказуемый" : stdDevMin <= 10 ? "предсказуемый" : "непостоянный"} маршрут ({routeGroup.sessionCount} поездок).
       </p>
       <div className="heat-title">Зависимость от времени суток</div>
       <div className="heat heat-4c">
@@ -2472,10 +2472,10 @@ function RouteComparison({ routeGroup }: { routeGroup: RouteGroupInfo }) {
         </>
       ) : (
         <>
-          <div className="heat-title">Тренд времени · Theil-Sen</div>
+          <div className="heat-title">Тренд времени</div>
           <RouteTrendSvg trend={data} />
           <p className="trend-cap">
-            Наклон <b>{slope > 0 ? "+" : slope < 0 ? "−" : "±"}{fmtNum(Math.abs(slope), 1)} сек/день</b> · 95% CI <b>{ciText ?? "—"}</b> — {trendWord} тренд. Пунктир — медианная регрессия, точки — поездки.
+            Наклон <b>{slope > 0 ? "+" : slope < 0 ? "−" : "±"}{fmtNum(Math.abs(slope), 1)} сек/день</b> · доверительный интервал 95%: <b>{ciText ?? "—"}</b> — {trendWord} тренд. Пунктир — линия тренда, точки — ваши поездки.
           </p>
         </>
       )}
@@ -2565,7 +2565,7 @@ function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats |
         <div className="prog-row">
           <div className="prog-head">
             <span>
-              <span data-tip="Полнота записи (§11.5 CompletenessScore): доля времени с валидными точками | Выше 85% — данным можно доверять">
+              <span data-tip="Полнота данных | Доля времени, за которую есть точки GPS | Выше 85% — данным можно доверять">
                 Полнота данных
               </span>
             </span>
@@ -2579,32 +2579,32 @@ function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats |
           <Stat
             value={reliability ? reliabilityLabel : "—"}
             cls={reliabilityCls}
-            tip={`Индекс доверия к записи (§11.6 SessionReliability): сводка дрейфа GPS и правдоподобия скорости | value=${reliability?.value ?? "—"} · drift=${driftScore ?? "—"} · plausibility=${plausibility ?? "—"} | Выше 0,85 — высокая, 0,5–0,85 — средняя, ниже 0,5 — низкая`}
+            tip="Надёжность записи | Сводная оценка качества GPS: дрейф и правдоподобие скорости | Выше 0,85 — высокая · 0,5–0,85 — средняя · ниже 0,5 — низкая"
             label="Надёжность записи"
           />
           <Stat
             value={pointDensity != null ? `${fmtNum(pointDensity, 1)}/с` : "—"}
             cls={pointDensity == null ? "c-faint" : pointDensity >= 1 ? "c-plum" : pointDensity >= 0.5 ? "c-amber" : "c-red"}
-            tip="Плотность точек (§11.1 PointDensity): точек GPS в секунду активной части | Выше 1/с — достаточно для анализа манёвров"
+            tip="Плотность точек | Сколько точек GPS приходится на секунду движения | Выше 1/с — достаточно для анализа манёвров"
             label="Плотность точек"
           />
           <Stat
             value={`${gapCount} · ${fmtInt(gapTotalSec)} сек`}
             cls={gapCount === 0 ? "c-plum" : gapCount <= 3 ? "c-amber" : "c-red"}
-            tip="Разрывы (§11.2 GapCount, §11.3 GapTotalDuration): количество и суммарная длительность пауз сигнала | Разрыв — интервал между точками длиннее 30 сек"
+            tip="Пропуски сигнала | Количество пауз в данных GPS и их суммарная длина | Пауза — интервал длиннее 30 секунд"
             label="Пропуски сигнала"
           />
           <Stat
             value={accuracyP90 != null ? `${fmtNum(accuracyP90, 1)} м` : "—"}
             cls={accuracyP90 == null ? "c-faint" : accuracyP90 <= 10 ? "c-plum" : accuracyP90 <= 25 ? "c-amber" : "c-red"}
-            tip="Точность GPS P90 (§11.4 AccuracyP90): 9 из 10 точек точнее этого значения | До 10 м — хорошо для городских маршрутов"
+            tip="Точность GPS (P90) | 9 из 10 точек точнее этого значения | До 10 м — хорошо для города"
             label="Точность P90"
           />
           {driftScore != null ? (
             <Stat
               value={fmtNum(driftScore, 2)}
               cls={driftScore <= 0.15 ? "c-plum" : driftScore <= 0.3 ? "c-amber" : "c-red"}
-              tip="Дрейф GPS (§11.6 DriftScore): насколько далеко точка ушла от реального положения | 0 — идеально, до 0,15 — норма, выше — проблема"
+              tip="Дрейф GPS | Насколько точки «расползаются» вокруг реального положения при стоянке | 0 — идеально · до 0,15 — норма · выше — проблема"
               label="Дрейф GPS"
             />
           ) : null}
@@ -2612,14 +2612,14 @@ function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats |
             <Stat
               value={fmtNum(plausibility, 2)}
               cls={plausibility >= 0.85 ? "c-plum" : plausibility >= 0.5 ? "c-amber" : "c-red"}
-              tip="Правдоподобие скорости (§11.6 PlausibilityScore): насколько реалистичны скорости между точками | 1,0 — все скорости возможны, ниже — есть нереалистичные"
+              tip="Правдоподобие скорости | Насколько реалистичны рассчитанные скорости | 1,0 — все возможны · ниже — есть нереалистичные"
               label="Правдоподобие скор."
             />
           ) : null}
           {activeIdleTime != null ? (
             <Stat
               value={`${fmtInt(activeIdleTime / 60)} мин`}
-              tip="Время активных стоянок (§4.7 ActiveIdleTime): стоянки внутри активной поездки — светофоры, ожидание, парковка | Меньше — лучше"
+              tip="Остановки в поездке | Светофоры, ожидание, парковка — без пауз до старта и после финиша | Меньше — лучше"
               label="Активные стоянки"
             />
           ) : null}

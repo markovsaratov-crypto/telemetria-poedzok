@@ -1923,10 +1923,14 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
   .v4-app .brand h1 { font-size: 18px; letter-spacing: 0.08em; }
 }
 @media (min-width: 768px) {
-  .v4-app .brand h1 { font-size: 22px; letter-spacing: 0.10em; }
-  .v4-app .topbar { flex-wrap: nowrap; gap: 10px; margin-bottom: 6px; overflow-x: visible; }
+  /* v2.26.2: контентная колонка capped на 980px (max-width обёртки) — топбар
+     ВСЕГДА ~948px при любой ширине окна. Бренд 22→20px + зазоры 10→6px:
+     иначе слово активной вкладки не помещалось («АНАЛИТИКА» ~90px) и
+     сжималось в ноль с рисованием поверх кнопок. */
+  .v4-app .brand h1 { font-size: 20px; letter-spacing: 0.09em; }
+  .v4-app .topbar { flex-wrap: nowrap; gap: 6px; margin-bottom: 6px; overflow-x: visible; }
   .v4-app .v4-bookmark { padding: 7px 12px; font-size: 13px; letter-spacing: 0.08em; }
-  .v4-app .v4-topbar-active-label { display: inline-block; }
+  .v4-app .v4-topbar-active-label { display: inline-block; letter-spacing: 0.09em; margin-left: 2px; }
 }
 
 /* Topbar-actions: обертка + shrink на мобильном */
@@ -1943,11 +1947,13 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
   border-radius: 8px;
   font-size: 13px;
 }
-/* Прячем kbd-mini «⌘K» / «Ctrl+Shift+F» бейджи на мобильном и узком десктопе —
-   иконка-only. v2.26.2: бейдж показываем только ≥1200px, где места хватает на
-   авторастущие кнопки (раньше на 768–1199px бейдж «Ctrl⇧F» вылезал за фикс-
-   ширину 32px в обе стороны — на Windows читалось как «СтрF»). Шорткаты
-   остаются в tooltip кнопок и в «Справка (?)». */
+/* v2.26.2: kbd-бейджи («⌘K» / «Ctrl+Shift+F») убраны со ВСЕХ ширин — иконка-only.
+   Причина: колонка контента capped на 980px, топбар ~948px; бейдж «Ctrl⇧F»
+   (43px) вылезал за фикс-ширину кнопки 32px в обе стороны (на Windows без
+   глифа ⇧ в Consolas читалось как битое «СтрF»), а авторастущие кнопки
+   (+112px к ряду) выталкивали слово активной вкладки — владелец подтвердил,
+   что повтор названия вкладки ему НУЖЕН, бейджи — нет. Шорткаты остаются
+   в tooltip кнопок и в диалоге «Справка (?)». */
 .v4-app .iconbtn .kbd-mini { display: none; }
 @media (min-width: 768px) {
   .v4-app .iconbtn {
@@ -1955,16 +1961,6 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
     height: 32px;
     border-radius: 6px;
     font-size: 12px;
-  }
-}
-@media (min-width: 1200px) {
-  .v4-app .iconbtn .kbd-mini { display: inline-block; }
-  /* v2.26.2: кнопка с бейджем растёт под контент — иконка+бейдж входят целиком,
-     без обрезания. Чисто-иконочные кнопки остаются 32×32. */
-  .v4-app .iconbtn:has(.kbd-mini) {
-    width: auto;
-    min-width: 32px;
-    padding: 0 8px;
   }
 }
 

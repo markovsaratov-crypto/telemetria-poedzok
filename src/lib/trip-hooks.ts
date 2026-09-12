@@ -8,7 +8,7 @@
 // записи (expand-фаза §13 ТЗ — регрессионно безопасный переход).
 "use client";
 
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api, type TripListItem, type TripStats } from "./api-client";
 
 export interface TripsListResponse {
@@ -71,5 +71,39 @@ export function useTripStats(id: string | null, opts?: { live?: boolean }) {
     staleTime: opts?.live ? 15_000 : 60_000, // идущая поездка — как записи (Ф2)
     refetchInterval: opts?.live ? 15_000 : undefined,
     retry: 1,
+  });
+}
+
+export interface DeleteTripResponse {
+  ok: boolean;
+  deletedSessions: number;
+  gracePeriodDays: number;
+}
+
+/**
+ * v2.30.0: удаление поездки пользователем (DELETE /api/trips/[id]).
+ * Инвалидация — все производные поверхности: списки поездок/записей,
+ * per-trip/per-session статы, период-агрегаты «Аналитики», рекорд скорости —
+ * цифры вкладок остаются согласованными после удаления.
+ */
+export function useDeleteTrip() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (tripId: string) => api.delete<DeleteTripResponse>(`/api/trips/${tripId}`),
+    onSuccess: () => {
+      for (const key of [
+        ["trips"],
+        ["trips-stats-batch"],
+        ["trip-stats"],
+        ["sessions"],
+        ["sessions-batch"],
+        ["session-stats"],
+        ["stats-batch"],
+        ["v4", "period-aggregate"],
+        ["v4", "speed-record"],
+      ]) {
+        qc.invalidateQueries({ queryKey: key });
+      }
+    },
   });
 }

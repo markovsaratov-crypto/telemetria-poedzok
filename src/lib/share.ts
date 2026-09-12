@@ -5,7 +5,7 @@ import { env } from "./env";
 import { db } from "./db";
 import { json } from "./http-utils";
 import { haversineM } from "./geo";
-import { computeMovingTime, computeActiveTrip, type MethodologyPoint } from "./active-trip";
+import { computeMovingTime, computeActiveTrip, type MethodologyPoint, type ActiveTrip } from "./active-trip";
 import { maxSpeedMs, normalizeSessionSpeeds } from "./kpi";
 import { tokenMatches } from "./token-check"; // v2.16.0 (D-16): timing-safe сверка сигнатуры
 
@@ -40,6 +40,20 @@ export async function verifyShareToken(token: string): Promise<{ sessionId: stri
   const expiresAt = parseInt(exp36, 36);
   if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) return null;
   return { sessionId, expiresAt };
+}
+
+// v2.31.0 (MAJ-9): интервал [prevTs, ts] пересекает активную часть — семантика
+// intervalInActiveLegs из session-stats.ts (правая точка ≥ старта окна, левая ≤
+// финиша; legacy без legs — span). Локальная копия — чтобы не расширять экспорт.
+function shareIntervalInActiveLegs(activeTrip: ActiveTrip, prevTs: number, ts: number): boolean {
+  const legs = activeTrip.legs;
+  if (legs && legs.length > 0) {
+    for (const l of legs) {
+      if (ts >= l.startTime && prevTs <= l.endTime) return true;
+    }
+    return false;
+  }
+  return ts >= activeTrip.activeStartTime && prevTs <= activeTrip.activeEndTime;
 }
 
 // Общий payload для обоих share-GET-роутов (sessions/[id]/share и /api/share)
@@ -88,7 +102,12 @@ export async function sharePayload(sessionId: string, expiresAt: number, request
     for (let i = 1; i < points.length; i++) {
       const d = haversineM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
       rawDistanceM += d;
-      if (hasActiveTrip && points[i].timestamp >= active.activeStartTime && points[i - 1].timestamp <= active.activeEndTime) {
+      // v2.31.0 (MAJ-9): гейтинг по LEGS (§4.11), как в session-stats
+      // (intervalInActiveLegs). Раньше — по SPAN (activeStartTime…activeEndTime):
+      // для мульти-поездочных записей долгая парковка между поездками
+      // попадала в «активную» дистанцию — гибрид «span-дистанция /
+      // legs-длительность» расходился с приложением и каноном §4.2.
+      if (hasActiveTrip && shareIntervalInActiveLegs(active, points[i - 1].timestamp, points[i].timestamp)) {
         distanceM += d;
       }
     }

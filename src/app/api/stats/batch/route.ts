@@ -96,6 +96,10 @@ export async function GET(request: NextRequest) {
 
     // ——— corpus-калибровка EcoScore — ОДНА на весь батч (кэш 5 мин);
     // нужна только если есть live-пересчёт ———
+    // v2.31.0 (MIN-12, известный батч-паритет): свежие кэши отдаются с базлайнами
+    // МОМЕНТА записи, live-пересчёт — с текущими. После рекалибровки корпуса
+    // (изменение ECO_SCORE_CAP_BASELINE / рост корпуса) — поднять
+    // SESSION_CACHE_VERSION в session-cache.ts: все кэши пересчитаются on-demand.
     const ecoBaselines = staleIds.length > 0 ? await getCorpusEcoBaselines() : undefined;
 
     // ——— 1 запрос TrafficJob: план-факт всех сессий сразу (живой, НЕ из кэша:

@@ -138,7 +138,9 @@ export function AnalyticsView({ period, sessionId }: Props) {
           <div className="card" style={{ padding: "28px 20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
             За период «{PERIOD_LABELS[period]}» поездок нет.
             <br />
-            Выберите другой период или конкретную поездку в фильтре «Все поездки · период».
+            {/* v2.31.0 (MAJ-11): фильтр листает ЗАПИСИ (сессии) — честное слово,
+                «поездка» остаётся за вкладкой «Поездки» (серверные Trip) */}
+            Выберите другой период или конкретную запись в фильтре «Все записи · период».
           </div>
           <HeavySegmentsBlock data={heavy.data} isLoading={heavy.isLoading} />
           <RoutesBlock groups={groups.data} />
@@ -360,7 +362,9 @@ function SessionHeader({
     return (
       <div className="session">
         <div className="session-top">
-          <span className="s-lab">поездка</span>
+          {/* v2.31.0 (MAJ-11): запись = Session; «поездка» — термин вкладки
+              «Поездки» (серверные Trip, 15-мин склейка) */}
+          <span className="s-lab">запись</span>
           <b>загрузка…</b>
           <span>{source ?? "сессия"}</span>
           <span className="muted">· ожидание данных статистики</span>
@@ -402,7 +406,7 @@ function SessionHeader({
   return (
     <div className="session">
       <div className="session-top">
-        <span className="s-lab">поездка</span>
+        <span className="s-lab">запись</span>
         <b>
           {dateStr} · {timeStr}
         </b>
@@ -438,7 +442,7 @@ function SessionHeader({
         <i
           className="ml-move"
           style={{ width: `${movePct}%` }}
-          data-tip={`В движении | ${fmtInt(moveMin)} мин — всё время со скоростью выше 2 км/ч`}
+          data-tip={`В движении | ${fmtInt(moveMin)} мин — всё время в движении: старт — от 5 км/ч, остановка — ниже 2 км/ч`}
         />
         <i
           className="ml-idle"
@@ -488,7 +492,8 @@ function KpiBlock({
   // FIX-C1: средняя — из API (активная дистанция / активное время, §4.3+§4.11).
   // Раньше пересчитывалась локально как вся дистанция / вся длительность —
   // расходилась с карточкой сессии и занижалась стоянками-хвостами.
-  const avgKmh = stats ? (stats.avgSpeed != null ? msToKmh(stats.avgSpeed) ?? 0 : 0) : 0;
+  // v2.31.0 (MIN-15б): avgSpeed=null (нет дистанции) — «—», а не «0,0 км/ч»
+  const avgKmh = stats?.avgSpeed != null ? msToKmh(stats.avgSpeed) : null;
   const maxKmh = stats ? msToKmh(stats.maxSpeed) ?? 0 : 0;
   const moveMin = stats ? secToMin(stats.movingTime) : 0;
   const idleMin = stats ? secToMin(stats.idleTime) : 0;
@@ -547,7 +552,7 @@ function KpiBlock({
         <KpiCard
           label="Средняя скорость"
           tip="Средняя скорость | Путь, поделённый на время в поездке | Больше — лучше"
-          value={stats ? fmtNum(avgKmh, 1) : "—"}
+          value={avgKmh != null ? fmtNum(avgKmh, 1) : "—"}
           unit="км/ч"
           trend={["—", "neu"]}
           sparkData={sparkData}
@@ -575,7 +580,7 @@ function KpiBlock({
         />
         <KpiCard
           label="В движении"
-          tip="Время в движении | Всё время со скоростью выше 2 км/ч | Движение + стоянки + разрывы = длительность записи"
+          tip="Время в движении | Всё время в движении: старт — от 5 км/ч, остановка — ниже 2 км/ч | Движение + стоянки + разрывы = длительность записи"
           value={stats ? fmtDurMin(moveMin) : "—"}
           unit=""
           trend={["—", "neu"]}
@@ -678,13 +683,17 @@ function DrivingScoreBlock({
   events: EventsResponse | null | undefined;
   aggregated?: boolean;
 }) {
-  void aggregated; // v2.13.0 (Ф4): aggregated теперь используется (planTrips) — строка оставлена как маркер режима
+  void aggregated; // v2.13.0 (Ф4): aggregated теперь используется (planTrips/planActualDurationSec) — строка оставлена как маркер режима
   // Canonical CAP value + breakdown from stats.methodology.ecoScore.
   // /stats endpoint computes EcoScore with corpus-calibrated baselines (median of
   // all sessions + 1.2x margin for small corpus per §7.3). Fallback to count-based
   // formula only when stats not available.
-  const hb = events?.summary?.harshBraking ?? 0;
-  const ha = events?.summary?.harshAcceleration ?? 0;
+  // v2.31.0 (MAJ-5): счётчики резких событий — из methodology-конвейера
+  // (§7.1/§7.2: смежные интервалы + медиана-3), как в бейдже вкладки «Поездки»;
+  // events-сводка — только fallback. Раньше блок 02 и бейдж «Поездок» считали
+  // разными конвейерами и расходились в цифрах на одном экране.
+  const hb = stats?.methodology?.harshBrakingCount ?? events?.summary?.harshBraking ?? 0;
+  const ha = stats?.methodology?.harshAccelCount ?? events?.summary?.harshAcceleration ?? 0;
   const mn = events?.summary?.maneuvers ?? 0;
   const ecoBreakdown = stats?.methodology?.ecoScore?.breakdown;
   // Simplify baseline version label for UI (was "corpus-median-8-margin1.2").
@@ -738,11 +747,16 @@ function DrivingScoreBlock({
   const planDurationSec = stats?.route?.planDurationSec;
   // FIX-C2: факт = ActiveDuration (§6.2) — подпись строки «активной поездки» теперь
   // соответствует расчёту; стоянка-хвост до старта не занижает экономию к плану.
+  // v2.31.0 (MAJ-4): в период-режиме факт = Σ активных только записей с СОПОСТАВИМЫМ
+  // планом (route.planActualDurationSec из агрегата) — числитель и знаменатель
+  // одной популяции, записи без плана не завышают «+N мин/поездку».
   const activeTrip = stats?.methodology?.activeTrip;
   const actualDuration =
-    activeTrip?.hasActiveTrip && activeTrip.activeDuration > 0
-      ? activeTrip.activeDuration
-      : stats?.duration;
+    aggregated && stats?.route?.planActualDurationSec != null && stats.route.planActualDurationSec > 0
+      ? stats.route.planActualDurationSec
+      : activeTrip?.hasActiveTrip && activeTrip.activeDuration > 0
+        ? activeTrip.activeDuration
+        : stats?.duration;
   // v2.13.0 (Ф4): §6.3 TimeSavingIndex — среднее НА ПОЕЗДКУ. В период-режиме делим
   // на число записей с планом (planTripCount из агрегата; нулевые планы 2ГИС не
   // считаются). Раньше подпись «мин/поездку» показывала НЕДЕЛЁННУЮ сумму (−39,7).
@@ -802,7 +816,7 @@ function DrivingScoreBlock({
         {/* === Виджет 1: Плавность · EcoScore (v2.21.0: bullet chart) === */}
         <BulletChart
           title="Плавность · EcoScore"
-          helpTip="Оценка плавности вождения: 0–100 | Балл снижается за резкие торможения (вес 45%), разгоны (30%) и рывки (25%) | Сравнение — с вашими же обычными поездками по этому же маршруту | Зоны: 80+ плавно · 60–79 умеренно · ниже 60 агрессивный стиль"
+          helpTip="Оценка плавности вождения: 0–100 | Балл снижается за резкие торможения (вес 45%), разгоны (30%) и рывки (25%) | Сравнение — с обычными поездками всех пользователей сервиса (медианный корпус) | Зоны: 80+ плавно · 60–79 умеренно · ниже 60 агрессивный стиль"
           bigValue={String(ecoScore)}
           bigValueSuffix="/ 100"
           bandText={z.band}
@@ -895,7 +909,7 @@ function DrivingScoreBlock({
               Шкала bullet: −5…+5 мин/поездку, целевой маркер — 0 (план). Полоса-мера идёт от 0 влево —
               экономия (слива), вправо — перерасход (алый). Отклонение = (ActiveDuration − PlanDuration)/60 — стоянки-«хвосты» записи не учитываются.
               {aggregated && hasPlan && planTrips > 1 && effTotalMin != null
-                ? ` За период — среднее на поездку: Σ отклонение ${(effTotalMin > 0 ? "+" : "−") + Math.abs(effTotalMin).toFixed(1).replace(".", ",")} мин делится на ${planTrips} ${pluralRu(planTrips, ["поездку", "поездки", "поездок"])} с планом.`
+                ? ` За период — среднее на поездку: Σ отклонений записей с сопоставимым планом ${(effTotalMin > 0 ? "+" : "−") + Math.abs(effTotalMin).toFixed(1).replace(".", ",")} мин делится на ${planTrips} ${pluralRu(planTrips, ["поездку", "поездки", "поездок"])} с планом.`
                 : ""}
               {!hasPlan && planNotComparable
                 ? ` Маршрут плана не покрывает фактическую дистанцию записи${planCoveragePct != null ? ` — покрытие ${planCoveragePct}%` : ""}: сравнение времени с планом для такой записи не имеет смысла.`
@@ -981,47 +995,30 @@ function SpeedProfileBlock({
     return counts.map((c) => Math.round((c / total) * 1000) / 10);
   }, [stats]);
 
-  // 5 stats from speedProfile (or fallback to methodology).
+  // v2.31.0 (MAJ-6): 5 скоростных статов — из methodology-конвейера (§5.1–§5.6:
+  // state machine, гейтинг по активной части, все активные точки), как в блоке 07.
+  // Раньше блок 03 пересчитывал их по ≤240/≤720 сэмплам спидограммы (только
+  // «движущиеся» сэмплы, st-флаг 2 км/ч) — одноимённые метрики на одном экране
+  // (блок 03 и блок 07) давали разные числа. speedP50/speedStdDev — м/с → км/ч;
+  // speedVariation (§5.6) — СЧЁТНИК перепадов |Δv|>10 км/ч за ≤10 с, а не std/mean.
   const sp = React.useMemo(() => {
-    if (!stats?.speedProfile || stats.speedProfile.length === 0) {
-      return { p50: "—", std: "—", vr: "—", jam: "0 мин", cruise: "0 мин" };
-    }
-    const vs = stats.speedProfile
-      .filter((p) => p.v != null && p.v >= 0 && p.st !== 0)
-      .map((p) => p.v as number);
-    if (vs.length === 0) {
-      return { p50: "—", std: "—", vr: "—", jam: "0 мин", cruise: "0 мин" };
-    }
-    const sorted = [...vs].sort((a, b) => a - b);
-    const p50 = sorted[Math.floor(sorted.length / 2)] ?? sorted[0];
-    const mean = vs.reduce((s, v) => s + v, 0) / vs.length;
-    const variance = vs.reduce((s, v) => s + (v - mean) ** 2, 0) / vs.length;
-    const std = Math.sqrt(variance);
-    const vr = mean > 0 ? std / mean : 0;
-
-    // Time in traffic: sum dt where 0 < v < 10 km/h and st == 1
-    // Time at cruise: sum dt where v > 60 km/h and st == 1
-    let jamSec = 0;
-    let cruiseSec = 0;
-    for (let i = 1; i < stats.speedProfile.length; i++) {
-      const prev = stats.speedProfile[i - 1];
-      const curr = stats.speedProfile[i];
-      if (curr.t == null || prev.t == null) continue;
-      const dt = curr.t - prev.t;
-      if (dt <= 0 || dt > 30) continue;
-      if (curr.st === 1 && curr.v != null && curr.v > 0 && curr.v < 10) jamSec += dt;
-      if (curr.st === 1 && curr.v != null && curr.v > 60) cruiseSec += dt;
-    }
-    const jamMin = jamSec / 60;
-    const cruiseMin = cruiseSec / 60;
-    const jamPct = stats.duration > 0 ? (jamSec / stats.duration) * 100 : 0;
-    const cruisePct = stats.duration > 0 ? (cruiseSec / stats.duration) * 100 : 0;
+    const m = stats?.methodology;
+    const p50Kmh = msToKmh(m?.speedP50 ?? null);
+    const stdKmh = msToKmh(m?.speedStdDev ?? null);
+    const vrCount = m?.speedVariation;
+    const jamSec = m?.timeInTraffic;
+    const cruiseSec = m?.timeAtCruise;
+    const at = m?.activeTrip;
+    const activeSec =
+      at?.hasActiveTrip && at.activeDuration > 0 ? at.activeDuration : (stats?.duration ?? 0);
+    const sharePct = (sec: number | null) =>
+      activeSec > 0 && sec != null ? Math.round((sec / activeSec) * 100) : 0;
     return {
-      p50: fmtNum(p50, 0),
-      std: fmtNum(std, 0),
-      vr: fmtNum(vr, 2),
-      jam: `${fmtInt(jamMin)} мин · ${fmtInt(jamPct)}%`,
-      cruise: `${fmtInt(cruiseMin)} мин · ${fmtInt(cruisePct)}%`,
+      p50: p50Kmh != null ? fmtNum(p50Kmh, 0) : "—",
+      std: stdKmh != null ? fmtNum(stdKmh, 0) : "—",
+      vr: vrCount != null ? fmtInt(vrCount) : "—",
+      jam: jamSec != null ? `${fmtInt(jamSec / 60)} мин · ${sharePct(jamSec)}%` : "—",
+      cruise: cruiseSec != null ? `${fmtInt(cruiseSec / 60)} мин · ${sharePct(cruiseSec)}%` : "—",
     };
   }, [stats]);
 
@@ -1099,7 +1096,7 @@ function SpeedProfileBlock({
         <div className="stats-grid">
           <Stat
             value={`${sp.p50} км/ч`}
-            tip="Медианная скорость | Половину времени в движении вы ехали быстрее этого значения | Не искажается редкими ошибками GPS, в отличие от среднего"
+            tip="Медианная скорость | Половину времени в поездке вы ехали быстрее этого значения | Не искажается редкими ошибками GPS, в отличие от среднего"
             label="Медиана скорости"
           />
           <Stat
@@ -1107,21 +1104,22 @@ function SpeedProfileBlock({
             tip="Разброс скорости | Насколько скорость «прыгает» вверх-вниз | Меньше — ровнее езда"
             label="Разброс скорости"
           />
+          {/* v2.31.0 (MAJ-6): §5.6 — счётчик перепадов, а не std/mean */}
           <Stat
             value={sp.vr}
-            tip="Перепады скорости | Разброс относительно вашей средней скорости | 0 — идеально ровно · выше 1 — рваный ритм"
+            tip="Перепады скорости | Сколько раз скорость менялась сильнее 10 км/ч за короткое время | Меньше — ровнее ритм"
             label="Перепады скорости"
           />
           <Stat
             value={sp.jam}
             cls="c-red"
-            tip="Время в пробках | Движение медленнее 10 км/ч | Стоянки не учитываются"
+            tip="Время в пробках | Движение со скоростью ниже 10 км/ч в поездке | Стоянки не учитываются"
             label="Время в пробках"
           />
           <Stat
             value={sp.cruise}
             cls="c-plum"
-            tip="Крейсерский ход | Доля времени на скорости выше 60 км/ч — загородные и магистральные участки"
+            tip="Крейсерский ход | Доля времени поездки на скорости выше 60 км/ч — загородные и магистральные участки"
             label="Крейсерский ход"
           />
         </div>
@@ -1178,11 +1176,16 @@ function PlanFactBlock({
   // как в gauge «Эффективность», в API computePlanFact и в tooltip §6.3, который
   // и раньше обещал «факт — активная поездка». Раньше hero «+105 мин» (полная
   // запись со стоянками) противоречил «−39,7 мин» (активная) на одном экране.
+  // v2.31.0 (MAJ-4): в период-режиме факт = Σ активных только записей с
+  // сопоставимым планом (route.planActualDurationSec) — популяции числителя
+  // и знаменателя план-факта совпадают (§6.3).
   const pfActiveTrip = stats?.methodology?.activeTrip;
   const actualDurSec =
-    pfActiveTrip?.hasActiveTrip && pfActiveTrip.activeDuration > 0
-      ? pfActiveTrip.activeDuration
-      : (stats?.duration ?? 0);
+    aggregated && route?.planActualDurationSec != null && route.planActualDurationSec > 0
+      ? route.planActualDurationSec
+      : pfActiveTrip?.hasActiveTrip && pfActiveTrip.activeDuration > 0
+        ? pfActiveTrip.activeDuration
+        : (stats?.duration ?? 0);
   const planDurSec = route?.planDurationSec ?? null;
   // v2.25.0 (П.5): план не сопоставим (покрытие < 50% фактической дистанции) —
   // отклонения по времени/дистанции не показываем: «план не сопоставим с поездкой».
@@ -1528,16 +1531,23 @@ function BehaviorBlock({
   aggregated?: boolean;
 }) {
   void aggregated; // события в период-режиме — суммы по всем поездкам
-  const hb = events?.summary?.harshBraking ?? 0;
-  const ha = events?.summary?.harshAcceleration ?? 0;
-  const hscCount = events?.summary?.hscCount ?? 0;
+  // v2.31.0 (MAJ-5): счётчики и RMS — из methodology-конвейера (§7.1–§7.5:
+  // смежные интервалы, медиана-3, dt-взвешенный RMS) — тот же источник, что
+  // бейдж EcoScore во вкладке «Поездки» и блок 02. Раньше блок 06 брал их из
+  // events-конвейера (центральная разность ±2 точки, простой RMS) — счётчики
+  // расходились между вкладками. G-G-диаграмма/карта остаются на events
+  // (визуализация событий), числа — одной методологии.
+  const mStats = stats?.methodology;
+  const hb = mStats?.harshBrakingCount ?? events?.summary?.harshBraking ?? 0;
+  const ha = mStats?.harshAccelCount ?? events?.summary?.harshAcceleration ?? 0;
+  const hscCount = mStats?.highSpeedCornering ?? events?.summary?.hscCount ?? 0;
   const maneuversCount = events?.summary?.maneuvers ?? 0;
-  const accelRMS = events?.summary?.accelerationRMS ?? 0;
-  const jerkRMS = events?.summary?.jerkRMS ?? 0;
-  const uniformity = React.useMemo(() => {
-    const v = 1 - accelRMS / 10;
-    return Math.max(0, Math.min(1, v));
-  }, [accelRMS]);
+  const accelRMS = mStats?.accelerationRms ?? events?.summary?.accelerationRMS ?? 0;
+  const jerkRMS = mStats?.jerkRms ?? events?.summary?.jerkRMS ?? 0;
+  // v2.31.0 (MAJ-8): «Равномерность» = SpeedConsistencyIndex §7.6 из методологии
+  // (1 − σ/μ скорости) — ровно то, что обещает подпись «насколько ровно держите
+  // скорость». Раньше 1 − accelRMS/10 — самодельная формула не про ровность хода.
+  const uniformity = mStats?.speedConsistencyIndex ?? null;
 
   const ggPointsCount = events?.gg?.points?.length ?? 0;
 
@@ -1559,15 +1569,17 @@ function BehaviorBlock({
             Диаграмма манёвров
             <span
               className="help"
-              data-tip="Диаграмма манёвров | Каждая точка — один манёвр: по горизонтали боковое ускорение (повороты), по вертикали продольное (разгон — вверх, торможение — вниз) | Точки внутри пунктирного круга (0,4g) — плавная езда | Алые кольца — резкие торможения и разгоны"
+              data-tip="Диаграмма манёвров | Каждая точка — один манёвр: по горизонтали боковое ускорение (повороты), по вертикали продольное (разгон — вверх, торможение — вниз) | Точки внутри сплошного круга 0,2g — плавная езда | Алые кольца — резкие события: сильнее 0,28g (10 км/ч за секунду) | Пунктир 0,4g — граница очень энергичных манёвров"
             >
               ?
             </span>
           </div>
           <GgDiagram events={events} />
           <div className="gg-legend">
+            {/* v2.31.0 (MIN-18): честная легенда — резкий порог 0,28g, а не 0,4g;
+                кольца на диаграмме — события events-конвейера (визуализация) */}
             {events
-              ? `${fmtInt(ggPointsCount)} ${pluralRu(ggPointsCount, ["манёвр", "манёвра", "манёвров"])} · ${fmtInt(hb + ha)} ${pluralRu(hb + ha, ["резкий", "резких", "резких"])} (алые кольца) · пунктир — граница 0,4g`
+              ? `${fmtInt(ggPointsCount)} ${pluralRu(ggPointsCount, ["манёвр", "манёвра", "манёвров"])} · ${fmtInt(hb + ha)} ${pluralRu(hb + ha, ["резкий", "резких", "резких"])} (порог 0,28g) · пунктир — 0,4g`
               : "загрузка…"}
           </div>
         </div>
@@ -1619,8 +1631,8 @@ function BehaviorBlock({
               />
               <Stat
                 value={fmtNum(uniformity, 2)}
-                cls={uniformity > 0.8 ? "c-plum" : uniformity > 0.4 ? "c-amber" : "c-red"}
-                tip="Равномерность | Насколько ровно вы держите скорость | Выше 0,8 — ровно · 0,4–0,8 — средне · ниже 0,4 — рвано"
+                cls={uniformity == null ? "c-faint" : uniformity > 0.8 ? "c-plum" : uniformity > 0.4 ? "c-amber" : "c-red"}
+                tip="Равномерность хода | Насколько ровно вы держите скорость (индекс §7.6) | Выше 0,8 — ровно · 0,4–0,8 — средне · ниже 0,4 — рвано"
                 label="Равномерность"
               />
             </div>
@@ -1776,48 +1788,59 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
     );
   }
   const m = stats.methodology;
-  const moveSec = m.movingTime;
-  const idleSec = m.idleTime;
-  const jamSec = m.timeInTraffic; // §5.4: <10 км/ч
-  const cruiseSec = m.timeAtCruise; // §5.5: >60 км/ч
+  const at = m.activeTrip;
+  // v2.31.0 (NIT-4): jbar — разложение АКТИВНОЙ ЧАСТИ (§4.11: activeDuration =
+  // Σ legs), а не всей записи: раньше знаменатель move+idle включал хвосты до
+  // старта/после финиша, а тултип обещал «мин в поездке». Составляющие:
+  // стоянки в поездке = activeIdleTime (светофоры/пробки), движение в поездке ≈
+  // activeDuration − активные стоянки. Legacy-ответы без activeTrip — старая
+  // семантика (move+idle), подпись «активная часть записи».
+  const activeDurSec =
+    at?.hasActiveTrip && at.activeDuration > 0 ? at.activeDuration : m.movingTime + m.idleTime;
+  const idleSec = at?.hasActiveTrip ? (at.activeIdleTime ?? 0) : m.idleTime; // стоянки ВНУТРИ поездки
+  const moveSec = Math.max(0, activeDurSec - idleSec); // движение в поездке (≈)
+  const jamSec = m.timeInTraffic; // §5.4: <10 км/ч в состоянии moving — внутри legs
   const moveNoJamSec = Math.max(0, moveSec - jamSec);
-  const totalActive = Math.max(1, moveSec + idleSec);
+  const totalActive = Math.max(1, activeDurSec);
   const movePct = (moveNoJamSec / totalActive) * 100;
   const jamPct = (jamSec / totalActive) * 100;
   const idlePct = (idleSec / totalActive) * 100;
   const jamMin = jamSec / 60;
-  const cruiseMin = cruiseSec / 60;
   const moveNoJamMin = moveNoJamSec / 60;
   const idleMin = idleSec / 60;
 
-  // §9.5 TimeInCongestion: timeLostToTrafficSec из 2ГИС (если есть) иначе fallback на jamSec
-  const timeLostSec = stats.route?.timeLostToTrafficSec ?? jamSec;
-  const timeLostMin = timeLostSec / 60;
+  // §9.5 TimeInCongestion: при данных 2ГИС — их оценка потерь (в т.ч. 0 =
+  // «пробок не было»); без 2ГИС — грубая оценка jamMin/2.
+  // v2.31.0 (MIN-17): ветки значения и подписи — СИНХРОННЫЕ: раньше при
+  // trafficFetched=true с timeLost≤0 значение показывало jamMin/2, а подпись
+  // утверждала «на столько пробки удлинили поездку» (без 2ГИС — наоборот).
   const trafficFetched = !!stats.route?.trafficFetched;
+  const timeLostSec = trafficFetched ? (stats.route?.timeLostToTrafficSec ?? 0) : null;
+  const congMinVal = trafficFetched ? (timeLostSec ?? 0) / 60 : jamMin / 2;
 
   // §9.3 TrafficSeverity: фактическая/плановая скорость (1.0 = свободно, 0.5 = пробка)
+  // v2.31.0 (MIN-5): факт = дистанция/активная длительность (конвенция FIX-C1),
+  // а не вся длительность записи — хвосты-стоянки занижали индекс загруженности
   const planSpeedKmh = stats.route?.planDistanceM && stats.route?.planDurationSec && stats.route.planDurationSec > 0
     ? (stats.route.planDistanceM / stats.route.planDurationSec) * 3.6
     : 40;
-  const actualAvgKmh = stats.distance > 0 && stats.duration > 0
-    ? (stats.distance / stats.duration) * 3.6
+  const actualAvgKmh = stats.distance > 0 && activeDurSec > 0
+    ? (stats.distance / activeDurSec) * 3.6
     : 0;
   const trafficSeverity = planSpeedKmh > 0 ? Math.max(0, Math.min(1, actualAvgKmh / planSpeedKmh)) : null;
 
   // §9.2 AvgTrafficSpeed: средняя по сегментам с пробками — у нас p50 (медиана) ближе всего.
-  const avgTrafficSpeed = m.speedP50 ?? actualAvgKmh;
+  // v2.31.0 (MAJ-2): speedP50 — м/с (§5.1) → ×3,6 в км/ч. Раньше м/с подписывались
+  // «км/ч» — медиана занижалась в 3,6 раза (12 м/с показывались как «12,3 км/ч»)
+  const avgTrafficSpeed = msToKmh(m.speedP50 ?? null) ?? actualAvgKmh;
 
   // §9.4 CongestedSegments: доля точек в бакетах 0-20 + 20-40 (медленные)
   const dist = m.speedDistribution ?? [];
   const congestedPct = ((dist[0] ?? 0) + (dist[1] ?? 0));
-  const totalSegments = 6; // всего бакетов
 
-  // Покрытие данными: trafficFetched ? "100%" : "0 / 6" (нет данных 2ГИС)
-  const coverageFetched = trafficFetched ? totalSegments : 0;
-  const coverageText = `${coverageFetched} / ${totalSegments}`;
-
-  // §9.5 значение — используем timeLost (если есть) или jam/2 как approximation
-  const congMinVal = timeLostSec > 0 ? timeLostMin : jamMin / 2;
+  // v2.31.0 (MIN-6): тайл «Покрытие данными N/6» удалён — фиктивная метрика
+  // (знаменатель 6 — число скоростных бакетов, а не сегментов с трафиком,
+  // §9.1 про другое). Наличие 2ГИС уже честно показывает sec-sub.
 
   return (
     <section>
@@ -1825,7 +1848,7 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
         <span className="sec-num">07</span>
         <span className="sec-title">Пробки и заторы</span>
         <span className="sec-sub">
-          активная часть · {fmtInt((moveSec + idleSec) / 60)} мин ·{" "}
+          активная часть · {fmtInt(activeDurSec / 60)} мин ·{" "}
           {trafficFetched ? `данные 2ГИС учтены` : "по скорости GPS"}
         </span>
       </div>
@@ -1834,7 +1857,7 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
           <div
             className="jb jb-move"
             style={{ width: `${movePct}%` }}
-            data-tip={`Движение вне пробок | ${fmtInt(moveNoJamMin)} мин из ${fmtInt((moveSec + idleSec) / 60)} мин в поездке`}
+            data-tip={`Движение вне пробок | ${fmtInt(moveNoJamMin)} мин из ${fmtInt(activeDurSec / 60)} мин в поездке`}
           />
           <div
             className="jb jb-jam"
@@ -1844,7 +1867,7 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
           <div
             className="jb jb-idle"
             style={{ width: `${idlePct}%` }}
-            data-tip={`Остановки в поездке | ${fmtInt(idleMin)} мин — светофоры, ожидание, парковка`}
+            data-tip={`Остановки в поездке | ${fmtInt(idleMin)} мин — светофоры и ожидание внутри поездки, без пауз до старта и после финиша`}
           />
         </div>
         <div className="jbar-leg">
@@ -1865,7 +1888,9 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
           <Stat
             value={`${fmtInt(congMinVal)} мин`}
             cls="c-red"
-            tip={`Время в заторах | ${trafficFetched ? `${fmtInt(timeLostMin)} мин — на столько пробки удлинили поездку` : `примерно ${fmtInt(jamMin / 2)} мин — оценка по медленным участкам`} | Учитываются участки, где скорость ниже половины плановой`}
+            tip={trafficFetched
+              ? `Время в заторах | ${(timeLostSec ?? 0) / 60 >= 0.05 ? `${fmtInt((timeLostSec ?? 0) / 60)} мин — на столько пробки удлинили поездку (по данным 2ГИС)` : "0 мин — по данным 2ГИС пробки поездку не удлинили"}`
+              : `Время в заторах | примерно ${fmtInt(jamMin / 2)} мин — оценка по медленным участкам GPS | Данных о пробках 2ГИС для маршрута нет`}
             label="Время в заторах"
           />
           <Stat
@@ -1882,14 +1907,8 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
           <Stat
             value={fmtNum(congestedPct, 1) + "%"}
             cls={congestedPct > 30 ? "c-red" : congestedPct > 15 ? "c-amber" : "c-plum"}
-            tip="Доля медленных участков | Процент точек на скорости 0–40 км/ч | Больше процент — больше медленного движения"
+            tip="Доля медленных участков | Процент точек активной части на скорости 0–40 км/ч | Больше процент — больше медленного движения"
             label="Перегруж. сегменты"
-          />
-          <Stat
-            value={coverageText}
-            cls={trafficFetched ? "c-plum" : "c-amber"}
-            tip={`Покрытие данными о пробках | Насколько маршрут покрыт данными о дорожной обстановке | ${trafficFetched ? "данные о пробках получены" : "данных о пробках нет — расчёт только по вашей GPS-скорости"}`}
-            label="Покрытие данными"
           />
         </div>
       </div>
@@ -2525,14 +2544,29 @@ function RouteTrendSvg({ trend }: { trend: RouteTrendData }) {
 
 // === Блок 11: Качество данных (LIVE v2.10.1) ===
 // Источник: stats.methodology.* — все 4 метрики качества (§11.1–§11.6).
+// v2.31.0: подписи рейтинга надёжности — русские (high→«высокая» и т.д.);
+// в период-режиме рейтинг считается от среднего value по порогам §11.6
+// (раньше туда попадал eco-рейтинг «плавно/умеренно»).
+const REL_RATING_RU: Record<string, string> = {
+  high: "высокая",
+  medium: "средняя",
+  low: "низкая",
+  unreliable: "ненадёжная",
+  insufficient_data: "недостаточно данных",
+};
 function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats | null | undefined; aggregated?: boolean }) {
   void aggregated; // качество данных в период-режиме — средние по поездкам
   // v2.10.1: Все значения из live API; fallback только при отсутствии stats (загрузка).
   const completeness = stats?.methodology?.completenessScore ?? null;
   const reliability = stats?.methodology?.sessionReliability;
-  const reliabilityLabel = reliability?.rating ?? "—";
+  const reliabilityLabel = reliability?.rating ? (REL_RATING_RU[reliability.rating] ?? reliability.rating) : "—";
   const reliabilityCls = (reliability?.value ?? 0) >= 0.85 ? "c-plum" : (reliability?.value ?? 0) >= 0.5 ? "c-amber" : "c-red";
-  const pointDensity = stats?.methodology?.pointDensity ?? null;
+  // v2.31.0 (MAJ-3): единая единица — точек/СЕК. Методология (§11.1) считает
+  // точек/МИН (60 при 1 Гц) — в одиночном режиме делим на 60; период-агрегат
+  // (v4-hooks) уже считает точек/сек. Раньше одиночная запись показывала
+  // «60,0/с» (завышение в 60 раз) при той же подписи, что и период.
+  const pointDensityRaw = stats?.methodology?.pointDensity ?? null;
+  const pointDensityPerSec = aggregated ? pointDensityRaw : pointDensityRaw != null ? pointDensityRaw / 60 : null;
   const gapCount = stats?.methodology?.gapCount ?? 0;
   const gapTotalSec = (stats?.methodology?.gapTotalDurationMs ?? 0) / 1000;
   const accuracyP90 = stats?.methodology?.accuracyP90 ?? null;
@@ -2558,7 +2592,7 @@ function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats |
       <summary>
         <span className="sec-num">11</span>Качество данных
         <span className="acc-badge">
-          надёжность: {reliability ? reliability.rating : "—"}
+          надёжность: {reliability ? (REL_RATING_RU[reliability.rating] ?? reliability.rating) : "—"}
         </span>
         <i className="chev">›</i>
       </summary>
@@ -2584,9 +2618,9 @@ function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats |
             label="Надёжность записи"
           />
           <Stat
-            value={pointDensity != null ? `${fmtNum(pointDensity, 1)}/с` : "—"}
-            cls={pointDensity == null ? "c-faint" : pointDensity >= 1 ? "c-plum" : pointDensity >= 0.5 ? "c-amber" : "c-red"}
-            tip="Плотность точек | Сколько точек GPS приходится на секунду движения | Выше 1/с — достаточно для анализа манёвров"
+            value={pointDensityPerSec != null ? `${fmtNum(pointDensityPerSec, 1)}/с` : "—"}
+            cls={pointDensityPerSec == null ? "c-faint" : pointDensityPerSec >= 1 ? "c-plum" : pointDensityPerSec >= 0.5 ? "c-amber" : "c-red"}
+            tip="Плотность точек | Сколько точек GPS приходится на секунду записи | Выше 1/с — достаточно для анализа манёвров (1 Гц — норма для телефона)"
             label="Плотность точек"
           />
           <Stat

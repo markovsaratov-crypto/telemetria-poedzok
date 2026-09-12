@@ -102,17 +102,9 @@ export function fmtNumber(n?: number | null, digits = 0): string {
   }).format(n);
 }
 
-// Средняя скорость по точкам (м/с → км/ч)
-export function avgSpeed(
-  points: Array<{ speed?: number | null; timestamp?: number }>
-): number | null {
-  const withSpeed = points.filter(
-    (p) => typeof p.speed === "number" && p.speed > 0
-  );
-  if (withSpeed.length === 0) return null;
-  const sum = withSpeed.reduce((acc, p) => acc + (p.speed as number), 0);
-  return Math.round((sum / withSpeed.length) * 3.6 * 10) / 10; // м/с → км/ч
-}
+// v2.31.0 (NIT-1): avgSpeed (mean-of-points, м/с → км/ч) удалён — 0 потребителей
+// и ловушка дрейфа от §4.3 (средняя = Σдистанции/Σактивного времени, не среднее
+// по точкам); все поверхности считают её на сервере или из stats.avgSpeed.
 
 // P2-14: канонический гаверсинус и длина трека — в src/lib/geo.ts
 // (было 6 идентичных копий; пере-экспорт из format удалён — 0 потребителей).

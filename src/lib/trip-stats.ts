@@ -294,7 +294,13 @@ export async function computeTripStats(
     interFragmentGapSec: trip.interFragmentGapSec ?? 0,
     movingTime: p.movingTime,
     idleTime: p.idleTime,
-    gapTime: p.gapTime,
+    // v2.31.0 (MIN-10): gapTime — только ВНУТРЕННИЕ разрывы записей состава
+    // (dt>30c внутри фрагментов). На конкатенированном потоке стейт-машина
+    // засчитывает и межфрагментные паузы (>30c) — те же минуты показывались
+    // одновременно в тайлах «Паузы между записями» и «Разрывы». Вычитаем
+    // interFragmentGapSec (учёт совпадает: обе стороны — полная длительность
+    // паузы; clamp — на случай паузы <30c, которую стейт-машина гэпом не считает).
+    gapTime: Math.max(0, (round1(p.gapTime) ?? 0) - (trip.interFragmentGapSec ?? 0)),
     internalStopTimeSec: round1(p.methodology?.activeTrip?.internalStopTime ?? 0) ?? 0,
     avgSpeed: p.avgSpeed,
     maxSpeed: p.maxSpeed,

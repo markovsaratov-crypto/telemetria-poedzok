@@ -5,7 +5,7 @@ PWA-платформа записи и анализа телеметрии ав�
 - **Продакшен:** https://poedzok.fun (origin — `telemetria-poedzok.onrender.com`, CDN TurboFlare — см. `docs/CUSTOM_DOMAIN.md`)
 - **Health:** `GET /health` (отдаёт версию из `package.json`)
 - **Развёртывание:** push в `main` → Render autoDeploy (см. `render.yaml`)
-- **Текущая версия:** 2.29.0 (см. `package.json` / `render.yaml`)
+- **Текущая версия:** 2.30.1 (см. `package.json` / `render.yaml`)
 - **Бекап БД:** еженедельный приватный draft-релиз `backup-*` (последний — `backup-v2.29.0`); восстановление — `POST /api/admin/restore` (см. `docs/TECHNICAL.md` §14)
 
 ## Документация — где лежит

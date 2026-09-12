@@ -3,7 +3,7 @@
 **Продукт:** Телемат (ранее «Телеметрия Поездки» / Telemetria Poedzok) — PWA-платформа записи и анализа телеметрии автомобильных поездок.
 **Продакшен:** https://poedzok.fun (пользовательский домен через TurboFlare CDN; origin — https://telemetria-poedzok.onrender.com, ранбук — `docs/CUSTOM_DOMAIN.md`)
 **Репозиторий:** https://github.com/markovsaratov-crypto/telemetria-poedzok (ветка `main`; вся документация — в папке `docs/`: https://github.com/markovsaratov-crypto/telemetria-poedzok/tree/main/docs)
-**Версия приложения:** 2.29.0 (единый источник — `package.json`; `/health` всегда отдаёт её)
+**Версия приложения:** 2.30.1 (единый источник — `package.json`; `/health` всегда отдаёт её)
 **Документ:** полная техническая документация для передачи в управление технической поддержке и администратору. Описывает текущее состояние системы «как есть», без истории изменений.
 
 ---
@@ -57,7 +57,7 @@
 
 - Заголовок периода (Сегодня/7 дней/30 дней/Всё время): поездок · записей · точек; рекорд скорости за всё время.
 - Период-агрегат «Аналитика → период»: батч-запросы статов/events/track по всем сессиям периода (3 запроса), серверный предрасчёт-кэш (v2.27), карта периода, буллетчарты EcoScore/Эффективность, тяжёлые сегменты, группы маршрутов.
-- «Поездки»: СЕРВЕРНЫЕ поездки (сущность Trip, v2.26: одна физическая поездка = одна карточка «N записей»), адреса старта/финиша с городом (v2.28), бейдж EcoScore с границами зон, план-факт поездки; легаси-список записей — фолбэк.
+- «Поездки»: СЕРВЕРНЫЕ поездки (сущность Trip, v2.26: одна физическая поездка = одна карточка «N записей»), адреса старта/финиша с городом (v2.28), бейдж EcoScore с границами зон, план-факт поездки; легаси-список записей — фолбэк; удаление поездки пользователем (v2.30) — кнопка в раскрытой карточке, двухшаговое подтверждение.
 - (v2.29.0) Мёртвые компоненты старого UI (лидерборд устройств, облако тегов, спарклайн, мини-карты, replay/compare и ещё ~20) удалены из кодовой базы.
 - 62 метрики методологии (см. §11 и `docs/METHODOLOGY.md`): дистанция/длительность (сырая и активная), MovingTime state machine, спидограмма, EcoScore с корпусной калибровкой, G-G-физика (манёвры/резкие события), план-факт (маршрутизация), сравнительные метрики маршрутов (Theil-Sen тренд, P75-хотспоты, trafficPattern).
 
@@ -404,6 +404,10 @@ Unique `@@unique([deviceId, clientId])` — идемпотентность `/api
 | `POST /api/import/csv` | api | multipart CSV (≤20 МБ); один `clientId` на файл → одна сессия |
 | `POST /api/import/zip` | api | multipart ZIP (≤100 МБ на прокси; zip-бомбы отсекаются по факту распаковки) |
 | `GET /api/geocode/reverse` | api (read-скоп) | `?lat=&lon=` — Nominatim реверс-геокод, кэш 30 суток в Setting; ответ с `short`-подписью |
+| `GET /api/trips` | api (read-скоп) | Список поездок (сущность Trip): `{trips: [{id, deviceId, status, startTime, endTime, spanStart, spanEnd, startLat/Lon, endLat/Lon, sessionIds, sessionCount, interFragmentGapSec, distanceM, activeDurationSec, durationSec, pointCountActual, maxSpeedMs, ecoScore, planComparable, planDeviationSec}]}` — кэш-агрегаты из `Trip.*`; scope-фильтр userId (v2.23); `?limit=1..100 (50)&deviceId=` |
+| `GET /api/trips/batch?ids=` | api (read-скоп) | Полные статы ≤50 поездок одним запросом (конвейер trip-stats на конкатенированном потоке точек состава); ответ `{stats: TripStats[], missing: []}` сеется в кэш карточек; TTL 30 с |
+| `GET /api/trips/{id}` | api (read-скоп) | Детальная статистика поездки: полный TripStatsPayload + `fragments` (лёгкие поля записей состава) + `sessionIds` + `tripStatus` + план-факт (TrafficJob поездки) |
+| `DELETE /api/trips/{id}` | api (default-скоп) | **v2.30.0 — удаление поездки пользователем:** soft-delete ВСЕХ живых записей состава (`deletedAt`, `status='deleted'`) + строки Trip + снятие pending/running TrafficJob + сброс `Session.tripId`; атомарно (`libsql.batch`); поездка `recording` → 409; аудит `trip.delete`; метрика `trip_delete_total`; точки стирает retention после GRACE_PERIOD_DAYS. Полный recompute устройства НЕ нужен: поездки по построению разделены стоянками ≥ TRIP_SPLIT_SEC — удаление цепочки не склеивает соседей |
 
 ### 9.5. Статистика и аналитика
 

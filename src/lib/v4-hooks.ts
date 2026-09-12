@@ -19,7 +19,6 @@ import {
 } from "./api-client";
 import { useSessions, fetchSessionsStatsBatch, seedSessionsStatsFromBatch, type SessionStats } from "./hooks";
 import { useTrips } from "./trip-hooks"; // v2.26.0: счётчик ПОЕЗДОК периода
-import { haversineM } from "./geo"; // v2.31.0 (MAJ-10): §8.2 в период-режиме
 import { type PeriodKey } from "./v4-utils";
 
 // /api/stats/speed-record — §4.5 MaxSpeedAllTime (v2.13.0 Ф1).
@@ -260,22 +259,6 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
   // (согласовано с поездиным KPI §4.3). Fallback на полную длительность — для legacy-данных.
   const avgSpeedBase = activeDurTotal > 0 ? activeDurTotal : duration;
 
-  // v2.31.0 (MAJ-10): §8.2 в период-режиме — путь/прямая(старт→финиш), как в
-  // одиночном. Раньше агрегат подменял смысл на факт/план (Σ дистанций/Σ
-  // планов), а тултип «Путь против прямой» врал. Прямая = от старта первой
-  // активной поездки до финиша последней.
-  const firstActive = m.find((x) => x.activeTrip?.hasActiveTrip)?.activeTrip;
-  const lastActive = [...m].reverse().find((x) => x.activeTrip?.hasActiveTrip)?.activeTrip;
-  const directM =
-    firstActive && lastActive
-      ? haversineM(
-          firstActive.activeStartCoord.lat,
-          firstActive.activeStartCoord.lon,
-          lastActive.activeEndCoord.lat,
-          lastActive.activeEndCoord.lon
-        )
-      : 0;
-
   return {
     sessionId,
     pointCount,
@@ -360,9 +343,16 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       uTurnCount: sum(m.map((x) => x.uTurnCount)),
       turnCount: sum(m.map((x) => x.turnCount)),
       highSpeedCornering: sum(m.map((x) => x.highSpeedCornering)),
-      // v2.31.0 (MAJ-10): §8.2 — путь/прямая (см. directM выше); факт/план
-      // остаётся в route.durationDeviationPct/distanceDeviationPct
-      routeEfficiency: distTotal > 0 && directM > 1 ? Math.round((distTotal / directM) * 100) / 100 : null,
+      // v2.31.0 (MAJ-10): §8.2 в период-режиме — СРЕДНЕЕ по записям (вес =
+      // дистанция), каждая запись против СВОЕЙ прямой старт→финиш. Раньше
+      // агрегат подменял смысл на факт/план (Σ дистанций/Σ планов), а тултип
+      // «Путь против прямой» врал. Доводка по данным прод-QA: путь/прямая всего
+      // периода бессмысленна в обе стороны — период Сочи→Саратов даёт 0,07
+      // («путь короче прямой»), 7 городских поездок — 7+ («путь в 7 раз длиннее
+      // прямой»); среднее по поездкам сохраняет смысл §8.2.
+      routeEfficiency: wavg(
+        sorted.map((s) => ({ v: s.methodology?.routeEfficiency ?? null, w: s.distance ?? 0 })) as Array<{ v: number | null; w: number }>
+      ),
       avgAccuracy: avg(m.map((x) => x.avgAccuracy)),
       pointDensity: duration > 0 ? pointCount / duration : null,
       gapCount: sum(m.map((x) => x.gapCount)),

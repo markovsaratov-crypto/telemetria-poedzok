@@ -213,7 +213,7 @@ export default function SharedPage({ params }: { params: Promise<{ token: string
           </svg>
         </div>
         <p className="text-[10px] text-muted-foreground">
-          {data.pointCount} точек · «Телематика Маркова»
+          {data.pointCount} точек · «Телемат»
         </p>
       </div>
     </Shell>

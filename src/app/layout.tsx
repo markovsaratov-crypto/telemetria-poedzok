@@ -18,24 +18,27 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Телематика Маркова",
+  // v2.28.0: ребрендинг — «Телемат» + логотип владельца (favicon)
+  title: "Телемат",
   description:
     "Дашборд поездок и аналитика телеметрии: сессии, маршруты, плавность вождения, пробки и качество данных.",
-  keywords: ["телеметрия", "GPS", "поездки", "маршруты", "Telemetria"],
-  authors: [{ name: "Telemetria" }],
+  keywords: ["телеметрия", "GPS", "поездки", "маршруты", "Телемат", "Telemat"],
+  authors: [{ name: "Телемат" }],
   icons: {
+    // v2.28.0: favicon — логотип владельца; объявлен ПОСЛЕДНИМ (браузеры при
+    // равной пригодности берут последнюю объявленную иконку), sizes честные
     icon: [
-      { url: "/logo.svg", type: "image/svg+xml" },
       { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/logo.png", sizes: "512x512", type: "image/png" },
     ],
     apple: "/icons/apple-touch-icon.png",
   },
   manifest: "/manifest.webmanifest",
-  applicationName: "Телематика Маркова",
+  applicationName: "Телемат",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Телематика",
+    title: "Телемат",
   },
 };
 

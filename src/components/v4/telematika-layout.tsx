@@ -274,8 +274,19 @@ export function TelematikaLayout(props: LayoutProps) {
         {/* === Single horizontal top bar ===
             Brand · 3 bookmark tabs · active-tab word · utility buttons · theme · logout */}
         <header className="topbar">
+          {/* v2.28.0: бренд — «Телемат» + логотип владельца (прозрачная
+              подложка сохранена в обеих темах: на тёмной оси-«молнии»
+              растворяются, градиентная кривая остаётся видимой) */}
           <div className="brand">
-            <h1>Телематика Маркова</h1>
+            <img
+              src="/logo.png"
+              alt="Логотип Телемат"
+              width={512}
+              height={512}
+              className="brand-logo"
+              draggable={false}
+            />
+            <h1>Телемат</h1>
           </div>
 
           <nav className="v4-bookmarks" aria-label="Вкладки">

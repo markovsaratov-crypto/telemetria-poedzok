@@ -168,10 +168,18 @@ export function AppRoot() {
 
 // v2.11.0 (U-11): сплэш на время проверки auth-куки — айдентика v4
 // (айвори + слива + Arial Narrow), без «мигания» логин-экрана.
+// v2.28.0: логотип + название «Телемат».
 function AuthSplash() {
   return (
     <div className="auth-splash" role="status" aria-live="polite">
-      <div className="auth-splash-title">Телематика Маркова</div>
+      <img
+        src="/logo.png"
+        alt=""
+        aria-hidden="true"
+        className="auth-splash-logo"
+        draggable={false}
+      />
+      <div className="auth-splash-title">Телемат</div>
       <div className="auth-splash-bar" aria-hidden="true" />
       <div className="auth-splash-note">проверяем сессию…</div>
     </div>

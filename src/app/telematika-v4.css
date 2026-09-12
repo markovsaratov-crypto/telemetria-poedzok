@@ -111,6 +111,19 @@ html.dark .v4-app {
 .v4-app .brand {
   flex: 0 0 auto;
   min-width: 0;
+  /* v2.28.0: логотип слева от названия — прозрачная PNG, без подложки
+     (в тёмной теме оси-«молнии» растворяются, градиент виден) */
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.v4-app .brand .brand-logo {
+  width: auto;
+  display: block;
+  flex: none;
+  /* высоту задаёт R4-мобильный блок ниже (20px) и медиа-запросы 480/640/768
+     (22/24/26px) — здесь только структура; aspect-ratio из width/height
+     атрибутов img не даёт заголовку прыгнуть при загрузке PNG */
 }
 .v4-app .brand h1 {
   font-family: var(--cond);
@@ -1893,6 +1906,8 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
   font-size: 14px;
   letter-spacing: 0.06em;
 }
+/* v2.28.0: логотип пропорционален тексту бренда на каждом брейкпоинте */
+.v4-app .brand .brand-logo { height: 20px; }
 /* Bookmarks (3 tabs) — compact on mobile */
 .v4-app .v4-bookmarks {
   flex: 0 0 auto;
@@ -1916,11 +1931,13 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
 .v4-app .v4-topbar-active-label { display: none; }
 @media (min-width: 480px) {
   .v4-app .brand h1 { font-size: 16px; }
+  .v4-app .brand .brand-logo { height: 22px; }
   .v4-app .v4-bookmark { padding: 7px 10px; font-size: 12px; }
   .v4-app .v4-bookmark-label { display: inline; }
 }
 @media (min-width: 640px) {
   .v4-app .brand h1 { font-size: 18px; letter-spacing: 0.08em; }
+  .v4-app .brand .brand-logo { height: 24px; }
 }
 @media (min-width: 768px) {
   /* v2.26.2: контентная колонка capped на 980px (max-width обёртки) — топбар
@@ -1928,6 +1945,7 @@ html.dark .v4-app .s-red { border-color: #5A2424; }
      иначе слово активной вкладки не помещалось («АНАЛИТИКА» ~90px) и
      сжималось в ноль с рисованием поверх кнопок. */
   .v4-app .brand h1 { font-size: 20px; letter-spacing: 0.09em; }
+  .v4-app .brand .brand-logo { height: 26px; }
   .v4-app .topbar { flex-wrap: nowrap; gap: 6px; margin-bottom: 6px; overflow-x: visible; }
   .v4-app .v4-bookmark { padding: 7px 12px; font-size: 13px; letter-spacing: 0.08em; }
   .v4-app .v4-topbar-active-label { display: inline-block; letter-spacing: 0.09em; margin-left: 2px; }

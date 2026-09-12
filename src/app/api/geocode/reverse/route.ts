@@ -46,6 +46,18 @@ function shortAddress(
   return display;
 }
 
+// v2.28.0: населённый пункт точки — отдельным полем city (запрос владельца:
+// «откуда» в списке поездок — не только улица, но и город; улицы
+// «Телеграфная»/«Планерная» повторяются в Саратове и Энгельсе — без города
+// начало поездки не идентифицируется). Порядок: город → посёлок → деревня →
+// муниципалитет; district/область НЕ берём (район ≠ город).
+function cityFromRaw(
+  raw: Record<string, string> | null | undefined
+): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  return raw.city ?? raw.town ?? raw.village ?? raw.municipality ?? null;
+}
+
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   try {
@@ -87,11 +99,14 @@ export async function GET(request: NextRequest) {
             short?: string;
             cachedAt: string;
             raw?: Record<string, string> | null;
+            city?: string | null;
           };
           return json(
             {
               address: parsed.address,
               short: parsed.short ?? shortAddress(parsed.raw ?? null, parsed.address),
+              // v2.28.0: город — из кэша, для старых записей выводим из raw
+              city: parsed.city ?? cityFromRaw(parsed.raw ?? null),
               cachedAt: parsed.cachedAt,
               cached: true,
             },
@@ -105,6 +120,7 @@ export async function GET(request: NextRequest) {
             {
               address: cached,
               short: shortAddress(null, cached),
+              city: null,
               cachedAt: new Date().toISOString(),
               cached: true,
             },
@@ -153,10 +169,11 @@ export async function GET(request: NextRequest) {
     if (nominatimData && nominatimData.display_name) {
       const address = nominatimData.display_name;
       const short = shortAddress(nominatimData.address ?? null, address);
+      const city = cityFromRaw(nominatimData.address ?? null);
 
       // Save to Setting table
       const cachedAt = new Date().toISOString();
-      const cacheValue = JSON.stringify({ address, short, cachedAt, raw: nominatimData.address ?? null });
+      const cacheValue = JSON.stringify({ address, short, city, cachedAt, raw: nominatimData.address ?? null });
       try {
         await setSetting(key, cacheValue, "geocode-cache");
       } catch (e) {
@@ -166,7 +183,7 @@ export async function GET(request: NextRequest) {
         });
       }
 
-      return json({ address, short, cachedAt, cached: false, provider: "nominatim" }, 200, { "X-Request-Id": requestId });
+      return json({ address, short, city, cachedAt, cached: false, provider: "nominatim" }, 200, { "X-Request-Id": requestId });
     }
 
     // --- Провайдер 2: 2ГИС (ключ каталога, РФ/СНГ-адреса) ---
@@ -216,7 +233,7 @@ export async function GET(request: NextRequest) {
             const subtypeNote = item?.subtype ? ` (${item.subtype === "ground" ? "парковка" : item.subtype})` : "";
             const short = itemShort || placeShort;
             const cachedAt = new Date().toISOString();
-            const cacheValue = JSON.stringify({ address: address + subtypeNote, short, cachedAt, raw: null, provider: "2gis" });
+            const cacheValue = JSON.stringify({ address: address + subtypeNote, short, city: admCity, cachedAt, raw: null, provider: "2gis" });
             try {
               await setSetting(key, cacheValue, "geocode-cache");
             } catch (e) {
@@ -225,7 +242,7 @@ export async function GET(request: NextRequest) {
                 error: e instanceof Error ? e.message : String(e),
               });
             }
-            return json({ address: address + subtypeNote, short, cachedAt, cached: false, provider: "2gis" }, 200, { "X-Request-Id": requestId });
+            return json({ address: address + subtypeNote, short, city: admCity, cachedAt, cached: false, provider: "2gis" }, 200, { "X-Request-Id": requestId });
           }
         } else {
           logger.warn("2GIS reverse geocode failed", { requestId, status: res.status });
@@ -242,7 +259,7 @@ export async function GET(request: NextRequest) {
     // запросе попробуем снова, провайдеры могут подняться) ---
     const coords = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
     return json(
-      { address: coords, short: coords, cached: false, provider: "none", error: "geocode_unavailable" },
+      { address: coords, short: coords, city: null, cached: false, provider: "none", error: "geocode_unavailable" },
       200,
       { "X-Request-Id": requestId }
     );

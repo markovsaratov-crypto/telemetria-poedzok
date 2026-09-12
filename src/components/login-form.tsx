@@ -13,7 +13,6 @@ import {
   LogIn,
   Eye,
   EyeOff,
-  Activity,
   ShieldCheck,
   AlertCircle,
   Keyboard,
@@ -172,16 +171,25 @@ export function LoginForm({ onSuccess }: LoginFormProps) {
       >
         <Card className="shadow-xl">
           <CardHeader className="text-center gap-3 pb-2">
+            {/* v2.28.0: логотип владельца вместо иконки-заглушки — прозрачная
+                подложка сохранена в обеих темах (без подкрашенного бокса) */}
             <motion.div
               initial={{ scale: 0, rotate: -45 }}
               animate={{ scale: 1, rotate: 0 }}
               transition={{ delay: 0.1, type: "spring", stiffness: 200, damping: 15 }}
-              className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl v4-login-icon"
+              className="mx-auto"
             >
-              <Activity className="h-7 w-7" />
+              <img
+                src="/logo.png"
+                alt="Логотип Телемат"
+                width={56}
+                height={56}
+                className="v4-login-logo"
+                draggable={false}
+              />
             </motion.div>
             <CardTitle className="text-2xl tracking-tight v4-login-title">
-              Телематика Маркова
+              Телемат
             </CardTitle>
             <CardDescription className="flex items-center justify-center gap-1.5">
               <ShieldCheck className="h-3.5 w-3.5 v4-login-accent" />

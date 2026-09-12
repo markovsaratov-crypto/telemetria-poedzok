@@ -1924,7 +1924,8 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
 //   - bbox (stats.bbox): для heuristic городской зоны.
 //   - speedProfile[].alt: для построения реального высотного профиля и расчёта AltitudeRange.
 function GeoBlock({ stats, aggregated = false }: { stats: SessionStats | null | undefined; aggregated?: boolean }) {
-  void aggregated; // рельеф в период-режиме — суммы/взвешенные средние
+  // v2.31.0 (MAJ-10): aggregated используется — подпись извилистости в период-режиме
+  // честно описывает среднее по поездкам (вес = дистанция)
   // v2.10.1: useMemo вызываются ВНАЧАЛЕ (rules-of-hooks). early return — после.
   const elevGain = stats?.elevationGain ?? 0;
   const elevLoss = stats?.elevationLoss ?? 0;
@@ -2018,7 +2019,9 @@ function GeoBlock({ stats, aggregated = false }: { stats: SessionStats | null | 
           <Stat
             value={routeEfficiency != null ? fmtNum(routeEfficiency, 2) : "—"}
             cls={routeEfficiency == null ? "c-faint" : routeEfficiency <= 1.15 ? "c-plum" : routeEfficiency <= 1.4 ? "c-amber" : "c-red"}
-            tip="Извилистость маршрута | Путь против прямой «от старта до финиша» | 1,0 — почти по прямой · больше — больше крюк"
+            tip={aggregated
+              ? "Извилистость маршрута | Средняя по поездкам периода (вес — дистанция): путь каждой поездки против её прямой «от старта до финиша» | 1,0 — почти по прямой · больше — больше крюк"
+              : "Извилистость маршрута | Путь против прямой «от старта до финиша» | 1,0 — почти по прямой · больше — больше крюк"}
             label="Извилистость маршрута"
           />
           <Stat

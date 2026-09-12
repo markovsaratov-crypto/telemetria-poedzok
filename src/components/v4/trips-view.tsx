@@ -30,7 +30,7 @@ import { ZipImport } from "@/components/zip-import";
 import { useSessions, useSessionStats, useSessionsStatsBatch, isStatsBatchCovered, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
 import { useTrips, useTripsStatsBatch, useTripStats } from "@/lib/trip-hooks"; // v2.26.0: ПОЕЗДКИ сервера
-import { ecoCls, ecoLab } from "@/lib/v4-utils";
+import { ecoCls, ecoBandLabel, ecoBadgeTip } from "@/lib/v4-utils";
 import { fmtSecFull, fmtDurMin, fmtNumber, pluralRu } from "@/lib/format";
 import { bindTips } from "./use-v4-tipbox";
 
@@ -40,10 +40,36 @@ import { bindTips } from "./use-v4-tipbox";
 // поездки (утром и вечером) разделены часами.
 const TRIP_MERGE_GAP_MS = 10 * 60_000;
 
-// v2.26.1: тултип бейджа EcoScore — простым языком (что это за балл и как
-// читать зоны). Раньше подпись «резко» висела без объяснений.
-const ECO_SCORE_TIP =
-  "Оценка плавности вождения: 0–100 | Чем плавнее разгоны, торможения и повороты — тем выше балл | 80 и выше — плавно · 60–79 — умеренно · ниже 60 — агрессивный стиль";
+// v2.28.0: подсказка бейджа при ОТСУТСТВИИ оценки (мало данных) — раньше
+// висел общий текст про шкалу, не объясняя, почему «—». Пороги защиты — §7.3.
+const ECO_NO_DATA_TIP =
+  "Оценка плавности не рассчитана | Нужно: движение не меньше 500 м, 60 сек активной поездки и 60 точек GPS | Запись-«хвост» без активной поездки оценку не получает";
+
+// v2.28.0: подсказка ПОКА статы грузятся — data-tip на бейдже есть ВСЕГДА:
+// bindTips() биндит только элементы с [data-tip] на момент вызова, а его
+// эффекты не зависят от загрузки статов — с undefined-атрибутом тултип
+// на бейдже не появился бы вовсе. Значение атрибута обновится на лету,
+// обработчик читает его в момент ховера.
+const ECO_LOADING_TIP =
+  "Плавность вождения (EcoScore) | Статы этой поездки ещё загружаются — подождите пару секунд | Зоны: 80+ плавно · 60–79 умеренно · ниже 60 агрессивно";
+
+// v2.28.0: «улица, город» для строки «откуда» (запрос владельца). Город
+// дописывается, только если его ещё нет в короткой подписи — fallback-подписи
+// shortAddress бывают «район» или сам город, дубликат «Энгельс, Энгельс»
+// не нужен. Сравнение по ЦЕЛЫМ токенам (не подстрокам): «улица
+// Энгельсская» не должна глотать город «Энгельс» (иначе город не
+// дописывалсяся бы ровно в кросс-городских кейсах — Саратов/Энгельс).
+function withCity(short: string, city: string | null | undefined): string {
+  if (!city) return short;
+  const tokens = short
+    .toLowerCase()
+    .replace(/[.,]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  const cityNorm = city.toLowerCase().trim();
+  if (tokens.includes(cityNorm)) return short;
+  return `${short}, ${city}`;
+}
 
 interface SessionGroup {
   device: string;
@@ -104,9 +130,14 @@ export function TripsView({
   const ref = React.useRef<HTMLDivElement>(null);
   const [openId, setOpenId] = React.useState<string | null>(null);
   const sessions = useSessions({ limit: 50 }, { enabled: !serverTripsActive });
+  // v2.28.0: биндим тултипы ПОСЛЕ КАЖДОГО рендера (как в telematika-layout):
+  // bindTips идемпотентен (__v4TipBound), а тело карточки дорисовывается
+  // после прихода per-trip статов — которых нет в deps. Со старыми deps
+  // [openId, sessions.data, tripsQ.data] новые [data-tip]-элементы
+  // («откуда», Stat-лейблы) оставались без тултипов до сворачивания карточки.
   React.useEffect(() => {
     if (ref.current) bindTips(ref.current);
-  }, [openId, sessions.data, tripsQ.data]);
+  });
 
   const list: SessionListItem[] = sessions.data?.sessions ?? [];
   const isLoading = sessions.isLoading && !sessions.data;
@@ -614,11 +645,25 @@ function TripCard({
           </div>
           <div className="t-sub">{sub}</div>
         </div>
-        <div className={`t-eco ${eco != null ? ecoCls(eco) : ""}`} data-tip={ECO_SCORE_TIP}>
-          {/* v2.12.0 (V-5): единицы в бейдже — «39 / 100 · агрессивно»; v2.26.1 —
-              понятная шкала стиля + тултип-пояснение на самом бейдже */}
+        <div
+          className={`t-eco ${eco != null ? ecoCls(eco) : ""}`}
+          data-tip={
+            eco != null
+              ? ecoBadgeTip(eco, {
+                  harshBraking: stats.data?.methodology?.harshBrakingCount ?? null,
+                  harshAccel: stats.data?.methodology?.harshAccelCount ?? null,
+                })
+              : stats.data != null
+                ? ECO_NO_DATA_TIP
+                : ECO_LOADING_TIP
+          }
+        >
+          {/* v2.28.0: подпись зоны с числовой границей (как в bullet-чарте
+              Аналитики) + подсказка с событиями этой записи; было
+              «агрессивно · из 100» — без границы зоны. «—» = статы ещё
+              грузятся, «нет данных» = оценка не считается (§7.3-пороги) */}
           <b>{eco ?? "—"}</b>
-          <small>{eco != null ? `${ecoLab(eco)} · из 100` : "—"}</small>
+          <small>{eco != null ? ecoBandLabel(eco) : stats.data != null ? "нет данных" : "—"}</small>
         </div>
         <i className="chev">›</i>
       </div>
@@ -643,6 +688,9 @@ interface GroupAgg {
   sumActiveSec: number;
   maxSpeedMs: number | null;
   ecoAvg: number | null;
+  // v2.28.0: Σ резких событий записей группы — в подсказку бейджа EcoScore
+  sumHarshBraking: number;
+  sumHarshAccel: number;
 }
 
 function GroupedTripCard({
@@ -743,9 +791,27 @@ function GroupedTripCard({
           </div>
           <div className="t-sub">{sub}</div>
         </div>
-        <div className={`t-eco ${agg?.ecoAvg != null ? ecoCls(agg.ecoAvg) : ""}`} data-tip={ECO_SCORE_TIP}>
+        <div
+          className={`t-eco ${agg?.ecoAvg != null ? ecoCls(agg.ecoAvg) : ""}`}
+          data-tip={
+            agg?.ecoAvg != null
+              ? ecoBadgeTip(agg.ecoAvg, {
+                  harshBraking: agg.sumHarshBraking,
+                  harshAccel: agg.sumHarshAccel,
+                })
+              : agg != null && agg.loadedCount >= sessions.length
+                ? ECO_NO_DATA_TIP
+                : ECO_LOADING_TIP
+          }
+        >
           <b>{agg?.ecoAvg ?? "—"}</b>
-          <small>{agg?.ecoAvg != null ? `${ecoLab(agg.ecoAvg)} · из 100` : "—"}</small>
+          <small>
+            {agg?.ecoAvg != null
+              ? ecoBandLabel(agg.ecoAvg)
+              : agg != null && agg.loadedCount >= sessions.length
+                ? "нет данных"
+                : "—"}
+          </small>
         </div>
         <i className="chev">›</i>
       </div>
@@ -786,12 +852,17 @@ function GroupStatsAggregator({
       // как период-агрегат Аналитики (wavg); записи без активной части не весят
       let ecoWSum = 0;
       let ecoW = 0;
+      // v2.28.0: Σ резких событий — для подсказки бейджа EcoScore группы
+      let sumHarshBraking = 0;
+      let sumHarshAccel = 0;
       for (const v of statsRef.current.values()) {
         totalPoints += v.pointCount ?? 0;
         totalDistanceM += v.distance ?? 0;
         sumMovingSec += v.movingTime ?? 0;
         sumIdleSec += v.idleTime ?? 0;
         sumDurSec += v.duration ?? 0;
+        sumHarshBraking += v.methodology?.harshBrakingCount ?? 0;
+        sumHarshAccel += v.methodology?.harshAccelCount ?? 0;
         const at = v.methodology?.activeTrip;
         if (at?.hasActiveTrip) sumActiveSec += at.activeDuration;
         if (v.maxSpeed != null) {
@@ -815,6 +886,8 @@ function GroupStatsAggregator({
         sumActiveSec,
         maxSpeedMs,
         ecoAvg: ecoW > 0 ? Math.max(0, Math.min(100, Math.round(ecoWSum / ecoW))) : null,
+        sumHarshBraking,
+        sumHarshAccel,
       });
     },
     [sessions, onAgg]
@@ -1467,6 +1540,14 @@ function TripEntryCard({
     );
 
   const eco = st?.ecoScore ?? null;
+  // v2.28.0: события этой поездки — в измеримую подсказку бейджа EcoScore
+  const ecoCounts =
+    st?.methodology != null
+      ? {
+          harshBraking: st.methodology.harshBrakingCount ?? null,
+          harshAccel: st.methodology.harshAccelCount ?? null,
+        }
+      : undefined;
 
   return (
     <div className={`trip ${isOpen ? "open" : ""}`}>
@@ -1513,9 +1594,20 @@ function TripEntryCard({
           </div>
           <div className="t-sub">{sub}</div>
         </div>
-        <div className={`t-eco ${eco != null ? ecoCls(eco) : ""}`} data-tip={ECO_SCORE_TIP}>
+        <div
+          className={`t-eco ${eco != null ? ecoCls(eco) : ""}`}
+          data-tip={
+            eco != null
+              ? ecoBadgeTip(eco, ecoCounts)
+              : st != null
+                ? ECO_NO_DATA_TIP
+                : ECO_LOADING_TIP
+          }
+        >
+          {/* v2.28.0: зона с числовой границей (как в bullet-чарте Аналитики);
+              «—» — статы грузятся, «нет данных» — §7.3-пороги не пройдены */}
           <b>{eco ?? "—"}</b>
-          <small>{eco != null ? `${ecoLab(eco)} · из 100` : "—"}</small>
+          <small>{eco != null ? ecoBandLabel(eco) : st != null ? "нет данных" : "—"}</small>
         </div>
         <i className="chev">›</i>
       </div>
@@ -1578,8 +1670,21 @@ function TripEntryBody({
       </div>
       <div className="seg-total" style={{ marginBottom: 10 }}>
         <span>откуда:</span>
-        <b style={{ fontWeight: 600 }} title={from.data?.address ?? undefined}>
-          {from.data ? `← ${from.data.short}` : from.isLoading ? "адрес старта…" : "—"}
+        <b
+          style={{ fontWeight: 600 }}
+          data-tip={`Адрес старта поездки | Определён по координатам GPS — первая активная точка${from.data?.city ? ` · ${from.data.city}` : ""}${from.data?.address ? ` | Полный адрес: ${from.data.address}` : ""}`}
+        >
+          {/* v2.28.0: улица + город (запрос владельца: улицы повторяются
+              между Саратовом и Энгельсом — без города старт не читается);
+              город не дублируем, если он уже в подписи (fallback-варианты
+              «район/город», legacy-кэш без city — как было).
+              Полный адрес — в data-tip (нативный title убран: с ним на
+              desktop всплывали два тултипа друг поверх друга) */}
+          {from.data
+            ? `← ${withCity(from.data.short, from.data.city ?? null)}`
+            : from.isLoading
+              ? "адрес старта…"
+              : "—"}
         </b>
       </div>
       {to.data ? (

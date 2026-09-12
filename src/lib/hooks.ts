@@ -722,6 +722,9 @@ export interface GeocodeResult {
   address: string;
   // v2.12.0 (Q3): компактная подпись («улица Ленина, 44») для заголовков
   short: string;
+  // v2.28.0: населённый пункт точки — для «откуда: улица, город» в списке
+  // поездок (null — провайдер не дал / legacy-кэш)
+  city?: string | null;
   cachedAt?: string;
   cached: boolean;
   error?: string;

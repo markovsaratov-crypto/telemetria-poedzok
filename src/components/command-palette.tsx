@@ -275,7 +275,7 @@ export function CommandPalette({
             </span>
           </div>
           <span className="flex items-center gap-1">
-            <Command className="h-2.5 w-2.5" /> Телематика Маркова
+            <Command className="h-2.5 w-2.5" /> Телемат
           </span>
         </div>
       </DialogContent>

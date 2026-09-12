@@ -528,6 +528,12 @@ kbd {
   font-family: 'Arial Narrow', 'Helvetica Neue Condensed', 'Liberation Sans Narrow', Arial, sans-serif;
 }
 html.dark .auth-splash { background: #0E0B10; }
+/* v2.28.0: логотип на сплэше — прозрачная PNG, работает в обеих темах */
+.auth-splash-logo {
+  width: 64px;
+  height: 64px;
+  display: block;
+}
 .auth-splash-title {
   font-size: 17px;
   font-weight: 700;
@@ -579,5 +585,7 @@ html.dark .v4-login-bg {
 }
 .v4-login-icon { background: #F3E3EA; color: #8E2D4E; }
 html.dark .v4-login-icon { background: #2E1822; color: #F8518C; }
+/* v2.28.0: логотип сервиса на экране входа — прозрачная PNG без подложки */
+.v4-login-logo { display: block; margin: 0 auto; width: 56px; height: 56px; }
 .v4-login-accent { color: #8E2D4E; }
 html.dark .v4-login-accent { color: #F8518C; }

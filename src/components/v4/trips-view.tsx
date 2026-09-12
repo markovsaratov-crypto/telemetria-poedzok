@@ -29,7 +29,7 @@ import * as React from "react";
 import { ZipImport } from "@/components/zip-import";
 import { useSessions, useSessionStats, useSessionsStatsBatch, isStatsBatchCovered, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
-import { useTrips, useTripsStatsBatch, useTripStats } from "@/lib/trip-hooks"; // v2.26.0: ПОЕЗДКИ сервера
+import { useTrips, useTripsStatsBatch, useTripStats, useDeleteTrip } from "@/lib/trip-hooks"; // v2.26.0: ПОЕЗДКИ сервера; v2.30.0: удаление
 import { ecoCls, ecoBandLabel, ecoBadgeTip } from "@/lib/v4-utils";
 import { fmtSecFull, fmtDurMin, fmtNumber, pluralRu } from "@/lib/format";
 import { bindTips } from "./use-v4-tipbox";
@@ -1788,6 +1788,76 @@ function TripEntryBody({
         считаются по всей поездке целиком — цифры совпадают с вкладкой
         «Аналитика».
       </div>
+      {/* v2.30.0: удаление поездки пользователем (запрос владельца) — в
+          раскрытой карточке, двухшаговое подтверждение без модалки */}
+      <DeleteTripControl tripId={trip.id} sessionCount={trip.sessionCount} />
+    </div>
+  );
+}
+
+// v2.30.0: управление удалением поездки. Шаг 1 — subdued-кнопка «Удалить
+// поездку»; шаг 2 — инлайн-подтверждение с честным текстом (без отмены —
+// undelete в UI нет, admin/restore восстанавливает только всю БД). 409 от
+// сервера («ещё записывается») показывается инлайн. Кнопки — 44px touch.
+function DeleteTripControl({ tripId, sessionCount }: { tripId: string; sessionCount: number }) {
+  const del = useDeleteTrip();
+  const [confirming, setConfirming] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
+
+  if (del.isPending) {
+    return (
+      <div className="t-del">
+        <span className="t-del-hint">Удаляем поездку…</span>
+      </div>
+    );
+  }
+
+  if (!confirming) {
+    return (
+      <div className="t-del">
+        <button type="button" className="t-del-btn" onClick={() => { setErr(null); setConfirming(true); }}>
+          Удалить поездку
+        </button>
+        {err ? <span className="t-del-err">{err}</span> : null}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="t-del t-del-confirm"
+      role="alertdialog"
+      aria-label="Подтверждение удаления поездки"
+      data-tip="Удаление поездки | Сервер удалит все записи этой поездки и их GPS-точки | Полностью данные сотрутся в течение 30 дней — до этого их видно только в бекапе владельца"
+    >
+      <span className="t-del-hint">
+        Удалить {pluralRu(sessionCount, ["запись", "записи", "записей"])} поездки и их GPS-точки?
+        Отменить будет нельзя.
+      </span>
+      <span className="t-del-actions">
+        <button
+          type="button"
+          className="t-del-btn t-del-go"
+          onClick={() => {
+            setErr(null);
+            del.mutate(tripId, {
+              onSuccess: () => {
+                // карточка исчезнет после инвалидации списков (useDeleteTrip)
+                setConfirming(false);
+              },
+              onError: (e) => {
+                setErr(e instanceof Error ? e.message : "Не удалось удалить поездку — попробуйте ещё раз");
+                setConfirming(false);
+              },
+            });
+          }}
+        >
+          Да, удалить
+        </button>
+        <button type="button" className="t-del-cancel" onClick={() => setConfirming(false)}>
+          Отмена
+        </button>
+      </span>
     </div>
   );
 }

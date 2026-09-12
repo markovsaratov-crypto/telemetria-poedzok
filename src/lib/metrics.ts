@@ -84,4 +84,5 @@ inc("export_completed_total", "Exports completed", 0);
 inc("export_failed_total", "Export jobs failed", 0);
 inc("retention_runs_total", "Retention cron runs", 0);
 inc("session_delete_total", "Session soft-deletes", 0);
+inc("trip_delete_total", "Trip deletes (user request)", 0); // v2.30.0: DELETE /api/trips/[id]
 inc("audit_log_total", "Audit log entries", 0);

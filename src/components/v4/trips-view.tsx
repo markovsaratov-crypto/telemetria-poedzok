@@ -1828,11 +1828,15 @@ function DeleteTripControl({ tripId, sessionCount }: { tripId: string; sessionCo
       className="t-del t-del-confirm"
       role="alertdialog"
       aria-label="Подтверждение удаления поездки"
-      data-tip="Удаление поездки | Сервер удалит все записи этой поездки и их GPS-точки | Полностью данные сотрутся в течение 30 дней — до этого их видно только в бекапе владельца"
     >
+      {/* v2.30.0 (QA-фикс): НЕТ data-tip на контейнере — bindTips вешает на
+          [data-tip] click-обработчик с stopPropagation(), который ГЛОТАЕТ
+          клики по кнопкам внутри (React-корень не получает событие). Конвенция
+          кодовой базы: data-tip — только на листьях без интерактивных детей. */}
       <span className="t-del-hint">
-        Удалить {pluralRu(sessionCount, ["запись", "записи", "записей"])} поездки и их GPS-точки?
-        Отменить будет нельзя.
+        Поездка будет удалена
+        {sessionCount > 1 ? ` вместе с ${sessionCount} ${pluralRu(sessionCount, ["записью", "записями", "записями"])}` : ""}
+        , включая GPS-точки. Отменить будет нельзя.
       </span>
       <span className="t-del-actions">
         <button

@@ -45,8 +45,10 @@ export function setSecurityHeaders(response: NextResponse) {
   response.headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
   response.headers.set("X-XSS-Protection", "1; mode=block");
   // R5.5: Content-Security-Policy — relaxed enough for Leaflet tile servers
-  // (OSM, OpenTopoMap, Esri ArcGIS, CartoDB) and Google Fonts, strict on
-  // everything else. frame-ancestors 'none' = clickjacking hard-block.
+  // (OSM, OpenTopoMap, Esri ArcGIS) and Google Fonts, strict on everything
+  // else. frame-ancestors 'none' = clickjacking hard-block.
+  // v2.29.0: *.cartocdn.com удалён — CARTO-тайлы больше не используются
+  // (провайдер требует API-ключ с авг 2026).
   response.headers.set(
     "Content-Security-Policy",
     [
@@ -54,7 +56,7 @@ export function setSecurityHeaders(response: NextResponse) {
       "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "img-src 'self' data: https:",
-      "connect-src 'self' https://*.tile.openstreetmap.org https://*.tile.opentopomap.org https://server.arcgisonline.com https://*.cartocdn.com",
+      "connect-src 'self' https://*.tile.openstreetmap.org https://*.tile.opentopomap.org https://server.arcgisonline.com",
       "font-src 'self' https://fonts.gstatic.com",
       "frame-ancestors 'none'",
     ].join("; ")

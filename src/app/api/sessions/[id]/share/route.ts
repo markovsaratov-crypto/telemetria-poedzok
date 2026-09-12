@@ -6,7 +6,7 @@
 // (1..8760, по умолчанию 168 = 7 дней) — срок уважается при проверке.
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { authorizeRequest } from "@/lib/auth";
+import { authorizeRequest, getUserIdFromRequest } from "@/lib/auth";
 import { dataScopeFor, sessionVisibleTo } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
@@ -55,7 +55,7 @@ export async function POST(
       targetId: id,
       targetType: "Session",
       actorType: auth.via === "cookie" ? "user" : "system",
-      actorId: auth.via === "cookie" ? "owner" : "api",
+      actorId: (await getUserIdFromRequest(request)) ?? (auth.via === "cookie" ? "owner" : "api"), // v2.29.0 (MI-2): честная атрибуция пользователя, а не всегда «owner»
       sessionId: id,
       metadata: { tokenPrefix: token.slice(-16, -8), expiresInHours: ttlHours, expiresAt: new Date(expiresAt).toISOString() },
     });

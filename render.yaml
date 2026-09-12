@@ -62,14 +62,12 @@ services:
         value: "3650"
       - key: EXPORT_ASYNC_THRESHOLD
         value: "5000"
-      - key: EXPORT_STORAGE_DIR
-        value: /tmp/exports
       - key: BACKUP_STORAGE_DIR
         value: /tmp/backups
       - key: TARGET_LOAD_RPM
         value: "100"
       - key: APP_VERSION
-        value: "2.28.0"
+        value: "2.29.0"
       # v2.16.0 (V7): read-скоп 240/мин — синхронизирован с env-дефолтом
       # (v2.14.1+ код его использует, в yaml значения не было)
       - key: RATE_LIMIT_MAX_READ

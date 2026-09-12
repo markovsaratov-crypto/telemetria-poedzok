@@ -21,11 +21,23 @@ function showTip(target: Element) {
   const raw = target.getAttribute("data-tip");
   if (!raw) return;
   const lines = raw.split("|");
-  const html = lines
-    .map((l, i) => `<span class="t-line">${i === 0 ? `<b>${l}</b>` : l}</span>`)
-    .join("");
   const el = ensureTipEl();
-  el.innerHTML = html;
+  // v2.29.0 (CR-1 кодревью): контент строится через textContent, НЕ innerHTML —
+  // в data-tip попадает внешний текст (адреса из Nominatim/2GIS), его нельзя
+  // интерпретировать как HTML (XSS при CSP с unsafe-inline исполнялся бы).
+  el.replaceChildren();
+  for (let i = 0; i < lines.length; i++) {
+    const span = document.createElement("span");
+    span.className = "t-line";
+    if (i === 0) {
+      const b = document.createElement("b");
+      b.textContent = lines[i];
+      span.appendChild(b);
+    } else {
+      span.textContent = lines[i];
+    }
+    el.appendChild(span);
+  }
   el.style.display = "block";
   tipOwner = target;
   const r = target.getBoundingClientRect();

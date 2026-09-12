@@ -150,7 +150,7 @@ export default function SharedPage({ params }: { params: Promise<{ token: string
   // SVG-превью трека
   const lats = pts.map((p) => p.lat);
   const lons = pts.map((p) => p.lon);
-  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats); // v2.29.0: трек share прорежен, объём мал
   const minLon = Math.min(...lons), maxLon = Math.max(...lons);
   const W = 560, H = 360, PAD = 24;
   const spanLat = Math.max(maxLat - minLat, 1e-6);

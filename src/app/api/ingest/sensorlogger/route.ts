@@ -468,6 +468,24 @@ export async function POST(request: NextRequest) {
     // v2.16.0 (R11): endTime/startTime — монотонные (MAX/MIN), поздний
     // не-по-порядку батч не двигает границы записи назад.
     const outcome = await ingestWriteLock(async () => {
+      // v2.29.0 (MI-6 кодревью): ПОВТОРНАЯ проверка messageId ВНУТРИ writeLock.
+      // Быстрая проверка снаружи (выше) — read-only; два ПАРАЛЛЕЛЬНЫХ ретрая
+      // одного батча оба проходили её (строки ledger ещё нет), оба входили
+      // в lock друг за другом и задваивали точки. Здесь — уже сериализовано:
+      // первый вставил ledger-строку, второй видит её и тихо отдаёт duplicate.
+      if (msgId != null && (typeof msgId === "number" || typeof msgId === "string")) {
+        try {
+          const seenAgain = await libsql.execute({
+            sql: `SELECT 1 FROM IngestMessage WHERE deviceId = ? AND messageId = ? LIMIT 1`,
+            args: [deviceId, String(msgId)],
+          });
+          if (seenAgain.rows.length > 0) {
+            return { sessionId: null, isNewSession: false, duplicate: true };
+          }
+        } catch {
+          // таблицы нет (старая БД) — продолжаем без идемпотентности
+        }
+      }
       const now = Date.now();
       // v2.23.0: корреляция ТОЛЬКО в рамках владельца канала (userId) — батчи
       // двух пользователей с одинаковым deviceId не склеиваются в общую сессию
@@ -556,9 +574,18 @@ export async function POST(request: NextRequest) {
           // нет таблицы на старых БД — не фатально
         }
       }
-      return { sessionId, isNewSession };
+      return { sessionId, isNewSession, duplicate: false };
     });
     const { sessionId, isNewSession } = outcome;
+    if (outcome.duplicate) {
+      // Дубль, замеченный под lock (гонка двух ретраев) — точки НЕ вставлены.
+      inc("ingest_duplicate_total", "Duplicate ingest (messageId idempotency)", 1, "sensorlogger");
+      return json(
+        { ok: true, duplicate: true, message: "Batch already processed (messageId seen)", deviceId, deviceName },
+        200,
+        { "X-Request-Id": requestId }
+      );
+    }
 
     inc("ingest_total", "Total ingest requests", 1, "sensorlogger");
     recordIngestAttempt({

@@ -50,7 +50,7 @@ import { getCorpusEcoBaselines } from "./eco-corpus";
  * session-events.ts / session-track.ts (поля, нормализация, пороги) → bump
  * здесь: все существующие кэши станут протухшими и пересчитаются on-demand.
  */
-export const SESSION_CACHE_VERSION = 1;
+export const SESSION_CACHE_VERSION = 2; // v2.29.0: MA-1 — фикс rejectSpeedOutliersByDisplacement (Math.abs dt) меняет вычисленные скорости
 
 export interface SessionCacheMeta {
   id: string;

@@ -33,9 +33,12 @@ import path from "path";
 export const dynamic = "force-dynamic";
 
 // Backup dump includes these top-level array keys (see src/lib/backup.ts).
+// v2.29.0 (MA-2): + Trip, IngestMessage, _AlertState — синхронно с src/lib/backup.ts.
 const TABLES = [
   "Session",
   "GpsPoint",
+  "Trip",
+  "IngestMessage",
   "Route",
   "RouteCache",
   "TrafficJob",
@@ -43,6 +46,7 @@ const TABLES = [
   "ExportJob",
   "BackupJob",
   "Setting",
+  "_AlertState",
 ] as const;
 
 // Tables that need BigInt revival for the timestamp column.
@@ -56,8 +60,13 @@ const BIGINT_COLUMNS: Record<string, string[]> = {
 // сломать рестор мусорными колонками. Теперь неизвестные колонки отбрасываются
 // (с журналом), полностью пустые строки — пропускаются.
 const ALLOWED_COLUMNS: Record<string, ReadonlyArray<string>> = {
-  Session: ["id", "userId", "deviceId", "clientId", "deviceName", "startTime", "endTime", "pointCount", "payloadBytes", "status", "deletedAt", "purgedAt", "routeId", "routeHash", "topologyHash", "trafficJobId", "notes", "tags", "createdAt", "updatedAt"],
+  Session: ["id", "userId", "deviceId", "clientId", "deviceName", "startTime", "endTime", "pointCount", "payloadBytes", "status", "deletedAt", "purgedAt", "routeId", "routeHash", "topologyHash", "trafficJobId", "notes", "tags", "createdAt", "updatedAt", "statsCache", "eventsCache", "trackCache", "cachePointCount", "cacheVersion"],
   GpsPoint: ["id", "sessionId", "lat", "lon", "speed", "altitude", "accuracy", "timestamp", "bearing"],
+  // v2.29.0 (MA-2): Trip — колонки prisma/schema.prisma (без join-таблицы:
+  // состав поездки хранится в sessionIds JSON, _SessionTrips в БД нет).
+  Trip: ["id", "deviceId", "userId", "status", "startTime", "endTime", "spanStart", "spanEnd", "startLat", "startLon", "endLat", "endLon", "sessionIds", "sessionCount", "deletedAt", "trafficJobId", "createdAt", "updatedAt", "activeDurationSec", "movingTimeSec", "idleTimeSec", "gapTimeSec", "interFragmentGapSec", "internalStopTimeSec", "distanceM", "pointCountActual", "maxSpeedMs", "ecoScore", "planDistanceM", "planDurationSec", "planComparable", "planCoverage", "routingLegCount", "statsComputedAt"],
+  IngestMessage: ["deviceId", "messageId", "firstSeenAt"],
+  _AlertState: ["key", "value", "updatedAt"],
   Route: ["id", "userId", "name", "description", "startLat", "startLon", "endLat", "endLon", "createdAt", "updatedAt"],
   RouteCache: ["id", "hash", "result", "todBucket", "routeId", "expiresAt", "createdAt"],
   TrafficJob: ["id", "sessionId", "status", "attempts", "priority", "scheduledFor", "lockedBy", "lockedAt", "result", "error", "createdAt", "updatedAt"],
@@ -68,8 +77,13 @@ const ALLOWED_COLUMNS: Record<string, ReadonlyArray<string>> = {
 };
 
 // FK-safe delete order: children first, then parents.
+// v2.29.0 (MA-2): Trip (состав = sessionIds JSON, ссылается на TrafficJob),
+// IngestMessage и _AlertState зависимостей не имеют.
 const DELETE_ORDER: ReadonlyArray<(typeof TABLES)[number]> = [
   "GpsPoint",
+  "Trip",
+  "IngestMessage",
+  "_AlertState",
   "AuditLog",
   "ExportJob",
   "TrafficJob",
@@ -86,11 +100,14 @@ const INSERT_ORDER: ReadonlyArray<(typeof TABLES)[number]> = [
   "BackupJob",
   "Route",
   "Session",
+  "Trip",
   "RouteCache",
   "TrafficJob",
   "ExportJob",
   "AuditLog",
   "GpsPoint",
+  "IngestMessage",
+  "_AlertState",
 ];
 
 interface BackupDump {

@@ -150,7 +150,11 @@ export function rejectSpeedOutliersByDisplacement<P extends NormalizablePoint>(p
     let sides = 0;
     let minImpl: number | null = null;
     const check = (j: number) => {
-      const dt = (points[j].timestamp - points[i].timestamp) / 1000;
+      // v2.29.0 (MA-1 кодревью): Math.abs — иначе сосед СЛЕВА (j=i-1) давал
+      // отрицательный dt и ранний return: «обе стороны противоречат» фактически
+      // никогда не проверялась, и законный пик перед резким торможением
+      // замещался геометрической скоростью (систематическое занижение MaxSpeed).
+      const dt = Math.abs(points[j].timestamp - points[i].timestamp) / 1000;
       if (dt < 0.5 || dt > 30) return; // неприменимая сторона
       const disp = haversineM(points[i].lat, points[i].lon, points[j].lat, points[j].lon);
       const vImpl = disp / dt;

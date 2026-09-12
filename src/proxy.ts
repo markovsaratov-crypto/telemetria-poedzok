@@ -33,7 +33,7 @@ import { userDb } from "@/lib/user-db";
 const SESSION_COOKIE_NAME = sessionCookieName();
 
 // Эндпоинты без авторизации
-const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics", "/api/share"]; // P1-9: /api/share — публичный по спеке (токен проверяет сам роут, v2.18.0 — уже честно await-ится)
+const PUBLIC_PATHS = ["/api/keepalive", "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/me", "/health", "/api/metrics", "/api/share"]; // P1-9: /api/share — публичный по спеке (токен проверяет сам роут, v2.18.0 — уже честно await-ится). v2.29.0 (кодревью): /api/metrics в списке ИНФОРМАЦИОННО — сам роут требует авторизацию (authorizeRequest "api"); убрать из списка = дублировать ту же 401 одним слоем раньше
 // v2.18.0: мёртвый публичный GET /api/sessions/[id]/share удалён вместе со своим регексом:
 // страница /shared/[token] читает только /api/share?token=, других потребителей не было.
 // v2.14.1→2.14.2: точные GET-чтения UI (статы/events/track одной записи).

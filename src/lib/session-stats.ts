@@ -333,14 +333,17 @@ export function computeSessionStats(
   const speedMean = meanPointSpeedMs(points);
 
   // Bounding box
-  const lats = points.map((p) => p.lat);
-  const lons = points.map((p) => p.lon);
-  const bbox = {
-    minLat: Math.min(...lats),
-    maxLat: Math.max(...lats),
-    minLon: Math.min(...lons),
-    maxLon: Math.max(...lons),
-  };
+  // v2.29.0 (MI-10 кодревью): без spread — Math.min(...arr) на >100k элементов
+  // роняет движок RangeError (maximum call stack size exceeded); цикл не имеет
+  // предела. Заодно минус два промежуточных массива.
+  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+  for (const p of points) {
+    if (p.lat < minLat) minLat = p.lat;
+    if (p.lat > maxLat) maxLat = p.lat;
+    if (p.lon < minLon) minLon = p.lon;
+    if (p.lon > maxLon) maxLon = p.lon;
+  }
+  const bbox = { minLat, maxLat, minLon, maxLon };
 
   // v2.9.3: спидограмма (даунсемпл ≤240 точек, сек от старта, км/ч, состояние)
   // v2.9.4: сэмплы дополнены alt/lat/lng (высотный профиль + связка с картой)

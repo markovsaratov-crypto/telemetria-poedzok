@@ -39,6 +39,50 @@ async function countTripsForScope(scope: DataScope, from?: Date): Promise<number
   return Number((res.rows[0] as Record<string, unknown>).c);
 }
 
+// v2.29.0 (MI-4 кодревью): счётчики заданий маршрутизации — в зоне видимости
+// запрашивающего (раньше role=user видел ГЛОБАЛЬНЫЕ числа всех пользователей;
+// v2.26: задание принадлежит сессии ИЛИ поездке — скоуп по обоим владельцам).
+async function countTrafficJobsForScope(scope: DataScope, status: string | null): Promise<number> {
+  const cond: string[] = ["1=1"];
+  const args: unknown[] = [];
+  if (scope.mode === "own") {
+    cond.push("(s.userId = ? OR t.userId = ?)");
+    args.push(scope.userId, scope.userId);
+  } else if (scope.mode === "unclaimed") {
+    cond.push("(s.userId IS NULL OR t.userId IS NULL)");
+  }
+  if (status) {
+    cond.push("tj.status = ?");
+    args.push(status);
+  }
+  const res = await libsql.execute({
+    sql: `SELECT COUNT(*) AS c FROM TrafficJob tj
+          LEFT JOIN Session s ON tj.sessionId = s.id
+          LEFT JOIN Trip t ON tj.tripId = t.id
+          WHERE ${cond.join(" AND ")}`,
+    args: args as never[],
+  });
+  return Number((res.rows[0] as Record<string, unknown>).c);
+}
+
+// v2.29.0 (MI-4): маршруты — в зоне видимости запрашивающего
+// (у типизированной обёртки db.route.count нет where-аргумента — raw SQL).
+async function countRoutesForScope(scope: DataScope): Promise<number> {
+  const cond: string[] = ["1=1"];
+  const args: unknown[] = [];
+  if (scope.mode === "own") {
+    cond.push("userId = ?");
+    args.push(scope.userId);
+  } else if (scope.mode === "unclaimed") {
+    cond.push("userId IS NULL");
+  }
+  const res = await libsql.execute({
+    sql: `SELECT COUNT(*) AS c FROM Route WHERE ${cond.join(" AND ")}`,
+    args: args as never[],
+  });
+  return Number((res.rows[0] as Record<string, unknown>).c);
+}
+
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   try {
@@ -58,13 +102,14 @@ export async function GET(request: NextRequest) {
     // с суммой по поездкам в других разделах.
     // v2.26.0 (ТЗ §10): + счётчики ПОЕЗДОК (tripsCount) — «поездки» = Trip;
     // totalSessions/todaySessions сохраняются как «записи» (обратная совместимость).
+    // v2.29.0 (MI-4): totalRoutes/TrafficJob — тоже в скоупе запрашивающего.
     const [totalSessions, totalPoints, totalRoutes, totalTrafficJobs, deadJobs, pendingJobs, totalTrips] = await Promise.all([
       db.session.count({ where: { deletedAt: null, ...scopeW } }),
       db.gpsPoint.count({ where: { session: { deletedAt: null, ...scopeW } } }),
-      db.route.count(),
-      db.trafficJob.count(),
-      db.trafficJob.count({ where: { status: "dead" } }),
-      db.trafficJob.count({ where: { status: "pending" } }),
+      countRoutesForScope(scope),
+      countTrafficJobsForScope(scope, null),
+      countTrafficJobsForScope(scope, "dead"),
+      countTrafficJobsForScope(scope, "pending"),
       tripsEnabled() ? countTripsForScope(scope) : Promise.resolve(0),
     ]);
 
@@ -79,20 +124,13 @@ export async function GET(request: NextRequest) {
 
     // v2.16.0 (I4): независимые запросы — параллельно (было 4
     // последовательных HTTPS-раундтрипа к Turso); v2.18.0: + todaySessions (5-й)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
     const twelveWeeksAgo = new Date();
     twelveWeeksAgo.setDate(twelveWeeksAgo.getDate() - 84); // v2.16.0 (V4): имя = суть (12 недель, не «30 дней»)
-    const [todaySessions, recentSessions, totalBytesResult, heatmapSessions, ingestTrace, todayTrips] = await Promise.all([
+    // v2.29.0 (MI-3 кодревью): recentSessions (findMany до 5000 строк) удалён —
+    // выбирался на каждый 30-сек poll и НИГДЕ не использовался (0 потребителей).
+    const [todaySessions, totalBytesResult, heatmapSessions, ingestTrace, todayTrips] = await Promise.all([
       db.session.count({
         where: { startTime: { gte: new Date(todayStartMs) }, deletedAt: null, ...scopeW },
-      }),
-      db.session.findMany({
-        where: { startTime: { gte: sevenDaysAgo }, deletedAt: null, ...scopeW },
-        select: { startTime: true, endTime: true, pointCount: true, payloadBytes: true },
-        orderBy: { startTime: "asc" },
-        // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 резал спарклайн
-        take: 5000,
       }),
       // v2.18.0: where: {deletedAt: null} — лишний (aggregate SQL уже фильтрует живые)
       db.session.aggregate({

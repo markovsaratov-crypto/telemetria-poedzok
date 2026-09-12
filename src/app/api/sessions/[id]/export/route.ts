@@ -10,7 +10,7 @@
 import { NextRequest } from "next/server";
 import { zExportBody } from "@/lib/validation";
 import { db, libsql } from "@/lib/db";
-import { authorizeRequest } from "@/lib/auth";
+import { authorizeRequest, getUserIdFromRequest } from "@/lib/auth";
 import { dataScopeFor, sessionVisibleTo } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
@@ -70,7 +70,7 @@ export async function POST(
         targetId: String(session.id),
         targetType: "Session",
         actorType: auth.via === "cookie" ? "user" : "system",
-        actorId: auth.via === "cookie" ? "owner" : "api",
+        actorId: (await getUserIdFromRequest(request)) ?? (auth.via === "cookie" ? "owner" : "api"), // v2.29.0 (MI-2): честная атрибуция пользователя, а не всегда «owner»
         sessionId: String(session.id),
         metadata: { format: parsed.data.format, async: true, jobId: String(job.id) },
       });
@@ -93,7 +93,7 @@ export async function POST(
       targetId: String(session.id),
       targetType: "Session",
       actorType: auth.via === "cookie" ? "user" : "system",
-      actorId: auth.via === "cookie" ? "owner" : "api",
+      actorId: (await getUserIdFromRequest(request)) ?? (auth.via === "cookie" ? "owner" : "api"), // v2.29.0 (MI-2): честная атрибуция пользователя, а не всегда «owner»
       sessionId: String(session.id),
       metadata: { format: parsed.data.format, async: false, sizeBytes: content.length },
     });

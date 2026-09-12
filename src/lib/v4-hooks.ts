@@ -253,14 +253,26 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
       gapTime,
       speedP50: avg(m.map((x) => x.speedP50)),
       speedStdDev: avg(m.map((x) => x.speedStdDev)),
-      // Распределение по 6 бакетам — поэлементная сумма гистограмм.
+      // Распределение по 5 бакетам — ВЗВЕШЕННОЕ среднее гистограмм.
+      // v2.29.0 (MI-11 кодревью): раньше проценты сессий складывались как равные
+      // (2 сессии → до 200%; короткая поездка весила как длинная). Теперь вес =
+      // активная длительность записи (гистограммы — доли активных точек);
+      // fallback на pointCount, у пустых — 1.
       speedDistribution: (() => {
-        const dists = m
-          .map((x) => x.speedDistribution)
-          .filter((d): d is number[] => Array.isArray(d) && d.length > 0);
-        if (!dists.length) return [];
-        const len = Math.max(...dists.map((d) => d.length));
-        return Array.from({ length: len }, (_, i) => sum(dists.map((d) => d[i] ?? 0)));
+        const pairs = sorted
+          .map((s) => {
+            const d = s.methodology?.speedDistribution;
+            if (!Array.isArray(d) || d.length === 0) return null;
+            const w = s.methodology?.activeTrip?.activeDuration ?? s.pointCount ?? 1;
+            return { d, w: Math.max(1, w) };
+          })
+          .filter((p): p is { d: number[]; w: number } => p != null);
+        if (!pairs.length) return [];
+        const len = Math.max(...pairs.map((p) => p.d.length));
+        const wSum = sum(pairs.map((p) => p.w));
+        return Array.from({ length: len }, (_, i) =>
+          Math.round((sum(pairs.map((p) => (p.d[i] ?? 0) * p.w)) / wSum) * 10) / 10
+        );
       })(),
       timeInTraffic: sum(m.map((x) => x.timeInTraffic)),
       timeAtCruise: sum(m.map((x) => x.timeAtCruise)),
@@ -549,8 +561,18 @@ export function usePeriodStats(period: PeriodKey) {
     retry: 1,
   });
 
+  // v2.29.0 (MI-12 кодревью): trips пробрасывается и ВНУТРЬ data — потребители
+  // (analytics-view) читают periodAgg.data.trips, а не верхнеуровневый trips;
+  // раньше в data попадало значение, замороженное на момент queryFn (гонка
+  // /api/trips vs /api/sessions: шапка показывала записи вместо поездок до
+  // истечения staleTime агрегата). Теперь data.trips всегда = живой счётчик.
+  const data = useMemo(
+    () => (agg.data ? { ...agg.data, trips: tripsCount } : agg.data),
+    [agg.data, tripsCount]
+  );
   return {
     ...agg,
+    data,
     trips: tripsCount,
     isLoading: sessions.isLoading || agg.isLoading,
     isError: sessions.isError || agg.isError,

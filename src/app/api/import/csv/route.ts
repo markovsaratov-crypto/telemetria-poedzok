@@ -92,7 +92,10 @@ export async function POST(request: NextRequest) {
     for (const row of rows) {
       const lat = Number(row[iLat]);
       const lon = Number(row[iLon]);
+      // v2.29.0 (MI-7 кодревью): диапазонные проверки — паритет с zIngestBody
+      // (validation.ts ±90/±180); мусорные координаты (0/999 и т.п.) не попадают в БД.
       if (isNaN(lat) || isNaN(lon)) continue;
+      if (lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
       const deviceId = iDevice >= 0 ? row[iDevice] || "csv-import" : "csv-import";
       const clientId = iClient >= 0 && row[iClient] ? row[iClient] : fallbackClientId;
       const key = `${deviceId}:${clientId}`;

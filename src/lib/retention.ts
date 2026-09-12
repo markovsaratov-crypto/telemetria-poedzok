@@ -2,6 +2,7 @@
 import { db, libsql } from "./db";
 import { env } from "./env";
 import { writeAudit } from "./audit";
+import { recomputeAfterSessionDelete } from "./trip-grouping"; // v2.29.0 (MI-1)
 
 // Hard-delete сессий с purgedAt старше archive retention, или сразу если архивация отключена.
 export async function runRetention(): Promise<{ purged: number; archived: number }> {
@@ -45,6 +46,9 @@ export async function runRetention(): Promise<{ purged: number; archived: number
       actorType: "retention-cron",
       metadata: { reason: "retention", pointCount: c.pointCount },
     });
+    // v2.29.0 (MI-1 кодревью): soft-delete записи — ГРАНИЦА поездки (§4 ТЗ):
+    // без пересчёта поездки продолжают включать удалённые записи (призрачные составы).
+    await recomputeAfterSessionDelete(String(c.id));
   }
 
   // 2. Hard-delete сессий с deletedAt старше GRACE_PERIOD_DAYS
@@ -78,6 +82,9 @@ export async function runRetention(): Promise<{ purged: number; archived: number
       actorType: "retention-cron",
       metadata: { deviceId: s.deviceId, pointCount: s.pointCount, reason: "grace-period-expired" },
     });
+    // v2.29.0 (MI-1 кодревью): purge удаляет ТОЧКИ записи — пересчёт поездок
+    // устройства, иначе поездки ссылаются на исчезнувшие фрагменты.
+    await recomputeAfterSessionDelete(String(s.id));
     purged += 1;
   }
 

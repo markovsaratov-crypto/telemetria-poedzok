@@ -2,7 +2,7 @@
 // DELETE /api/sessions/[id] — soft-delete с grace period (§4.10)
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { authorizeRequest } from "@/lib/auth";
+import { authorizeRequest, getUserIdFromRequest } from "@/lib/auth";
 import { dataScopeFor, sessionVisibleTo } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
@@ -119,7 +119,7 @@ export async function DELETE(
       targetId: id,
       targetType: "Session",
       actorType: auth.via === "cookie" ? "user" : "system",
-      actorId: auth.via === "cookie" ? "owner" : "api",
+      actorId: (await getUserIdFromRequest(request)) ?? (auth.via === "cookie" ? "owner" : "api"), // v2.29.0 (MI-2): честная атрибуция пользователя, а не всегда «owner»
       sessionId: id,
       metadata: { pointCount: session.pointCount, reason: "user-request", gracePeriodDays: env().GRACE_PERIOD_DAYS },
     });

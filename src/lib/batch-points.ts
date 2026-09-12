@@ -119,9 +119,13 @@ export async function loadSessionsForBatch(
   }
 
   // ——— точки: чанки по 8 id, параллельно ———
+  // v2.29.0 (MI-5 кодревью): точки запрашиваем ТОЛЬКО для id, прошедших
+  // scope-фильтр меты (out.keys) — раньше тянулись и точки вне-скоупных id
+  // (лишний трафик из Мумбаи; точки потом отбрасывались в памяти).
+  const scopedIds = order;
   const chunks: string[][] = [];
-  for (let i = 0; i < ids.length; i += POINTS_CHUNK) {
-    chunks.push(ids.slice(i, i + POINTS_CHUNK));
+  for (let i = 0; i < scopedIds.length; i += POINTS_CHUNK) {
+    chunks.push(scopedIds.slice(i, i + POINTS_CHUNK));
   }
   const pointResults = await Promise.all(
     chunks.map((chunk) => {

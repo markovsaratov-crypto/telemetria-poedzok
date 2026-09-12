@@ -27,9 +27,12 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
     // P0-фикс (v2.9.1): db-обёртки findMany имеют тихие лимиты (take=20/50) и
     // db.session.findMany игнорирует include → бэкап терял GPS-точки и хвосты таблиц.
     // Спека §8.2/§9.8 требует полного экспорта — прямой SQL гарантирует полноту.
+    // v2.29.0 (MA-2 кодревью): + Trip (иначе поездки не восстанавливаются из дампа),
+    // + IngestMessage (ledger идемпотентности инжеста — без него ретраи после
+    // рестора задвоят точки), + _AlertState (состояние крон-алертов).
     const tables = [
-      "Session", "GpsPoint", "Route", "RouteCache", "TrafficJob",
-      "AuditLog", "ExportJob", "BackupJob", "Setting",
+      "Session", "GpsPoint", "Trip", "IngestMessage", "Route", "RouteCache", "TrafficJob",
+      "AuditLog", "ExportJob", "BackupJob", "Setting", "_AlertState",
     ] as const;
     const rows: Record<string, unknown[]> = {};
     const tableCounts: Record<string, number> = {};

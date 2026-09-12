@@ -1236,7 +1236,8 @@ function Stat({
 }) {
   return (
     <div className="stat">
-      <div className="v" dangerouslySetInnerHTML={{ __html: value }} />
+      {/* v2.29.0 (MI-9): value — текст, не HTML (XSS-мина рядом с CR-1) */}
+      <div className="v">{value}</div>
       <div className="l">
         <span data-tip={tip}>{label}</span>
       </div>

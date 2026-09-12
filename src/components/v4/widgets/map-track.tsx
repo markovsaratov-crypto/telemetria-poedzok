@@ -25,41 +25,73 @@ import "leaflet/dist/leaflet.css";
 import { useTheme } from "next-themes";
 import type { TrackResponse } from "@/lib/api-client";
 
-// === Tile layers (v2.10.0 R2: free, no API key) ===
+// === Tile layers (v2.29.0: все провайдеры — без API-ключа) ===
+// v2.29.0: CARTO (basemaps.cartocdn.com) с авг 2026 требует API-ключ и отдаёт
+// error-тайл «API key required» анонимным запросам → слой dark переведён на
+// Esri World Dark Gray Canvas (Base + Reference-подписи, бесплатный, без ключа;
+// тот же CDN server.arcgisonline.com, что и satellite). Voyager удалён по той же причине.
 type LayerKind = "street" | "satellite" | "terrain" | "dark";
+
+type TileDef = { url: string; attr: string; maxNativeZoom?: number };
 
 const LAYERS: Record<
   LayerKind,
-  { url: string; attr: string; label: string; emoji: string; maxZoom?: number }
+  { tiles: TileDef[]; maxZoom: number; label: string; emoji: string }
 > = {
   // OSM Standard — free, no API key, default layer.
   street: {
-    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-    attr: '&copy; OpenStreetMap contributors',
+    tiles: [
+      {
+        url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+        attr: "&copy; OpenStreetMap contributors",
+      },
+    ],
     label: "Street",
     emoji: "🛣",
     maxZoom: 19,
   },
   // Esri World Imagery — free satellite tiles.
   satellite: {
-    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    attr: "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics",
+    tiles: [
+      {
+        url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr: "Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics",
+      },
+    ],
     label: "Satellite",
     emoji: "🗺",
     maxZoom: 19,
   },
   // OpenTopoMap — free terrain tiles.
   terrain: {
-    url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-    attr: '&copy; OpenStreetMap contributors, SRTM | &copy; OpenTopoMap (CC-BY-SA)',
+    tiles: [
+      {
+        url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+        attr: "&copy; OpenStreetMap contributors, SRTM | &copy; OpenTopoMap (CC-BY-SA)",
+      },
+    ],
     label: "Terrain",
     emoji: "🏔",
     maxZoom: 17,
   },
-  // CartoDB dark_all — free dark tiles.
+  // Esri World Dark Gray Canvas — free, no API key.
+  // Base = тёмная подложка (нативный зум 16, дальше Leaflet апскейлит),
+  // Reference = подписи городов/дорог поверх подложки.
   dark: {
-    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-    attr: '&copy; OpenStreetMap contributors &copy; CARTO',
+    tiles: [
+      {
+        url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        attr: "Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ, USGS, NOAA",
+        maxNativeZoom: 16,
+      },
+      {
+        url: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+        attr: "",
+        // v2.29.0 (MI-8): Reference тоже апскейлится с 16 — иначе на z17–20
+        // подписи пропадали (404 на несуществующих нативных тайлах).
+        maxNativeZoom: 16,
+      },
+    ],
     label: "Dark",
     emoji: "🌑",
     maxZoom: 20,
@@ -145,9 +177,8 @@ export function V4MapTrack({ track, isLoading, isError }: MapTrackProps) {
     }
   }, [track, isDark, userTouched]);
 
-  const tileUrl = LAYERS[layer].url;
-  const tileAttr = LAYERS[layer].attr;
-  const tileMaxZoom = LAYERS[layer].maxZoom ?? 19;
+  const layerDef = LAYERS[layer];
+  const layerMaxZoom = layerDef.maxZoom;
 
   // Сегменты трека (каждый — Polyline своим цветом).
   const segments = React.useMemo(() => {
@@ -239,11 +270,20 @@ export function V4MapTrack({ track, isLoading, isError }: MapTrackProps) {
             center={[55.751244, 37.618423]}
             zoom={12}
             scrollWheelZoom
-            style={{ height: "100%", width: "100%", background: "#F7F2F5" }}
+            style={{ height: "100%", width: "100%", background: isDark ? "#232328" : "#F7F2F5" }}
             attributionControl
             zoomControl
           >
-            <TileLayer url={tileUrl} attribution={tileAttr} maxZoom={tileMaxZoom} />
+            {/* v2.29.0: слой может состоять из нескольких тайл-слоёв (dark = подложка + подписи) */}
+            {layerDef.tiles.map((t, ti) => (
+              <TileLayer
+                key={`tile-${layer}-${ti}`}
+                url={t.url}
+                attribution={t.attr}
+                maxNativeZoom={t.maxNativeZoom}
+                maxZoom={layerMaxZoom}
+              />
+            ))}
             {/* Цветовые сегменты по скорости */}
             {segments.map((seg) => (
               <Polyline

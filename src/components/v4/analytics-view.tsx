@@ -1145,7 +1145,8 @@ function Stat({
 }) {
   return (
     <div className="stat">
-      <div className={`v ${cls ?? ""}`} dangerouslySetInnerHTML={{ __html: value }} />
+      {/* v2.29.0 (MI-9): value — текст, не HTML (XSS-мина рядом с CR-1) */}
+      <div className={`v ${cls ?? ""}`}>{value}</div>
       <div className="l">
         <span data-tip={tip}>{label}</span>
       </div>
@@ -1509,7 +1510,7 @@ function MapBlock({
           Цвет трека — средняя скорость сегмента (диапазоны те же, что в скоростном профиле).
           Маркеры старта и финиша — границы активной поездки (§4.11). Разрывы записи (&gt;30 сек)
           показаны пунктиром. Слой по умолчанию — «Street» (OpenStreetMap Standard tiles),
-          доступны Satellite (Esri World Imagery), Terrain (OpenTopoMap), Dark (CartoDB dark_all).
+          доступны Satellite (Esri World Imagery), Terrain (OpenTopoMap), Dark (Esri Dark Gray).
         </p>
       </div>
     </section>

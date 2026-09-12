@@ -3,7 +3,7 @@
 **Продукт:** Телемат (ранее «Телеметрия Поездки» / Telemetria Poedzok) — PWA-платформа записи и анализа телеметрии автомобильных поездок.
 **Продакшен:** https://poedzok.fun (пользовательский домен через TurboFlare CDN; origin — https://telemetria-poedzok.onrender.com, ранбук — `docs/CUSTOM_DOMAIN.md`)
 **Репозиторий:** https://github.com/markovsaratov-crypto/telemetria-poedzok (ветка `main`; вся документация — в папке `docs/`: https://github.com/markovsaratov-crypto/telemetria-poedzok/tree/main/docs)
-**Версия приложения:** 2.28.0 (единый источник — `package.json`; `/health` всегда отдаёт её)
+**Версия приложения:** 2.29.0 (единый источник — `package.json`; `/health` всегда отдаёт её)
 **Документ:** полная техническая документация для передачи в управление технической поддержке и администратору. Описывает текущее состояние системы «как есть», без истории изменений.
 
 ---
@@ -55,9 +55,10 @@
 
 ### Аналитика
 
-- Дашборд: всего поездок/точек/маршрутов, «сегодня» в таймзоне клиента, спарклайн 7 дней, тепловая карта 12 недель, рекорд скорости, лидерборд устройств, облако тегов.
-- Период-агрегат «Аналитика → период»: батч-запросы статов/events/track по всем сессиям периода (3 запроса вместо десятков).
-- «Поездки»: список записей с курсорной пагинацией, карточки с KPI, геокодированные адреса конечных точек, склейка кусков одной поездки в UI-группы.
+- Заголовок периода (Сегодня/7 дней/30 дней/Всё время): поездок · записей · точек; рекорд скорости за всё время.
+- Период-агрегат «Аналитика → период»: батч-запросы статов/events/track по всем сессиям периода (3 запроса), серверный предрасчёт-кэш (v2.27), карта периода, буллетчарты EcoScore/Эффективность, тяжёлые сегменты, группы маршрутов.
+- «Поездки»: СЕРВЕРНЫЕ поездки (сущность Trip, v2.26: одна физическая поездка = одна карточка «N записей»), адреса старта/финиша с городом (v2.28), бейдж EcoScore с границами зон, план-факт поездки; легаси-список записей — фолбэк.
+- (v2.29.0) Мёртвые компоненты старого UI (лидерборд устройств, облако тегов, спарклайн, мини-карты, replay/compare и ещё ~20) удалены из кодовой базы.
 - 62 метрики методологии (см. §11 и `docs/METHODOLOGY.md`): дистанция/длительность (сырая и активная), MovingTime state machine, спидограмма, EcoScore с корпусной калибровкой, G-G-физика (манёвры/резкие события), план-факт (маршрутизация), сравнительные метрики маршрутов (Theil-Sen тренд, P75-хотспоты, trafficPattern).
 
 ### Управление данными
@@ -240,7 +241,7 @@
 **User** — аккаунты multi-user (используется администратором; регистрация закрыта).
 `id`, `email` (unique), `passwordHash` (bcrypt), `role` (`user`|`admin`), `apiKey` (unique, per-user Bearer), `createdAt`, `updatedAt`. Индекс `role`.
 
-**Session** — запись телеметрии (батч/кусок поездки; «поездка» в UI — склейка записей).
+**Session** — запись телеметрии (батч/транспортный фрагмент; «поездка» = серверная сущность Trip, состав — `Trip.sessionIds`).
 `id`, `userId`?, `deviceId`, `clientId`?, `deviceName`?, `startTime`, `endTime`?, `pointCount`, `payloadBytes`, `status` (`active`|`recording`|`completed`), `deletedAt`? (soft-delete), `purgedAt`?, `routeId`? (FK → admin-маршрут Route), `routeHash`? (детерминированный хеш §10.0, группировка концептуально одинаковых маршрутов), `topologyHash`?, `trafficJobId`?, `notes`?, `tags`?, таймстемпы.
 Unique `@@unique([deviceId, clientId])` — идемпотентность `/api/ingest`. Индексы: `(status,endTime)`, `routeId`, `routeHash`, `topologyHash`, `deletedAt`, `startTime`.
 
@@ -437,11 +438,11 @@ Unique `@@unique([deviceId, clientId])` — идемпотентность `/api
 | `PUT /api/admin/settings` | admin | `{key, value}` — строго по allow-list |
 | `GET /api/admin/jobs?status=&limit=` | admin | Список TrafficJob (+session-инфо, без result-блоба), лимиты clamped |
 | `POST /api/admin/requeue` | admin | `{jobId, force?}` — dead → pending, аудит `admin.requeue` |
-| `POST /api/admin/backup` | admin ИЛИ CRON_SECRET (POST) | Полный логический дамп: BackupJob + файл `/tmp/backups/backup-<ts>-<id>.json` (sha256 + верификация перечитыванием). Ответ `{backupId, filePath, checksum, fileSize, tableCounts}`. 1/час |
+| `POST /api/admin/backup` | admin ИЛИ CRON_SECRET (POST) | Полный логический дамп: BackupJob + файл `/tmp/backups/backup-<ts>-<id>.json` (sha256 + верификация перечитыванием). Ответ `{backupId, filePath, checksum, fileSize, tableCounts}`. 1/час. Состав с v2.29.0: Session, GpsPoint, **Trip**, **IngestMessage**, Route, RouteCache, TrafficJob, AuditLog, ExportJob, BackupJob, Setting (без `diag.ingest.raw`), **_AlertState** + информационные users (без секретов) |
 | `GET /api/admin/backup` | admin (default-скоп) | Последние 50 BackupJob |
 | `POST /api/admin/backup/github` | admin ИЛИ CRON_SECRET (POST) | Дамп → **draft**-релиз GitHub (приватный) с ассетом; тело релиза содержит sha256. Ответ `{backupId, releaseId, releaseUrl, assetUrl, assetSize, checksum, draft:true}` |
 | `GET /api/admin/backup/github` | admin | Список бэкап-релизов |
-| `POST /api/admin/restore` | admin (1/час) | **Заглушка**: 202 `Restore queued…` — восстановление ручное (см. §14.3) |
+| `POST /api/admin/restore` | admin (1/час) | Полное восстановление из дампа-файла BackupJob (см. §14.3): sha256-проверка, path-containment, атомарный `libsql.batch` (DELETE все таблицы в FK-safe порядке + INSERT дампа), колонки — по вайлисту (v2.16 S3). `{ok, restoredAt, tablesCount, totalRows, checksumVerified}` |
 | `GET /api/admin/alerts` | admin | Текущее состояние 6 правил алертов |
 
 ### 9.8. Воркер и кроны
@@ -525,7 +526,7 @@ Cron 03:00 UTC: сессии старше `RETENTION_DAYS` → soft-delete; по
 - **PWA**: `public/sw.js` (кэш статики, фоновое обновление с тостом), `manifest.webmanifest`, иконки.
 - **Серверное состояние**: TanStack Query; staleTime 30 c; live-сессии — поллинг 15 c (поштучные роуты); параллелизм GET-запросов ограничен клиентским семафором (6).
 - **Батч-архитектура**: префетч `stats/batch` на корне лейаута; ответ «просеивается» в per-id кэш (`setQueryData`), поэтому карточки «Поездок» рендерятся без сетевых запросов; период-агрегат аналитики — `stats+events+track` батчи (3 запроса).
-- **Карта**: Leaflet, слои OSM/OpenTopoMap/Esri/CartoDB (CSP allow-list), полилайн трека, мини-карты.
+- **Карта**: Leaflet, слои OSM Street / OpenTopoMap Terrain / Esri World Imagery (satellite) / Esri World Dark Gray Canvas (dark: Base + Reference-подписи, апскейл с нативного z16). CARTO-тайлы (dark_all/voyager) удалены в v2.29.0: провайдер требует API-ключ с авг 2026 и отдаёт error-тайл «API key required» анонимным запросам. CSP allow-list: `*.tile.openstreetmap.org`, `*.tile.opentopomap.org`, `server.arcgisonline.com`.
 - **UX**: командная палитра (Ctrl+K), глобальный поиск, тёмная тема (next-themes), тосты Sonner, skeleton-состояния, 25 c watchdog на гейт батча с фолбэком на поштучные запросы.
 
 ## 13. Наблюдаемость
@@ -594,21 +595,20 @@ curl https://telemetria-poedzok.onrender.com/api/admin/backup \
 
 Верификация: sha256 из ответа = checksum в BackupJob и в теле релиза; бэкап дополнительно самопроверяется перечитыванием (BACKUP_VERIFICATION_ENABLED).
 
-### 14.3. Восстановление из дампа (RTO 30–60 мин)
+### 14.3. Восстановление из дампа (RTO 5–15 мин)
 
-`POST /api/admin/restore` — заглушка (202, ручная операция). Процедура:
+`POST /api/admin/restore {backupId}` — рабочая реализация (с v2.16; v2.29 — покрытие всех таблиц):
 
-1. Скачать дамп-ассет из draft-релиза (GitHub UI или API с токеном) — файл `backup-<ts>.json`.
-2. Сверить `sha256sum backup-…json` с checksum из тела релиза.
-3. Развернуть в новую БД Turso (или локальный libSQL): создать таблицы по `prisma/schema.prisma`, вставить строки (BigInt-строки `"BIGINT:…"` → обратно в числа; таблица User восстанавливается частично — passwordHash в дампах нет, аккаунты пересоздаются паролем, id сессий сохраняются).
-4. Сменить `DATABASE_URL`/`TURSO_AUTH_TOKEN` в Render на восстановленную БД → деплой-рестарт.
-5. Проверка: `/health` → db ok; сверка `totalSessions`/`totalPoints` с `tableCounts` дампа; smoke-тест UI.
-6. На время restore БД недоступна для записи (ingest вернёт 5xx) — делать в окно низкой нагрузки. Дисциплина: не чаще 1 раза/час.
+1. Дамп-файл должен лежать в `/tmp/backups` инстанса (эфемерный!): для свежего restore сначала перезапустить крон `POST /api/admin/backup` (создаст файл на диске) и restore сразу; ассет draft-релиза — для полномасштабного ручного восстановления в новую БД.
+2. Роут: находит BackupJob по id → sha256-проверка файла → атомарный `libsql.batch`: DELETE всех таблиц в FK-safe порядке (текущая BackupJob-строка сохраняется для провенанса) + INSERT строк дампа (колонки — по вайлисту, неизвестные отбрасываются с warn; BigInt-строки `"BIGINT:…"` → обратно).
+3. Состав дампа/рестора v2.29.0: Session, GpsPoint, Trip, IngestMessage, Route, RouteCache, TrafficJob, AuditLog, ExportJob, BackupJob, Setting, _AlertState + users (информационно: passwordHash в дампах нет — аккаунты пересоздаются паролем, id сессий сохраняются). Старые дампы (до v2.29) не содержат Trip/IngestMessage — restore корректно чистит эти таблицы (поездки восстановит backfill `POST /api/admin/backfill-trips`).
+4. Проверка после: `/health` → db ok; сверка `totalSessions`/`totalPoints`/Trip с `tableCounts` ответа restore; smoke-тест UI.
+5. На время restore БД недоступна для записи (ingest 5xx) — окно низкой нагрузки; не чаще 1 раза/час.
 
 ### 14.4. RPO/RTO
 
 - RPO: дамп-уровень durable — еженедельный GitHub-релиз; ежедневный уровень живёт в эфемерном `/tmp` (строка BackupJob — в БД). Перед рискованными операциями (миграции, массовые удаления) — ручной `POST /api/admin/backup/github`.
-- RTO: 30–60 мин (ручная процедура §14.3).
+- RTO: 5–15 мин (restore-роут §14.3; полный ручной перенос в новую БД — 30–60 мин).
 
 ## 15. Runbook: типовые операции и инциденты
 

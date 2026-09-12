@@ -206,14 +206,16 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
   const ecoScoreValue = wavg(
     m.map((x) => ({ v: x.ecoScore?.value ?? null, w: x.activeTrip?.activeDuration ?? 0 })) as Array<{ v: number | null; w: number }>
   );
+  // v2.26.1: подписи рейтинга — та же шкала стиля вождения, что и в ecoLab
+  // (плавно / умеренно / агрессивно); старое «резко» было непонятно пользователю.
   const rating =
     ecoScoreValue == null
       ? "—"
       : ecoScoreValue >= 80
-        ? "отлично"
+        ? "плавно"
         : ecoScoreValue >= 60
-          ? "неплохо"
-          : "резко";
+          ? "умеренно"
+          : "агрессивно";
 
   const hours = duration / 3600;
   const distTotal = distance;

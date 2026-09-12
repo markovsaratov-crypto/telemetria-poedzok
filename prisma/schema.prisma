@@ -48,6 +48,17 @@ model Session {
   tripId       String?
   notes        String?
   tags         String?
+  // v2.27.0 (ПЕРФ-КЭШ, конвенция §6.1 как у Trip): предвычисленные payloads
+  // батч-роутов. null = «не посчитано». Инвалидация: cachePointCount ≠
+  // pointCount (инжест инкрементит pointCount) или cacheVersion устарел.
+  // statsCache — сериализованный SessionStatsResult (без route: план-факт
+  // дорабатывается воркером ПОСЛЕ финализации и всегда собирается живым);
+  // eventsCache — SessionEventsPayload; trackCache — TrackPayload.
+  statsCache    String?
+  eventsCache   String?
+  trackCache    String?
+  cachePointCount Int?
+  cacheVersion  Int?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 

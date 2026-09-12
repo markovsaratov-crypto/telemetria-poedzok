@@ -13,6 +13,7 @@
 import { libsql } from "./db";
 import { logger } from "./logger";
 import { assignTripOnSessionFinalize } from "./trip-grouping"; // v2.26.0 (ТЗ §7): назначение поездок при финализации
+import { warmSessionCache } from "./session-cache"; // v2.27.0: фоновый прогрев кэша предрасчёта
 
 /**
  * Гарантирует наличие TrafficJob для сессии. Вставляет pending-джоб ТОЛЬКО если
@@ -57,15 +58,32 @@ export async function ensureTrafficJob(sessionId: string): Promise<void> {
  * поездок. assignTripOnSessionFinalize вызывает ЕДИНСТВУЮ реализацию правила
  * (recomputeTripsForDevice) для затронутой цепочки устройства; сбой
  * назначения НЕ роняет финализацию (warn-лог внутри, §16 ТЗ).
+ *
+ * v2.27.0 (ПЕРФ-КЭШ): финализация — ГЛАВНАЯ точка предрасчёта метрик. Точки
+ * сессии уже не изменятся (новый пуш после gap>60с создаёт НОВУЮ сессию),
+ * поэтому ПРИ переходе recording→completed фоново считаем и записываем
+ * персистентный кэш payloads (stats/events/track) — аналитика открывается
+ * по готовым цифрам. Fire-and-forget: сбой/медленный расчёт не роняет и
+ * не тормозит финализацию (кэш доберёт write-through батч-роута).
  */
 export async function finalizeSession(sessionId: string): Promise<void> {
   const now = new Date().toISOString();
-  await libsql.execute({
+  const closed = await libsql.execute({
     sql: `UPDATE Session SET status = 'completed', updatedAt = ? WHERE id = ? AND status = 'recording'`,
     args: [now, sessionId],
   });
   await ensureTrafficJob(sessionId);
   // v2.26.0 (ТЗ §7): поездки — под флагом (expand-фаза ТЗ §13); non-fatal.
   await assignTripOnSessionFinalize(sessionId);
+  // v2.27.0: прогрев кэша — только при РЕАЛЬНОМ переходе (rowsAffected>0),
+  // чтобы повторные финализаторы (cron/жнец/ингест гонка) не грели зря
+  if ((closed.rowsAffected ?? 0) > 0) {
+    void warmSessionCache(sessionId).catch((err) => {
+      logger.warn("session cache warm failed (non-fatal)", {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
   logger.info("Session finalized", { sessionId });
 }

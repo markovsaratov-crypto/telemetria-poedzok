@@ -3,7 +3,7 @@
 **Продукт:** Телемат (ранее «Телеметрия Поездки» / Telemetria Poedzok) — PWA-платформа записи и анализа телеметрии автомобильных поездок.
 **Продакшен:** https://poedzok.fun (пользовательский домен через TurboFlare CDN; origin — https://telemetria-poedzok.onrender.com, ранбук — `docs/CUSTOM_DOMAIN.md`)
 **Репозиторий:** https://github.com/markovsaratov-crypto/telemetria-poedzok (ветка `main`; вся документация — в папке `docs/`: https://github.com/markovsaratov-crypto/telemetria-poedzok/tree/main/docs)
-**Версия приложения:** 2.30.1 (единый источник — `package.json`; `/health` всегда отдаёт её)
+**Версия приложения:** 2.31.0 (единый источник — `package.json`; `/health` всегда отдаёт её)
 **Документ:** полная техническая документация для передачи в управление технической поддержке и администратору. Описывает текущее состояние системы «как есть», без истории изменений.
 
 ---
@@ -417,7 +417,7 @@ Unique `@@unique([deviceId, clientId])` — идемпотентность `/api
 | `GET /api/stats/batch?ids=` | api (read-скоп) | Батч статов: ids ≤ 50, формат id `[A-Za-z0-9_-]{1,64}`, дедуп. Ответ `{stats: SessionStats[], missing: [id]}` — каждая запись побайтно идентична `/api/sessions/{id}/stats`. Загрузка чанками по 8 id параллельно; серверный TTL-кэш 30 с (хит — заголовок `X-Cache: ttl`) |
 | `GET /api/events/batch?ids=` | api (read-скоп) | Батч событий (G-G-физика): `{events: […], missing: []}`; TTL 30 с |
 | `GET /api/track/batch?ids=` | api (read-скоп) | Батч треков для карты: `{tracks: […], missing: []}`; TTL 30 с |
-| `GET /api/sessions/{id}/stats` | api (read-скоп) | Полный конвейер метрик сессии (SessionStats): базовые, скоростные, поведенческие, спидограмма speedProfile, EcoScore, план-факт из TrafficJob |
+| `GET /api/sessions/{id}/stats` | api (read-скоп) | Полный конвейер метрик сессии (SessionStats): базовые, скоростные, поведенческие, спидограмма speedProfile, EcoScore, план-факт из TrafficJob. Payload-контракт (v2.31): `speedP50`/`speedStdDev` — в м/с (конверсию в км/ч делает клиент, ×3,6); `speedDistribution` — 6 бакетов §5.3; `pointDensity` — точек/мин (UI показывает точек/сек); `activeTrip` — legs-поля §4.11 |
 | `GET /api/sessions/{id}/events` | api (read-скоп) | События сессии: манёвры/резкие события (G-G, центральная разность), rawPoints |
 | `GET /api/sessions/{id}/track` | api (read-скоп) | Трек сессии для карты (точки + мета) |
 | `GET /api/sessions/{id}/route-comparison` | api | Сравнение с каноническим полилайном routeHash-группы (§10.6) |
@@ -493,15 +493,15 @@ Session(recording) + GpsPoint[] ──(gap>60c / cron / жнец)──► final
 Поштучный роут и батч-роут делят один код (гарантия паритета ответов):
 
 1. Загрузка точек (батч: меты одним IN-запросом ≤ 50, точки — параллельные SELECT чанками по 8 id, хронология внутри id сохраняется).
-2. Активное окно §4.11: `computeMovingTime` (state machine гистерезис 5/2 км/ч, debounce 5 c, gap 30 c) + `computeActiveTrip` (pre/post trip idle).
-3. Методология §12: дистанция (гаверсинус, только активное окно), скорости (нормализация anti-jitter + пересчёт по геометрии для битых полей), спидограмма (buckets), EcoScore (CAP §7.3, корпусная калибровка `src/lib/eco-corpus.ts` — общий кэш с воркером).
+2. Активное окно §4.11: `computeMovingTime` (state machine гистерезис 5/2 км/ч, debounce 5 c, gap 30 c) + `computeActiveTrip` (pre/post trip idle; v2.25 — разбиение на legs стоянками ≥ 900 с, `activeDuration = Σ legs`).
+3. Методология §12: дистанция (гаверсинус, только активная часть — объединение окон legs), скорости (нормализация §3.2а: отбраковка спайков по геометрии, пересчёт по геометрии для битых полей, медиана-3, кап 200 км/ч, accuracy ≤ 100 м), спидограмма (даунсемпл ≤ 240 точек, окраска по бакетам §5.3), EcoScore (CAP §7.3, корпусная калибровка `src/lib/eco-corpus.ts` — общий кэш с воркером).
 4. План-факт: `TrafficJob.result` по сессии (IN-запрос для батча).
 5. Сборка `SessionStats` (включая `speedProfile`, route-инфо, `missing`-обработка для батча).
 6. TTL-кэш 30 с (LRU ≤ 32 записей на globalThis; ключ — отсортированные ids; хит помечается `X-Cache: ttl`). Инвалидация не нужна: живые `recording`-сессии опрашиваются поштучным роутом с интервалом 15 c, минуя кэш.
 
 ### 10.4. События (G-G-физика)
 
-`src/lib/session-events.ts`: центральная разность по скоростям/времени → продольные/поперечные ускорения, пороги манёвров/резких событий (согласованы с §7.x методологии). Это отдельная «линза» сырых данных — осознанно не совпадает с state-machine-метриками (см. §17).
+`src/lib/session-events.ts`: центральная разность по скоростям/времени → продольные/поперечные ускорения, пороги манёвров/резких событий (согласованы с §7.x методологии). Это отдельная «линза» сырых данных — осознанно не совпадает с state-machine-метриками (см. §17). С v2.31.0 счётчики резких событий/HSC/RMS в UI берутся из methodology-конвейера (`/api/sessions/{id}/stats`+`stats/batch`, один источник с бейджем EcoScore) — events-конвейер используется только G-G-диаграммой и картой.
 
 ### 10.5. Retention
 
@@ -514,7 +514,7 @@ Cron 03:00 UTC: сессии старше `RETENTION_DAYS` → soft-delete; по
 | Группа | Примеры | Ключевые модули |
 |---|---|---|
 | 1. Базовые (13) | длительность, дистанция (сырая/активная), точек, байтов | active-trip.ts, geo.ts |
-| 2. Скоростные (6) | avg/max (anti-jitter), рекорд, спидограмма | kpi.ts, speed-buckets.ts |
+| 2. Скоростные (6) | avg/max (anti-jitter, кап 200 км/ч §3.2а), рекорд, спидограмма | kpi.ts, metrics-methodology.ts |
 | 3. План-фактные (8) | план против факта по маршрутизации, Δ времени | session-stats.ts (TrafficJob.result) |
 | 4. Поведенческие (10) | манёвры, резкие события (G-G), EcoScore, плавность | session-events.ts, eco-corpus.ts |
 | 5. Географические (6) | bbox, высотный профиль, адреса (геокод) | geo.ts |
@@ -522,14 +522,14 @@ Cron 03:00 UTC: сессии старше `RETENTION_DAYS` → soft-delete; по
 | 7. Сравнительные (8) | routeHash-группы, Theil-Sen тренд, P75-хотспоты | route-comparison.ts |
 | 8. Качество данных (6) | покрытие, accuracy, gaps | ingest-trace.ts |
 
-Окна: **активное окно поездки** (§4.11) — все пользовательские KPI считаются по нему (idle до/после исключаются). Спидограмма — гистограмма распределения скоростей по времени. EcoScore — CAP-методика с корпусной калибровкой (мин. корпус 30 сессий; иначе метрика не выдаётся).
+Окна: **активная часть записи** (§4.11; с v2.25 — объединение окон legs, сплит стоянками ≥ 900 с) — все пользовательские KPI считаются по ней (хвосты и долгие парковки исключаются). Спидограмма — временной ряд скорости (даунсемпл ≤ 240 точек, км/ч; период-агрегат — ≤ 720). EcoScore — CAP-методика с корпусной калибровкой (корпус — сессии всех пользователей; мин. 5 сессий, при < 30 — медиана с запасом ×1,2; env-override `ECO_SCORE_CAP_BASELINE` приоритетнее; при недостатке — дефолтные базлайны, метрика выдаётся).
 
 ## 12. Фронтенд
 
 - **Страницы**: `/` — основное приложение (вкладки: Аналитика, Поездки, АДМИН); `/m` — мобильная запись; `/shared/<token>` — публичная поездка; офлайн — `offline.html`.
 - **PWA**: `public/sw.js` (кэш статики, фоновое обновление с тостом), `manifest.webmanifest`, иконки.
 - **Серверное состояние**: TanStack Query; staleTime 30 c; live-сессии — поллинг 15 c (поштучные роуты); параллелизм GET-запросов ограничен клиентским семафором (6).
-- **Батч-архитектура**: префетч `stats/batch` на корне лейаута; ответ «просеивается» в per-id кэш (`setQueryData`), поэтому карточки «Поездок» рендерятся без сетевых запросов; период-агрегат аналитики — `stats+events+track` батчи (3 запроса).
+- **Батч-архитектура**: префетч `stats/batch` на корне лейаута; ответ «просеивается» в per-id кэш (`setQueryData`), поэтому карточки «Поездок» рендерятся без сетевых запросов; период-агрегат аналитики — `stats+events+track` батчи (3 запроса, ≤ 50 записей); план-факт периода — клиентское поле `route.planActualDurationSec` (только период-агрегат, согласованные популяции §6.3 METHODOLOGY). Фильтр периода — «Все записи · период» (сущность — запись/Session, v2.31).
 - **Карта**: Leaflet, слои OSM Street / OpenTopoMap Terrain / Esri World Imagery (satellite) / Esri World Dark Gray Canvas (dark: Base + Reference-подписи, апскейл с нативного z16). CARTO-тайлы (dark_all/voyager) удалены в v2.29.0: провайдер требует API-ключ с авг 2026 и отдаёт error-тайл «API key required» анонимным запросам. CSP allow-list: `*.tile.openstreetmap.org`, `*.tile.opentopomap.org`, `server.arcgisonline.com`.
 - **UX**: командная палитра (Ctrl+K), глобальный поиск, тёмная тема (next-themes), тосты Sonner, skeleton-состояния, 25 c watchdog на гейт батча с фолбэком на поштучные запросы.
 
@@ -680,7 +680,7 @@ npm run build      # сборка (используется на Render)
 
 1. **Single-instance память.** Rate-limiter, метрики, буферы алертов/латентности — in-memory: рестарт обнуляет окна; горизонтальное масштабирование требует внешнего хранилища (Redis/Prometheus).
 2. **Restore ручной** (RTO 30–60 мин), эндпоинт-заглушка; ежедневный дамп живёт в эфемерном `/tmp` — durable-копия это GitHub draft-релиз (еженедельно + вручную).
-3. **G-G-линза events ≠ state-machine-метрики.** События считаются центральной разностью по сырым точкам (отдельная линза физики), пороги согласованы с методологией §7.x; расхождение с MovingTime-метриками — по построению, не баг.
+3. **G-G-линза events ≠ state-machine-метрики.** События считаются центральной разностью по сырым точкам (отдельная линза физики), пороги согласованы с методологией §7.x; расхождение с MovingTime-метриками — по построению, не баг. С v2.31.0 числа резких событий/HSC/RMS в UI — из methodology-конвейера (§7.1–§7.5), events-конвейер остался только для G-G-диаграммы и карты.
 4. **`POST /api/sessions/batch`** отдаёт полные точки до 10 сессий без point-cap — используется компаратором маршрутов, только авторизованный доступ.
 5. **Часть роутов вне p95-буфера** (покрытие `trackLatency` — основные роуты).
 6. **Slack-алерты без дедупликации** — повторяются каждые 5 мин, пока правило горит.
@@ -704,7 +704,7 @@ src/lib/
   validation.ts logger.ts metrics.ts latency.ts alerts.ts audit.ts idempotency.ts
   ingest-trace.ts settings.ts retention.ts share.ts
   session-stats.ts session-events.ts session-track.ts session-finalize.ts
-  active-trip.ts kpi.ts speed-buckets.ts eco-corpus.ts metrics-methodology.ts
+  active-trip.ts kpi.ts eco-corpus.ts metrics-methodology.ts
   batch-points.ts ttl-cache.ts route-comparison.ts geo.ts format.ts export.ts
   offline-summary.ts routing/chain.ts routing/circuit-breaker.ts
   worker-runtime.ts github-backup.ts backup.ts user-db.ts

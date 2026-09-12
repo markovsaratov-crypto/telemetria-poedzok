@@ -156,9 +156,11 @@ export function TelematikaLayout(props: LayoutProps) {
   const tripFilterRef = React.useRef<HTMLDivElement>(null);
   const layoutRef = React.useRef<HTMLDivElement>(null);
   const isMac = useIsMac();
-  // v2.12.0 (V-1): подписи под иконками — «⌘K» на Mac, «Ctrl K» на Windows/Linux
+  // v2.12.0 (V-1): подписи под иконками — «⌘K» на Mac, «Ctrl K» на Windows/Linux.
+  // v2.26.2: «Ctrl⇧F» → «Ctrl+Shift+F» — глиф ⇧ отсутствует в Consolas
+  // (Windows 10) и рендерился битой подписью «СтрF» на кнопке поиска.
   const kbdCmd = isMac ? "⌘K" : "Ctrl K";
-  const kbdSearch = isMac ? "⌘⇧F" : "Ctrl⇧F";
+  const kbdSearch = isMac ? "⌘⇧F" : "Ctrl+Shift+F";
 
   // Live sessions list for trip-filter dropdown.
   const sessions = useSessions({ limit: 50 });

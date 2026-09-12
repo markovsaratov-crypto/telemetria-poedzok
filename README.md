@@ -5,7 +5,8 @@ PWA-платформа записи и анализа телеметрии ав�
 - **Продакшен:** https://poedzok.fun (origin — `telemetria-poedzok.onrender.com`, CDN TurboFlare — см. `docs/CUSTOM_DOMAIN.md`)
 - **Health:** `GET /health` (отдаёт версию из `package.json`)
 - **Развёртывание:** push в `main` → Render autoDeploy (см. `render.yaml`)
-- **Текущая версия:** см. `package.json` / `render.yaml` (`APP_VERSION`)
+- **Текущая версия:** 2.29.0 (см. `package.json` / `render.yaml`)
+- **Бекап БД:** еженедельный приватный draft-релиз `backup-*` (последний — `backup-v2.29.0`); восстановление — `POST /api/admin/restore` (см. `docs/TECHNICAL.md` §14)
 
 ## Документация — где лежит
 
@@ -34,4 +35,4 @@ npm run dev        # http://localhost:3000
 
 ## Стек
 
-Next.js 16 (App Router) · React 19 · TypeScript 5 strict · Tailwind 4 + shadcn/ui · TanStack Query 5 · Prisma 6 + Turso (libSQL) · Leaflet · Zod · PWA.
+Next.js 16 (App Router) · React 19 · TypeScript 5 strict · Tailwind 4 + shadcn/ui · TanStack Query 5 · Prisma 6 + Turso (libSQL) · Leaflet (тайлы без ключа: OSM / OpenTopoMap / Esri Imagery / Esri Dark Gray) · Zod · PWA.

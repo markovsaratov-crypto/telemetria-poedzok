@@ -1,8 +1,21 @@
 # Operations — алерты (§14.4) и резервное копирование: фактическое состояние
 
 Документ отражает ФАКТИЧЕСКОЕ поведение системы после пакета P2 и расхождения
-со спецификацией (актуальная — v2.28.0). Обновлять при изменениях.
+со спецификацией (актуальная — v2.29.0). Обновлять при изменениях.
 Расположение на GitHub: https://github.com/markovsaratov-crypto/telemetria-poedzok/blob/main/docs/OPERATIONS.md
+
+## Бэкапы: состав дампа v2.29.0
+
+С v2.29.0 логический дамп и restore покрывают ВСЕ таблицы: Session, GpsPoint,
+**Trip** (серверные поездки), **IngestMessage** (ledger идемпотентности инжеста —
+без него ретраи после restore задвоят точки), Route, RouteCache, TrafficJob,
+AuditLog, ExportJob, BackupJob, Setting (без `diag.ingest.raw`), **_AlertState**,
+плюс информационные users (без passwordHash). Дампы до v2.29 не содержат
+Trip/IngestMessage — после их restore запустить `POST /api/admin/backfill-trips`.
+
+Актуальный полный бекап: draft-релиз `backup-v2.29.0` (79 сессий · 48 358 точек ·
+9 поездок · sha256 в теле релиза). RTO через `POST /api/admin/restore` — 5–15 мин
+(раньше документация ошибочно называла роут «заглушкой»; см. TECHNICAL.md §14.3).
 
 ## 0. Инцидент C-1 (v2.11.0): публичные дампы БД — ЗАКРЫТ 01.09.2026
 

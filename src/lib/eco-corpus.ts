@@ -92,6 +92,11 @@ async function computeCorpusBaselines(): Promise<EcoScoreBaselines> {
 
   const rates: { braking: number; accel: number; jerk: number }[] = [];
   for (const { startTimeMs, endTimeMs, points } of bySession.values()) {
+    // v2.32.0 (претензия №1 ревью): воркер in-process делит event loop с API.
+    // Синхронные computeMethodologyMetrics по сессиям склеивались в один
+    // длинный блок — уступаем цикл между сессиями (p95 API-роутов не растёт
+    // от фонового прогрева корпус-калибровки).
+    await new Promise<void>((resolve) => setImmediate(resolve));
     // gate — как в прежнем конвейере stats-роута: < 60 точек → сессия не калибрует
     if (points.length < 60) continue;
     const lastTs = points[points.length - 1].timestamp;

@@ -1,0 +1,30 @@
+# CI: проверки качества на каждый push в main и на каждый PR.
+# Деплой НЕ из этого workflow: Render Blueprint авто-деплоит push в main
+# (render.yaml autoDeploy). CI = вторая линия: видим сломанный main сразу
+# (типы/линт/тесты), а не по ошибке рантайма на проде.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Prisma generate (типы клиента, без БД)
+        run: npx prisma generate
+      - name: Typecheck (tsc --noEmit)
+        run: npx tsc --noEmit
+      - name: Lint (eslint)
+        run: npx eslint .
+      - name: Unit tests (vitest)
+        run: npx vitest run

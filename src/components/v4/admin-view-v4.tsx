@@ -176,7 +176,7 @@ function A1ParamsBlock() {
               <b>2026-08-01 · n42</b>
             </div>
             <div className="param">
-              <span>Viterbi · σ / β</span>
+              <span>HMM (не задействован) · σ / β</span>
               <b>5 м / 5 м</b>
             </div>
             <div className="param">

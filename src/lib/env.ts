@@ -113,6 +113,9 @@ const schema = z.object({
   ROUTE_ID_SNAP_GRID_DEG: z.coerce.number().positive().default(0.0005),
   // P2-16: вебхук Slack для алертов §14.4 (пусто — только журнал и /api/admin/alerts)
   SLACK_WEBHOOK_URL: z.string().default(""),
+  // v2.32.0: дедуп Slack-уведомлений алертов — одно и то же горящее правило
+  // не чаще раза в cooldown (мин). 0 = дедуп выключен (прежнее поведение).
+  ALERT_DEDUP_COOLDOWN_MIN: z.coerce.number().int().min(0).default(60),
 });
 
 export type Env = z.infer<typeof schema>;

@@ -522,8 +522,23 @@ export function computeSpeedConsistencyIndex(points: MethodologyPoint[], activeT
 // === §7.7 BearingConsistency ===
 
 export function computeBearingConsistency(points: MethodologyPoint[], activeTrip: ActiveTrip): number | null {
+  // v2.32.0 (претензия №12 ревью): корректная круговая статистика. Прежняя
+  // формула 1 − stddev(Δbearing)/180 считала линейный stddev по СВЁРНУТЫМ в
+  // [0, 180] дельтам — это не круговая величина: (а) свёртка теряет знак
+  // (чередующиеся развороты ±179° сворачивались в одинаковые 179° → stddev=0 →
+  // «идеально прямо»); (б) stddev на окружности не определён (359° и 1° —
+  // соседние направления). Новая формула — проекция среднего результирующего
+  // вектора единичных поворотов на «прямо» (θ = 0):
+  //   θi = signedDelta(bearing[i], bearing[i−1]) ∈ (−180, 180]
+  //   BearingConsistency = max(0, mean(cos θi))
+  // 1.0 = все повороты нулевые (прямо); ~0 = повороты рассеяны по кругу или это
+  // развороты; константный поворот лёгкой кривизны остаётся ~1 (локальная
+  // прямолинейность интервала, как и в прежней семантике).
+  // На фактических данных изменение малозаметно (дельты реальных поездок
+  // малы), краевые случаи исправлены (см. tests/bearing.test.ts).
   if (!activeTrip.hasActiveTrip) return null;
-  const deltas: number[] = [];
+  let n = 0;
+  let cosSum = 0;
   for (let i = 1; i < points.length; i++) {
     if (!inActiveLegs(activeTrip, points[i].timestamp)) { continue; } // v2.25.0 (П.4): только legs — парковка между поездками исключена
     const v = points[i].speed;
@@ -531,23 +546,13 @@ export function computeBearingConsistency(points: MethodologyPoint[], activeTrip
     const b0 = points[i - 1].bearing;
     const b1 = points[i].bearing;
     if (b0 == null || b1 == null) continue;
-    const raw = Math.abs(b1 - b0);
-    const delta = Math.min(raw, 360 - raw);
-    deltas.push(delta);
-  }
-  if (deltas.length < 2) return null;
-
-  let n = 0;
-  let mean = 0;
-  let M2 = 0;
-  for (const d of deltas) {
+    const signedDelta = ((b1 - b0 + 540) % 360) - 180; // кратчайший путь со знаком
+    cosSum += Math.cos((signedDelta * Math.PI) / 180);
     n++;
-    const delta = d - mean;
-    mean += delta / n;
-    M2 += delta * (d - mean);
   }
-  const stddev = Math.sqrt(M2 / n);
-  return Math.round(Math.max(0, 1 - stddev / 180) * 1000) / 1000;
+  if (n < 2) return null;
+  const meanCos = cosSum / n;
+  return Math.round(Math.max(0, Math.min(1, meanCos)) * 1000) / 1000;
 }
 
 // === §7.8 UTurnCount ===

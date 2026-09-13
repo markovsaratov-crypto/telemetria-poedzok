@@ -24,6 +24,8 @@ jobs:
         run: npx prisma generate
       - name: Typecheck (tsc --noEmit)
         run: npx tsc --noEmit
+      - name: Typecheck тестов (tsconfig.test.json — tests/ вне прод-сборки)
+        run: npx tsc --noEmit -p tsconfig.test.json
       - name: Lint (eslint)
         run: npx eslint .
       - name: Unit tests (vitest)

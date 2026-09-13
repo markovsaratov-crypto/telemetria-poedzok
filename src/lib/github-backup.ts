@@ -27,13 +27,23 @@ function getGitHubConfig() {
   return { token, owner, repo: repoName };
 }
 
-export async function backupToGitHub(actorId?: string) {
+export interface LocalBackupHandle {
+  backupId: string;
+  filePath: string;
+  checksum: string;
+  fileSize: number;
+  tableCounts: Record<string, number>;
+}
+
+export async function backupToGitHub(actorId?: string, existing?: LocalBackupHandle) {
   const cfg = getGitHubConfig();
   if (!cfg) throw new Error("GITHUB_TOKEN not configured");
 
   const { runBackup } = await import("./backup");
   const { promises: fs } = await import("fs");
-  const local = await runBackup(actorId);
+  // v2.32.0: existing — уже сделанный локальный дамп (ежедневный backup-крон
+  // делает дамп и аплоадит ЕГО, без второго полного дампа).
+  const local = existing ?? (await runBackup(actorId));
   const content = await fs.readFile(local.filePath);
 
   const now = new Date();
@@ -80,7 +90,7 @@ export async function backupToGitHub(actorId?: string) {
       actorId,
     });
 
-    return { backupId: local.backupId, releaseId: release.id, releaseUrl: release.html_url, assetUrl: asset?.url ?? "", assetSize: asset?.size ?? 0, checksum: local.checksum, draft: true as const, drill };
+    return { backupId: local.backupId, releaseId: release.id, releaseUrl: release.html_url, assetUrl: asset?.url ?? "", assetSize: asset?.size ?? 0, checksum: local.checksum, fileSize: local.fileSize, tableCounts: local.tableCounts, draft: true as const, drill };
   } catch (err) {
     // сбой аплоада ассета больше НЕ оставляет осиротевший draft-релиз:
     // теги дневные, мусор накапливался невидимо. Best-effort удаление + лог.

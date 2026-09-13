@@ -184,18 +184,20 @@ services:
       - key: GH_REPO
         value: markovsaratov-crypto/telemetria-poedzok
 
-  # v2.10.0: github-backup-cron (§13.3). v2.32.0: ЕЖЕДНЕВНО 04:00 UTC (было
-  # еженедельно ВС) — durable-копия с RPO ≤ 24 ч вместо ≤ 7 дней (претензия №4
-  # ревью: еженедельный GitHub + эфемерный ежедневный /tmp-дамп = окно потери
-  # до недели). После аплоада ассета запускается read-back drill (скачивание +
-  # sha256 + парс + счёт строк — проверка восстановимости durable-копии).
+  # v2.10.0: github-backup-cron (§13.3) — еженедельная ВС 04:00 UTC.
+  # v2.32.0: ЕЖЕДНЕВНАЯ durable-копия делается КОДОМ в POST /api/admin/backup
+  # (ежедневный backup-кron 03:30: дамп → аплоад того же дампа в GitHub →
+  # read-back drill; расписание крон-сервисов НЕ менялось — расписание в
+  # render.yaml требует ручного подтверждения blueprint-синка в дашборде
+  # Render). Этот еженедельный крон остаётся страховкой: если ночной аплоад
+  # из backup-крона не удался, ВС 04:00 повторит его независимо.
   # Создает Release в markovsaratov-crypto/telemetria-poedzok с asset (snapshot БД).
   - type: cron
     name: telemetria-github-backup-cron
     runtime: node
     plan: starter
     region: frankfurt
-    schedule: "0 4 * * *"
+    schedule: "0 4 * * 0"
     buildCommand: echo "cron: no build needed"
     startCommand: curl -sf -X POST "$BASE_URL/api/admin/backup/github" -H "Authorization: Bearer $CRON_SECRET"
     envVars:

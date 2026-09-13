@@ -125,10 +125,6 @@ services:
         value: main
       - key: SLACK_WEBHOOK_URL
         sync: false
-      # v2.32.0: дедуп Slack-алертов — горящее правило уведомляется не чаще
-      # раза в N минут (0 = дедуп выключен)
-      - key: ALERT_DEDUP_COOLDOWN_MIN
-        value: "60"
 
   # P1-10: retention-cron (§3.7) — ежедневная чистка по grace/purgedAt.
   # BASE_URL и CRON_SECRET задаются в дашборде Render (sync: false значения не подтягиваются в cron-сервис автоматически).

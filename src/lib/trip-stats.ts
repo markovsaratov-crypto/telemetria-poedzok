@@ -215,12 +215,26 @@ export async function computeTripStats(
   trip: TripRow,
   baselines?: EcoScoreBaselines
 ): Promise<TripStatsPayload | null> {
-  const points = await loadTripPoints(trip.sessionIds);
-  if (points.length === 0) return null;
+  const allPoints = await loadTripPoints(trip.sessionIds);
+  if (allPoints.length === 0) return null;
 
   const spanStartMs = new Date(trip.spanStart).getTime();
-  const spanEndMs = trip.spanEnd ? new Date(trip.spanEnd).getTime() : points[points.length - 1].timestamp;
+  const spanEndMs = trip.spanEnd
+    ? new Date(trip.spanEnd).getTime()
+    : allPoints[allPoints.length - 1].timestamp;
   const spanSec = Math.max(0, (spanEndMs - spanStartMs) / 1000);
+
+  // СРЕЗ ПОЕЗДКИ (ТЗ v2.26 §6: «одна запись может входить в несколько поездок —
+  // в каждой поездке её СРЕЗ, не вся запись»): точки состава в окне
+  // [spanStart, spanEnd]. Без среза запись на весь день (утренняя + вечерняя
+  // поездки) отдавала КАЖДОЙ поездке все свои точки: обе карточки показывали
+  // числа всей записи, а Σ вкладки «Поездки» считала общие интервалы дважды —
+  // расходилось с «Аналитикой» (агрегат записей считает их один раз).
+  // Живая поездка (spanEnd = null) — срез до последней точки (как раньше).
+  const points = allPoints.filter(
+    (p) => p.timestamp >= spanStartMs && p.timestamp <= spanEndMs
+  );
+  if (points.length === 0) return null;
 
   const eco = baselines ?? (await getCorpusEcoBaselines());
   const result: SessionStatsResult = computeSessionStats(

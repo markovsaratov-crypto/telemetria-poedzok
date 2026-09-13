@@ -2209,9 +2209,14 @@ SessionReliability = CompletenessScore × driftScore × PlausibilityScore   (0..
   driftScore        = max(0, 1 − StationaryDrift / AvgAccuracy)            (0..1)
   PlausibilityScore = (count of valid points) / (total points)            (0..1)
 
-  StationaryDrift — max displacement между соседними точками в состоянии "idle"
+  StationaryDrift — P95 displacement между соседними точками в состоянии "idle"
                     (по state machine из раздела 4.6; интервалы-разрывы в состоянии
                     "gap" не учитываются — большое смещение через разрыв легитимно), м
+
+  P95, а не max: единичная пара выбросных точек (GPS-глитч на стоянке) не должна
+  обнулять индекс всей записи — систематический дрейф (95%+ стояночных интервалов
+  «уехали» за радиус точности) ловится так же. Пустой набор стояночных интервалов
+  (запись без единого idle-интервала) — driftScore = 1.0, нейтральный множитель.
   AvgAccuracy     — существующая метрика (8.6), м
 
   если AvgAccuracy = 0 или null (нет данных о точности):

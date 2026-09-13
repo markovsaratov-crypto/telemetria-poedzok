@@ -740,18 +740,22 @@ export function computeSessionReliability(
     };
   }
 
-  // 1. Drift score — только по интервалам в состоянии "idle"
+  // 1. Drift score — только по интервалам в состоянии "idle".
+  // P95 (а не max): единичная пара выбросных точек (GPS-глитч на стоянке)
+  // больше не обнуляет весь индекс — max-версия на реальных данных давала
+  // driftScore=0 («ненадёжно») каждой записи с одним глитчем. Систематический
+  // дрейф (95%+ интервалов «уехали» за радиус точности) ловится так же.
   const avgAcc = avgAccuracy(points) ?? 0;
-  let stationaryDrift = 0;
+  const idleDrifts: number[] = [];
   for (let i = 1; i < points.length; i++) {
     if (motion.states[i - 1] === "idle") {
-      const disp = haversineM(
-        points[i - 1].lat, points[i - 1].lon,
-        points[i].lat, points[i].lon
+      idleDrifts.push(
+        haversineM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon)
       );
-      stationaryDrift = Math.max(stationaryDrift, disp);
     }
   }
+  idleDrifts.sort((a, b) => a - b);
+  const stationaryDrift = percentile(idleDrifts, 95);
   const driftScore = avgAcc > 0
     ? Math.max(0, 1 - stationaryDrift / avgAcc)
     : 1.0;

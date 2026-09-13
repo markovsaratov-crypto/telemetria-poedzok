@@ -923,7 +923,7 @@ RETURNING id, sessionId, attempts;
    - `HighSpeedCornering` — счётчик резких манёвров на высокой скорости (speed > 80 км/ч + |Δbearing| > 45° за < 3 сек).
    - `HarshBrakingCount`, `HarshAccelCount` — события считаются только в активной части (старт движения = нормальный разгон, не harsh).
 
-8. **SessionReliability composite.** `SessionReliability = CompletenessScore × driftScore × PlausibilityScore` (раздел 11.6 методологии). `driftScore` — max displacement в `idle`-интервалах, отсекает GPS-дрейф на стоянке. При < 2 точек — `null`, rating `insufficient_data`.
+8. **SessionReliability composite.** `SessionReliability = CompletenessScore × driftScore × PlausibilityScore` (раздел 11.6 методологии). `driftScore` — P95 displacement между соседними точками стационарного участка (обе точки в `idle`, записанная скорость < 1 м/с, dt > 0), отсекает GPS-дрейф на стоянке; физическое движение (ползание, импульс разгона) дрейфом не считается, пустой набор стационарных интервалов — нейтральный множитель 1,0. При < 2 точках — `null`, rating `insufficient_data`.
 
 9. **HMM (Viterbi) map matching** для план-фактного `SpeedDeviation`:
    - Если `segments.length > 0` и `points.length ≥ 2`: `hmmMapMatch(points, segments, HMM_EMISSION_SIGMA_M, HMM_TRANSITION_BETA)` → `segmentPerPoint[]`.

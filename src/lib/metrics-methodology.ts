@@ -58,6 +58,9 @@ const BEARING_UTURN_DEG = 150;
 const BEARING_TURN_DEG = 30;
 const CORNERING_BEARING_DEG = 45;
 const HIGH_SPEED_KMH = 60;
+// §11.6: порог «устройство сообщает движение» для отсева физического
+// перемещения (ползание/импульс разгона) из стояночного дрейфа. 1 м/с ≈ 3,6 км/ч.
+const DRIFT_CRAWL_MS = 1.0;
 
 function median(values: number[]): number {
   if (values.length === 0) return NaN;
@@ -753,13 +756,31 @@ export function computeSessionReliability(
     // «дрейфом»: иначе устройства с точным GPS (avgAcc 2–3 м) получали
     // driftScore=0 за честные 2–3 м ползания в момент трогания
     if (motion.states[i - 1] === "idle" && i < motion.states.length && motion.states[i] === "idle") {
+      // Движение ≠ дрейф: записанная скорость граничной точки ≥ 1 м/с (~3,6 км/ч)
+      // — устройство сообщает ДВИЖЕНИЕ: одиночный импульс разгона в stop-and-go,
+      // который медиан-сглаживание §4.6 погасило в idle, остаётся физическим
+      // перемещением (прод-кейс: 15 из 32 записей «unreliable» при идеальных
+      // полноте/правдоподобности — P95 «дрейфа» 5–11 м набирался импульсами с
+      // записанной скоростью 4–8 м/с, равной перемещению, при avgAcc 2–3 м).
+      // Speed = null (нет данных) — не гейтит. dt ≤ 0 (дубликат timestamp с
+      // прыжком позиции) — не интервал времени, глитч ловит plausibility.
+      const dt = (points[i].timestamp - points[i - 1].timestamp) / 1000;
+      if (dt <= 0) continue;
+      const vLeft = points[i - 1].speed;
+      const vRight = points[i].speed;
+      if ((vLeft != null && vLeft >= DRIFT_CRAWL_MS) || (vRight != null && vRight >= DRIFT_CRAWL_MS)) {
+        continue;
+      }
       idleDrifts.push(
         haversineM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon)
       );
     }
   }
   idleDrifts.sort((a, b) => a - b);
-  const stationaryDrift = percentile(idleDrifts, 95);
+  // Пустой набор стационарных интервалов — driftScore = 1.0 (нейтральный
+  // множитель, §11.6): стационарного времени нет — дрейф не наблюдаем. Раньше
+  // percentile([]) = NaN протекал в композит (value = NaN → «unreliable»).
+  const stationaryDrift = idleDrifts.length > 0 ? percentile(idleDrifts, 95) : 0;
   const driftScore = avgAcc > 0
     ? Math.max(0, 1 - stationaryDrift / avgAcc)
     : 1.0;

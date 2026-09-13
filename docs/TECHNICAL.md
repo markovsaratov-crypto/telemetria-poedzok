@@ -1,9 +1,8 @@
 # «Телемат» — Техническая документация
 
-**Продукт:** Телемат (ранее «Телеметрия Поездки» / Telemetria Poedzok) — PWA-платформа записи и анализа телеметрии автомобильных поездок.
+**Продукт:** Телемат — PWA-платформа записи и анализа телеметрии автомобильных поездок.
 **Продакшен:** https://poedzok.fun (пользовательский домен через TurboFlare CDN; origin — https://telemetria-poedzok.onrender.com, ранбук — `docs/CUSTOM_DOMAIN.md`)
 **Репозиторий:** https://github.com/markovsaratov-crypto/telemetria-poedzok (ветка `main`; вся документация — в папке `docs/`: https://github.com/markovsaratov-crypto/telemetria-poedzok/tree/main/docs)
-**Версия приложения:** 2.31.0 (единый источник — `package.json`; `/health` всегда отдаёт её)
 **Документ:** полная техническая документация для передачи в управление технической поддержке и администратору. Описывает текущее состояние системы «как есть», без истории изменений.
 
 ---
@@ -34,7 +33,7 @@
 
 ## 1. Общие сведения
 
-«Телемат» (ранее «Телеметрия Поездки») — веб-платформа для сбора, хранения и анализа телеметрии автомобильных поездок. Источник данных — мобильное приложение **Sensor Logger** (iOS), которое отправляет батчи GPS-точек (и показания других сенсоров) на HTTP-эндпоинт инжеста. Сервер сохраняет точки, строит по ним производные метрики (дистанция, активное окно поездки, скоростной профиль, плавность вождения, план-факт против маршрутизации 2GIS/OSRM и др.) и отображает их в аналитическом UI.
+«Телемат» — веб-платформа для сбора, хранения и анализа телеметрии автомобильных поездок. Источник данных — мобильное приложение **Sensor Logger** (iOS), которое отправляет батчи GPS-точек (и показания других сенсоров) на HTTP-эндпоинт инжеста. Сервер сохраняет точки, строит по ним производные метрики (дистанция, активное окно поездки, скоростной профиль, плавность вождения, план-факт против маршрутизации 2GIS/OSRM и др.) и отображает их в аналитическом UI.
 
 Ключевые свойства:
 
@@ -56,9 +55,9 @@
 ### Аналитика
 
 - Заголовок периода (Сегодня/7 дней/30 дней/Всё время): поездок · записей · точек; рекорд скорости за всё время.
-- Период-агрегат «Аналитика → период»: батч-запросы статов/events/track по всем сессиям периода (3 запроса), серверный предрасчёт-кэш (v2.27), карта периода, буллетчарты EcoScore/Эффективность, тяжёлые сегменты, группы маршрутов.
-- «Поездки»: СЕРВЕРНЫЕ поездки (сущность Trip, v2.26: одна физическая поездка = одна карточка «N записей»), адреса старта/финиша с городом (v2.28), бейдж EcoScore с границами зон, план-факт поездки; легаси-список записей — фолбэк; удаление поездки пользователем (v2.30) — кнопка в раскрытой карточке, двухшаговое подтверждение.
-- (v2.29.0) Мёртвые компоненты старого UI (лидерборд устройств, облако тегов, спарклайн, мини-карты, replay/compare и ещё ~20) удалены из кодовой базы.
+- Период-агрегат «Аналитика → период»: батч-запросы статов/events/track по всем сессиям периода (3 запроса), серверный предрасчёт-кэш, карта периода, буллетчарты EcoScore/Эффективность, тяжёлые сегменты, группы маршрутов.
+- «Поездки»: СЕРВЕРНЫЕ поездки (сущность Trip: одна физическая поездка = одна карточка «N записей»), адреса старта/финиша с городом, бейдж EcoScore с границами зон, план-факт поездки; легаси-список записей — фолбэк; удаление поездки пользователем — кнопка в раскрытой карточке, двухшаговое подтверждение.
+- Мёртвые компоненты старого UI (лидерборд устройств, облако тегов, спарклайн, мини-карты, replay/compare и ещё ~20) в кодовой базе отсутствуют.
 - 62 метрики методологии (см. §11 и `docs/METHODOLOGY.md`): дистанция/длительность (сырая и активная), MovingTime state machine, спидограмма, EcoScore с корпусной калибровкой, G-G-физика (манёвры/резкие события), план-факт (маршрутизация), сравнительные метрики маршрутов (Theil-Sen тренд, P75-хотспоты, trafficPattern).
 
 ### Управление данными
@@ -404,10 +403,10 @@ Unique `@@unique([deviceId, clientId])` — идемпотентность `/api
 | `POST /api/import/csv` | api | multipart CSV (≤20 МБ); один `clientId` на файл → одна сессия |
 | `POST /api/import/zip` | api | multipart ZIP (≤100 МБ на прокси; zip-бомбы отсекаются по факту распаковки) |
 | `GET /api/geocode/reverse` | api (read-скоп) | `?lat=&lon=` — Nominatim реверс-геокод, кэш 30 суток в Setting; ответ с `short`-подписью |
-| `GET /api/trips` | api (read-скоп) | Список поездок (сущность Trip): `{trips: [{id, deviceId, status, startTime, endTime, spanStart, spanEnd, startLat/Lon, endLat/Lon, sessionIds, sessionCount, interFragmentGapSec, distanceM, activeDurationSec, durationSec, pointCountActual, maxSpeedMs, ecoScore, planComparable, planDeviationSec}]}` — кэш-агрегаты из `Trip.*`; scope-фильтр userId (v2.23); `?limit=1..100 (50)&deviceId=` |
-| `GET /api/trips/batch?ids=` | api (read-скоп) | Полные статы ≤50 поездок одним запросом (конвейер trip-stats на конкатенированном потоке точек состава); ответ `{stats: TripStats[], missing: []}` сеется в кэш карточек; TTL 30 с |
+| `GET /api/trips` | api (read-скоп) | Список поездок (сущность Trip): `{trips: [{id, deviceId, status, startTime, endTime, spanStart, spanEnd, startLat/Lon, endLat/Lon, sessionIds, sessionCount, interFragmentGapSec, distanceM, activeDurationSec, durationSec, pointCountActual, maxSpeedMs, ecoScore, planComparable, planDeviationSec}]}` — кэш-агрегаты из `Trip.*`; scope-фильтр userId; `?limit=1..100 (50)&deviceId=` |
+| `GET /api/trips/batch?ids=` | api (read-скоп) | Полные статы ≤50 поездок одним запросом (конвейер trip-stats на срезе [spanStart, spanEnd] конкатенированного потока точек состава — запись, входящая в несколько поездок, отдаёт каждой только свои точки); ответ `{stats: TripStats[], missing: []}` сеется в кэш карточек; TTL 30 с |
 | `GET /api/trips/{id}` | api (read-скоп) | Детальная статистика поездки: полный TripStatsPayload + `fragments` (лёгкие поля записей состава) + `sessionIds` + `tripStatus` + план-факт (TrafficJob поездки) |
-| `DELETE /api/trips/{id}` | api (default-скоп) | **v2.30.0 — удаление поездки пользователем:** soft-delete ВСЕХ живых записей состава (`deletedAt`, `status='deleted'`) + строки Trip + снятие pending/running TrafficJob + сброс `Session.tripId`; атомарно (`libsql.batch`); поездка `recording` → 409; аудит `trip.delete`; метрика `trip_delete_total`; точки стирает retention после GRACE_PERIOD_DAYS. Полный recompute устройства НЕ нужен: поездки по построению разделены стоянками ≥ TRIP_SPLIT_SEC — удаление цепочки не склеивает соседей |
+| `DELETE /api/trips/{id}` | api (default-скоп) | **Удаление поездки пользователем:** soft-delete ВСЕХ живых записей состава (`deletedAt`, `status='deleted'`) + строки Trip + снятие pending/running TrafficJob + сброс `Session.tripId`; атомарно (`libsql.batch`); поездка `recording` → 409; аудит `trip.delete`; метрика `trip_delete_total`; точки стирает retention после GRACE_PERIOD_DAYS. Полный recompute устройства НЕ нужен: поездки по построению разделены стоянками ≥ TRIP_SPLIT_SEC — удаление цепочки не склеивает соседей |
 
 ### 9.5. Статистика и аналитика
 
@@ -417,7 +416,7 @@ Unique `@@unique([deviceId, clientId])` — идемпотентность `/api
 | `GET /api/stats/batch?ids=` | api (read-скоп) | Батч статов: ids ≤ 50, формат id `[A-Za-z0-9_-]{1,64}`, дедуп. Ответ `{stats: SessionStats[], missing: [id]}` — каждая запись побайтно идентична `/api/sessions/{id}/stats`. Загрузка чанками по 8 id параллельно; серверный TTL-кэш 30 с (хит — заголовок `X-Cache: ttl`) |
 | `GET /api/events/batch?ids=` | api (read-скоп) | Батч событий (G-G-физика): `{events: […], missing: []}`; TTL 30 с |
 | `GET /api/track/batch?ids=` | api (read-скоп) | Батч треков для карты: `{tracks: […], missing: []}`; TTL 30 с |
-| `GET /api/sessions/{id}/stats` | api (read-скоп) | Полный конвейер метрик сессии (SessionStats): базовые, скоростные, поведенческие, спидограмма speedProfile, EcoScore, план-факт из TrafficJob. Payload-контракт (v2.31): `speedP50`/`speedStdDev` — в м/с (конверсию в км/ч делает клиент, ×3,6); `speedDistribution` — 6 бакетов §5.3; `pointDensity` — точек/мин (UI показывает точек/сек); `activeTrip` — legs-поля §4.11 |
+| `GET /api/sessions/{id}/stats` | api (read-скоп) | Полный конвейер метрик сессии (SessionStats): базовые, скоростные, поведенческие, спидограмма speedProfile, EcoScore, план-факт из TrafficJob. Payload-контракт: `speedP50`/`speedStdDev` — в м/с (конверсию в км/ч делает клиент, ×3,6); `speedDistribution` — 6 бакетов §5.3; `pointDensity` — точек/мин (UI показывает точек/сек); `activeTrip` — legs-поля §4.11 |
 | `GET /api/sessions/{id}/events` | api (read-скоп) | События сессии: манёвры/резкие события (G-G, центральная разность), rawPoints |
 | `GET /api/sessions/{id}/track` | api (read-скоп) | Трек сессии для карты (точки + мета) |
 | `GET /api/sessions/{id}/route-comparison` | api | Сравнение с каноническим полилайном routeHash-группы (§10.6) |
@@ -442,11 +441,11 @@ Unique `@@unique([deviceId, clientId])` — идемпотентность `/api
 | `PUT /api/admin/settings` | admin | `{key, value}` — строго по allow-list |
 | `GET /api/admin/jobs?status=&limit=` | admin | Список TrafficJob (+session-инфо, без result-блоба), лимиты clamped |
 | `POST /api/admin/requeue` | admin | `{jobId, force?}` — dead → pending, аудит `admin.requeue` |
-| `POST /api/admin/backup` | admin ИЛИ CRON_SECRET (POST) | Полный логический дамп: BackupJob + файл `/tmp/backups/backup-<ts>-<id>.json` (sha256 + верификация перечитыванием). Ответ `{backupId, filePath, checksum, fileSize, tableCounts}`. 1/час. Состав с v2.29.0: Session, GpsPoint, **Trip**, **IngestMessage**, Route, RouteCache, TrafficJob, AuditLog, ExportJob, BackupJob, Setting (без `diag.ingest.raw`), **_AlertState** + информационные users (без секретов) |
+| `POST /api/admin/backup` | admin ИЛИ CRON_SECRET (POST) | Полный логический дамп: BackupJob + файл `/tmp/backups/backup-<ts>-<id>.json` (sha256 + верификация перечитыванием). Ответ `{backupId, filePath, checksum, fileSize, tableCounts}`. 1/час. Состав: Session, GpsPoint, **Trip**, **IngestMessage**, Route, RouteCache, TrafficJob, AuditLog, ExportJob, BackupJob, Setting (без `diag.ingest.raw`), **_AlertState** + информационные users (без секретов) |
 | `GET /api/admin/backup` | admin (default-скоп) | Последние 50 BackupJob |
 | `POST /api/admin/backup/github` | admin ИЛИ CRON_SECRET (POST) | Дамп → **draft**-релиз GitHub (приватный) с ассетом; тело релиза содержит sha256. Ответ `{backupId, releaseId, releaseUrl, assetUrl, assetSize, checksum, draft:true}` |
 | `GET /api/admin/backup/github` | admin | Список бэкап-релизов |
-| `POST /api/admin/restore` | admin (1/час) | Полное восстановление из дампа-файла BackupJob (см. §14.3): sha256-проверка, path-containment, атомарный `libsql.batch` (DELETE все таблицы в FK-safe порядке + INSERT дампа), колонки — по вайлисту (v2.16 S3). `{ok, restoredAt, tablesCount, totalRows, checksumVerified}` |
+| `POST /api/admin/restore` | admin (1/час) | Полное восстановление из дампа-файла BackupJob (см. §14.3): sha256-проверка, path-containment, атомарный `libsql.batch` (DELETE все таблицы в FK-safe порядке + INSERT дампа), колонки — по вайлисту. `{ok, restoredAt, tablesCount, totalRows, checksumVerified}` |
 | `GET /api/admin/alerts` | admin | Текущее состояние 6 правил алертов |
 
 ### 9.8. Воркер и кроны
@@ -493,7 +492,7 @@ Session(recording) + GpsPoint[] ──(gap>60c / cron / жнец)──► final
 Поштучный роут и батч-роут делят один код (гарантия паритета ответов):
 
 1. Загрузка точек (батч: меты одним IN-запросом ≤ 50, точки — параллельные SELECT чанками по 8 id, хронология внутри id сохраняется).
-2. Активное окно §4.11: `computeMovingTime` (state machine гистерезис 5/2 км/ч, debounce 5 c, gap 30 c) + `computeActiveTrip` (pre/post trip idle; v2.25 — разбиение на legs стоянками ≥ 900 с, `activeDuration = Σ legs`).
+2. Активное окно §4.11: `computeMovingTime` (state machine гистерезис 5/2 км/ч, debounce 5 c, gap 30 c) + `computeActiveTrip` (pre/post trip idle; разбиение на legs стоянками ≥ 900 с, `activeDuration = Σ legs`).
 3. Методология §12: дистанция (гаверсинус, только активная часть — объединение окон legs), скорости (нормализация §3.2а: отбраковка спайков по геометрии, пересчёт по геометрии для битых полей, медиана-3, кап 200 км/ч, accuracy ≤ 100 м), спидограмма (даунсемпл ≤ 240 точек, окраска по бакетам §5.3), EcoScore (CAP §7.3, корпусная калибровка `src/lib/eco-corpus.ts` — общий кэш с воркером).
 4. План-факт: `TrafficJob.result` по сессии (IN-запрос для батча).
 5. Сборка `SessionStats` (включая `speedProfile`, route-инфо, `missing`-обработка для батча).
@@ -501,7 +500,7 @@ Session(recording) + GpsPoint[] ──(gap>60c / cron / жнец)──► final
 
 ### 10.4. События (G-G-физика)
 
-`src/lib/session-events.ts`: центральная разность по скоростям/времени → продольные/поперечные ускорения, пороги манёвров/резких событий (согласованы с §7.x методологии). Это отдельная «линза» сырых данных — осознанно не совпадает с state-machine-метриками (см. §17). С v2.31.0 счётчики резких событий/HSC/RMS в UI берутся из methodology-конвейера (`/api/sessions/{id}/stats`+`stats/batch`, один источник с бейджем EcoScore) — events-конвейер используется только G-G-диаграммой и картой.
+`src/lib/session-events.ts`: центральная разность по скоростям/времени → продольные/поперечные ускорения, пороги манёвров/резких событий (согласованы с §7.x методологии). Это отдельная «линза» сырых данных — осознанно не совпадает с state-machine-метриками (см. §17). Счётчики резких событий/HSC/RMS в UI берутся из methodology-конвейера (`/api/sessions/{id}/stats`+`stats/batch`, один источник с бейджем EcoScore) — events-конвейер используется только G-G-диаграммой и картой.
 
 ### 10.5. Retention
 
@@ -522,15 +521,15 @@ Cron 03:00 UTC: сессии старше `RETENTION_DAYS` → soft-delete; по
 | 7. Сравнительные (8) | routeHash-группы, Theil-Sen тренд, P75-хотспоты | route-comparison.ts |
 | 8. Качество данных (6) | покрытие, accuracy, gaps | ingest-trace.ts |
 
-Окна: **активная часть записи** (§4.11; с v2.25 — объединение окон legs, сплит стоянками ≥ 900 с) — все пользовательские KPI считаются по ней (хвосты и долгие парковки исключаются). Спидограмма — временной ряд скорости (даунсемпл ≤ 240 точек, км/ч; период-агрегат — ≤ 720). EcoScore — CAP-методика с корпусной калибровкой (корпус — сессии всех пользователей; мин. 5 сессий, при < 30 — медиана с запасом ×1,2; env-override `ECO_SCORE_CAP_BASELINE` приоритетнее; при недостатке — дефолтные базлайны, метрика выдаётся).
+Окна: **активная часть записи** (§4.11; объединение окон legs, сплит стоянками ≥ 900 с) — все пользовательские KPI считаются по ней (хвосты и долгие парковки исключаются). Спидограмма — временной ряд скорости (даунсемпл ≤ 240 точек, км/ч; период-агрегат — ≤ 720). EcoScore — CAP-методика с корпусной калибровкой (корпус — сессии всех пользователей; мин. 5 сессий, при < 30 — медиана с запасом ×1,2; env-override `ECO_SCORE_CAP_BASELINE` приоритетнее; при недостатке — дефолтные базлайны, метрика выдаётся).
 
 ## 12. Фронтенд
 
 - **Страницы**: `/` — основное приложение (вкладки: Аналитика, Поездки, АДМИН); `/m` — мобильная запись; `/shared/<token>` — публичная поездка; офлайн — `offline.html`.
 - **PWA**: `public/sw.js` (кэш статики, фоновое обновление с тостом), `manifest.webmanifest`, иконки.
 - **Серверное состояние**: TanStack Query; staleTime 30 c; live-сессии — поллинг 15 c (поштучные роуты); параллелизм GET-запросов ограничен клиентским семафором (6).
-- **Батч-архитектура**: префетч `stats/batch` на корне лейаута; ответ «просеивается» в per-id кэш (`setQueryData`), поэтому карточки «Поездок» рендерятся без сетевых запросов; период-агрегат аналитики — `stats+events+track` батчи (3 запроса, ≤ 50 записей); план-факт периода — клиентское поле `route.planActualDurationSec` (только период-агрегат, согласованные популяции §6.3 METHODOLOGY). Фильтр периода — «Все записи · период» (сущность — запись/Session, v2.31).
-- **Карта**: Leaflet, слои OSM Street / OpenTopoMap Terrain / Esri World Imagery (satellite) / Esri World Dark Gray Canvas (dark: Base + Reference-подписи, апскейл с нативного z16). CARTO-тайлы (dark_all/voyager) удалены в v2.29.0: провайдер требует API-ключ с авг 2026 и отдаёт error-тайл «API key required» анонимным запросам. CSP allow-list: `*.tile.openstreetmap.org`, `*.tile.opentopomap.org`, `server.arcgisonline.com`.
+- **Батч-архитектура**: префетч `stats/batch` на корне лейаута; ответ «просеивается» в per-id кэш (`setQueryData`), поэтому карточки «Поездок» рендерятся без сетевых запросов; период-агрегат аналитики — `stats+events+track` батчи (3 запроса, ≤ 50 записей); план-факт периода — клиентское поле `route.planActualDurationSec` (только период-агрегат, согласованные популяции §6.3 METHODOLOGY). Фильтр периода — «Все записи · период» (сущность — запись/Session).
+- **Карта**: Leaflet, слои OSM Street / OpenTopoMap Terrain / Esri World Imagery (satellite) / Esri World Dark Gray Canvas (dark: Base + Reference-подписи, апскейл с нативного z16). CARTO-тайлы (dark_all/voyager) не используются: провайдер требует API-ключ с авг 2026 и отдаёт error-тайл «API key required» анонимным запросам. CSP allow-list: `*.tile.openstreetmap.org`, `*.tile.opentopomap.org`, `server.arcgisonline.com`.
 - **UX**: командная палитра (Ctrl+K), глобальный поиск, тёмная тема (next-themes), тосты Sonner, skeleton-состояния, 25 c watchdog на гейт батча с фолбэком на поштучные запросы.
 
 ## 13. Наблюдаемость
@@ -601,11 +600,11 @@ curl https://telemetria-poedzok.onrender.com/api/admin/backup \
 
 ### 14.3. Восстановление из дампа (RTO 5–15 мин)
 
-`POST /api/admin/restore {backupId}` — рабочая реализация (с v2.16; v2.29 — покрытие всех таблиц):
+`POST /api/admin/restore {backupId}` — рабочая реализация (покрытие всех таблиц):
 
 1. Дамп-файл должен лежать в `/tmp/backups` инстанса (эфемерный!): для свежего restore сначала перезапустить крон `POST /api/admin/backup` (создаст файл на диске) и restore сразу; ассет draft-релиза — для полномасштабного ручного восстановления в новую БД.
 2. Роут: находит BackupJob по id → sha256-проверка файла → атомарный `libsql.batch`: DELETE всех таблиц в FK-safe порядке (текущая BackupJob-строка сохраняется для провенанса) + INSERT строк дампа (колонки — по вайлисту, неизвестные отбрасываются с warn; BigInt-строки `"BIGINT:…"` → обратно).
-3. Состав дампа/рестора v2.29.0: Session, GpsPoint, Trip, IngestMessage, Route, RouteCache, TrafficJob, AuditLog, ExportJob, BackupJob, Setting, _AlertState + users (информационно: passwordHash в дампах нет — аккаунты пересоздаются паролем, id сессий сохраняются). Старые дампы (до v2.29) не содержат Trip/IngestMessage — restore корректно чистит эти таблицы (поездки восстановит backfill `POST /api/admin/backfill-trips`).
+3. Состав дампа/рестора: Session, GpsPoint, Trip, IngestMessage, Route, RouteCache, TrafficJob, AuditLog, ExportJob, BackupJob, Setting, _AlertState + users (информационно: passwordHash в дампах нет — аккаунты пересоздаются паролем, id сессий сохраняются). Restore корректно чистит эти таблицы перед загрузкой (поездки при необходимости восстановит backfill `POST /api/admin/backfill-trips`).
 4. Проверка после: `/health` → db ok; сверка `totalSessions`/`totalPoints`/Trip с `tableCounts` ответа restore; smoke-тест UI.
 5. На время restore БД недоступна для записи (ingest 5xx) — окно низкой нагрузки; не чаще 1 раза/час.
 
@@ -680,7 +679,7 @@ npm run build      # сборка (используется на Render)
 
 1. **Single-instance память.** Rate-limiter, метрики, буферы алертов/латентности — in-memory: рестарт обнуляет окна; горизонтальное масштабирование требует внешнего хранилища (Redis/Prometheus).
 2. **Restore ручной** (RTO 30–60 мин), эндпоинт-заглушка; ежедневный дамп живёт в эфемерном `/tmp` — durable-копия это GitHub draft-релиз (еженедельно + вручную).
-3. **G-G-линза events ≠ state-machine-метрики.** События считаются центральной разностью по сырым точкам (отдельная линза физики), пороги согласованы с методологией §7.x; расхождение с MovingTime-метриками — по построению, не баг. С v2.31.0 числа резких событий/HSC/RMS в UI — из methodology-конвейера (§7.1–§7.5), events-конвейер остался только для G-G-диаграммы и карты.
+3. **G-G-линза events ≠ state-machine-метрики.** События считаются центральной разностью по сырым точкам (отдельная линза физики), пороги согласованы с методологией §7.x; расхождение с MovingTime-метриками — по построению, не баг. Числа резких событий/HSC/RMS в UI — из methodology-конвейера (§7.1–§7.5), events-конвейер остался только для G-G-диаграммы и карты.
 4. **`POST /api/sessions/batch`** отдаёт полные точки до 10 сессий без point-cap — используется компаратором маршрутов, только авторизованный доступ.
 5. **Часть роутов вне p95-буфера** (покрытие `trackLatency` — основные роуты).
 6. **Slack-алерты без дедупликации** — повторяются каждые 5 мин, пока правило горит.

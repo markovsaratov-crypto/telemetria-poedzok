@@ -5,7 +5,6 @@ PWA-платформа записи и анализа телеметрии ав�
 - **Продакшен:** https://poedzok.fun (origin — `telemetria-poedzok.onrender.com`, CDN TurboFlare — см. `docs/CUSTOM_DOMAIN.md`)
 - **Health:** `GET /health` (отдаёт версию из `package.json`)
 - **Развёртывание:** push в `main` → Render autoDeploy (см. `render.yaml`)
-- **Текущая версия:** 2.31.0 (см. `package.json` / `render.yaml`)
 - **Бекап БД:** еженедельный приватный draft-релиз `backup-*` (последний — `backup-v2.29.0`); восстановление — `POST /api/admin/restore` (см. `docs/TECHNICAL.md` §14)
 
 ## Документация — где лежит
@@ -17,7 +16,7 @@ PWA-платформа записи и анализа телеметрии ав�
 |---|---|---|
 | **TECHNICAL.md** | Полная техническая документация: архитектура, БД, безопасность, справочник API, бэкапы, runbook. Точка входа для администратора и техподдержки | [docs/TECHNICAL.md](https://github.com/markovsaratov-crypto/telemetria-poedzok/blob/main/docs/TECHNICAL.md) |
 | **METHODOLOGY.md** | Методология и метрики (62 метрики, формулы, границы применимости) | [docs/METHODOLOGY.md](https://github.com/markovsaratov-crypto/telemetria-poedzok/blob/main/docs/METHODOLOGY.md) |
-| **ADMIN_SPEC.md** | Спецификация администратора: детальные процедуры, история изменений по версиям (последние — в шапке) | [docs/ADMIN_SPEC.md](https://github.com/markovsaratov-crypto/telemetria-poedzok/blob/main/docs/ADMIN_SPEC.md) |
+| **ADMIN_SPEC.md** | Спецификация администратора: развёртывание, токены, API, бэкапы, наблюдаемость | [docs/ADMIN_SPEC.md](https://github.com/markovsaratov-crypto/telemetria-poedzok/blob/main/docs/ADMIN_SPEC.md) |
 | **OPERATIONS.md** | Операционные заметки: алерты, бэкапы, инциденты | [docs/OPERATIONS.md](https://github.com/markovsaratov-crypto/telemetria-poedzok/blob/main/docs/OPERATIONS.md) |
 | **CUSTOM_DOMAIN.md** | Ранбук домена poedzok.fun через TurboFlare CDN (РФ без VPN) | [docs/CUSTOM_DOMAIN.md](https://github.com/markovsaratov-crypto/telemetria-poedzok/blob/main/docs/CUSTOM_DOMAIN.md) |
 

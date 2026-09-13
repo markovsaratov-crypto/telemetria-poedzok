@@ -71,7 +71,7 @@ Cron-сервис `telemetria-alerts-cron` добавлен в `render.yaml` (к
 | `backup_failure` | status=failed 3 раза подряд | последние 3 `BackupJob` |
 | `db_size_growth` | рост > 100 МБ/день | `PRAGMA page_count × page_size`; последняя выборка хранится в таблице `_AlertState` |
 | `api_latency_p95` | p95 > 2 c за 5 мин | буфер `src/lib/latency.ts`, наполняется роутами, вызывающими `trackLatency(request)` |
-| `worker_stuck` | pending > 50 в течение 10 мин | серия снапшотов pending, накапливается между оценками cron |
+| `worker_stuck` | старейший pending > 30 мин ИЛИ pending > 50 в течение 10 мин | MIN(scheduledFor) TrafficJob + серия снапшотов pending (для single-user возраст осмысленнее счётчика) |
 
 ### Известные ограничения (сознательные, не баги)
 
@@ -86,9 +86,12 @@ Cron-сервис `telemetria-alerts-cron` добавлен в `render.yaml` (к
    перед успешным `return json(...)` в роуте.
 3. **`db_size_growth` требует двух оценок** с интервалом ≥ 1 ч (первая фиксирует
    базовую точку в `_AlertState`).
-4. **Slack-уведомления шлются при каждой оценке с горящими правилами** (каждые
-   5 минут cron), дедупликации нет — при желании добавить состояние
-   «уведомлён» в `_AlertState`.
+4. **Slack-уведомления с дедупликацией по кулдауну**: горящее правило
+   уведомляется не чаще раза в `ALERT_DEDUP_COOLDOWN_MIN` (60 мин по
+   умолчанию); гашение правила удаляет состояние (`_AlertState`), следующее
+   срабатывание уведомит сразу. При сбое доставки состояние не ставится —
+   уведомление не «съедается» кулдауном. `ALERT_DEDUP_COOLDOWN_MIN=0` —
+   прежнее поведение (каждые 5 мин).
 5. `PRAGMA page_size`/`page_count` на Turso может быть недоступен — правило
    вернёт `detail: "PRAGMA недоступен…"`, не падая.
 
@@ -98,24 +101,68 @@ Cron-сервис `telemetria-alerts-cron` добавлен в `render.yaml` (к
 
 - Логический дамп БД в `BackupJob` с checksum и верификацией (§9.8);
   файл в `BACKUP_STORAGE_DIR` (/tmp/backups на Render — **эфемерно**).
-- Выгрузка в GitHub Releases (`GITHUB_BACKUP_*` env) — долговременный уровень.
+- Выгрузка в GitHub Releases (`GITHUB_BACKUP_*` env) — долговременный уровень:
+  **ежедневно 04:00 UTC** (github-backup-cron; ранее — еженедельно, окно потери
+  durable-копии было до 7 дней).
+- Read-back drill после каждого аплоада: ассет скачивается обратно, sha256
+  сверяется с чексуммой аплоада, JSON парсится, счётчики строк сравниваются с
+  дампом-источником. Результат — аудит-запись `backup.drill`; при провале —
+  Slack (движок `sendSlackMessage`). Проверяется именно восстановимость
+  durable-копии, а не только её существование.
 - Ретраи `BACKUP_MAX_ATTEMPTS=3`, интервал `BACKUP_RETRY_INTERVAL_HOURS=1`.
 - Cron `backup-cron` создаёт дампы по расписанию (render.yaml).
 
 **Restore (фактическое состояние):**
 
-- `POST /api/admin/restore {backupId}` — рабочая реализация: поиск BackupJob
+- `POST /api/admin/restore {backupId}` — локальный дамп: поиск BackupJob
   (status=completed с filePath+checksum), чтение файла, сверка SHA256, разбор
   JSON-дампа, атомарная транзакция `libsql.batch` — TRUNCATE всех таблиц в
   FK-безопасном порядке + INSERT строк дампа (порядок по внешним ключам),
   запись аудита ПОСЛЕ restore (переживает truncate). Ответ:
   `{ok, restoredAt, backupId, tablesCount, checksumVerified}` (см. TECHNICAL.md §14.3).
   Лимит — 1 раз в час (admin:heavy-скоп).
+- `POST /api/admin/restore {source:"github", tagName?}` — **restore из
+  durable-копии**: ассет draft-релиза скачивается по GitHub API (Accept:
+  octet-stream + токен), sha256 сверяется с checksum из тела релиза, файл
+  сохраняется в /tmp/backups и создаётся completed-BackupJob (type=github),
+  дальше — тот же атомарный конвейер. Работает и сразу после рестарта/деплоя
+  инстанса (когда /tmp пуст) — прежняя зависимость restore от выживания
+  /tmp-файлов снята. `tagName` опционален: без него берётся последний
+  backup-релиз.
 - Во время restore БД недоступна для записи; ingest в это время вернёт 5xx.
 - Дампы в /tmp/backups живут до следующего деплоя/рестарта инстанса —
-  долговременный уровень хранения GitHub Releases.
+  долговременный уровень хранения GitHub Releases (ежедневно + read-back drill).
 
-RTO ≈ 5–15 мин (автоматический restore), RPO = интервал backup-cron.
+RTO ≈ 5–15 мин (автоматический restore из любого источника), RPO = ≤ 24 ч
+(durable-уровень, ежедневно 04:00 UTC).
+
+**Runbook: полный ручной перенос в новую БД** (крайний случай — недоступны и
+Render, и Turso; 30–60 мин):
+
+1. Скачать ассет последнего backup-релиза из GitHub (релизы `backup-*`,
+   draft — нужен аккаунт с write-доступом).
+2. Создать новую БД (Turso: `turso db create <name> --location fra` — регион
+   см. TECHNICAL §5.3/§17; рекомендованный путь также снимает кросс-регионную
+   латентность, см. «Регион Turso» ниже).
+3. **Сначала пересоздать аккаунты пользователей** (FK `Session.userId →
+   User.id`: дамп содержит users информационно, БЕЗ passwordHash — вставка
+   сессий в БД без юзеров падает по FOREIGN KEY). Аккаунт владельца:
+   `POST /api/auth/register` или SQL INSERT с bcrypt-хэшем пароля, id —
+   как в дампе.
+4. Загрузить дамп: локальный прогон `libsql.batch` из дампа (скрипт по образцу
+   `src/lib/restore-core.ts`; restore самовосстанавливает таблицу `_AlertState`)
+   или поднять инстанс с `DATABASE_URL` на новую БД и выполнить
+   `{source:"github"}`-restore.
+5. Сверить счётчики таблиц с `tableCounts` из тела релиза, smoke-тест UI.
+6. Обновить `DATABASE_URL`/`TURSO_AUTH_TOKEN` в Render и верифицировать `/health`.
+
+**Регион Turso (рекомендация, требует действий владельца).** Прод-БД живёт в
+aws-ap-south-1 (Мумбаи), инстанс Render — во Франкфурте: каждый SQL-раундтрип
+~120–150 мс кросс-континентальной латентности. Перенос в aws-eu-central-1
+(fra) снижает раундтрип до единиц мс. Не выполнено автоматически: нужны
+платформенный токен Turso и доступ к дашборду Render (создание новой БД,
+переливка данных свежим бэкапом, смена `DATABASE_URL`, неделя наблюдения со
+старой БД как фолбэком).
 
 ## 3. Метрики /api/metrics (связанное)
 

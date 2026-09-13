@@ -1500,7 +1500,7 @@ function MapBlock({
             ? `${fmtInt(track.points.length)} ${pluralRu(track.points.length, ["точка", "точки", "точек"])} · ${fmtInt(track.segments.length)} ${pluralRu(track.segments.length, ["сегмент", "сегмента", "сегментов"])} · слой ${track.defaultLayer}`
             : isLoading
               ? "загрузка трека…"
-              : "сегменты по скорости · HMM/Viterbi"}
+              : "сегменты по скорости"}
         </span>
       </div>
       <div className="card">
@@ -1643,7 +1643,7 @@ function BehaviorBlock({
               <Stat
                 value={fmtNum(stats?.methodology?.bearingConsistency ?? null, 2)}
                 cls="c-amber"
-                tip="Прямолинейность маршрута | Насколько маршрут прямой | 0,85+ — трасса · 0,5–0,85 — город · ниже 0,5 — серпантин"
+                tip="Прямолинейность маршрута | Насколько маршрут прямой (круговая статистика §7.7) | 0,98+ — трасса · 0,94–0,98 — город · ниже 0,94 — манёвренный маршрут"
                 label="Прямолинейность"
               />
               <Stat

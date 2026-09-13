@@ -1,10 +1,16 @@
 // POST /api/admin/restore — restore DB from a logical JSON dump (§9.8 / R5.3).
 // Bearer ADMIN_TOKEN or owner/admin cookie.
 //
-// Flow:
+// Flow (v2.32.0 — два источника):
+//   {backupId}             — локальный дамп из /tmp/backups (прежнее поведение)
+//   {source:"github", tagName?} — durable-копия: ассет draft-релиза GitHub
+//                            (tagName опционален → последний backup-релиз).
+//                            Скачивание → sha256 → файл в /tmp/backups →
+//                            BackupJob-строка → тот же restore-конвейер.
+//
 //   1) Auth (admin)
-//   2) Find BackupJob by id (must be status=completed with filePath+checksum)
-//   3) Read file, recompute SHA256, compare to stored checksum (if recorded)
+//   2) Получить контент дампа + провенанс (локальный файл или GitHub-ассет)
+//   3) Recompute SHA256, compare to stored checksum (if recorded)
 //   4) Parse JSON dump ({version,timestamp,Session[],GpsPoint[],...})
 //   5) libsql transaction: TRUNCATE every table (FK-safe order) + INSERT all
 //      rows from dump (forward FK order)
@@ -17,8 +23,8 @@
 //     "BIGINT:<digits>" strings — converted back to BigInt on insert.
 //   - The current BackupJob row (id=backupId) is preserved across truncate
 //     to avoid losing the restore provenance.
-//   - In sandbox libsql with file: URL, no Prisma $disconnect is required —
-//     each libsql.execute is atomic and uses the same on-disk SQLite file.
+//   - Таблицы/порядки/вайлист колонок — src/lib/restore-core.ts (общие для
+//     обоих источников, покрыты unit-тестами).
 import { NextRequest } from "next/server";
 import { z } from "zod";
 import { db, libsql } from "@/lib/db";
@@ -26,119 +32,107 @@ import { authorizeRequest, getUserIdFromRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { writeAudit } from "@/lib/audit";
+import { buildRestoreStatements, type BackupDump } from "@/lib/restore-core";
+import { findGitHubBackupForRestore, downloadGitHubBackupAsset, isGitHubBackupConfigured } from "@/lib/github-backup";
 import { promises as fs } from "fs";
 import { createHash } from "crypto";
 import path from "path";
 
 export const dynamic = "force-dynamic";
 
-// Backup dump includes these top-level array keys (see src/lib/backup.ts).
-// v2.29.0 (MA-2): + Trip, IngestMessage, _AlertState — синхронно с src/lib/backup.ts.
-const TABLES = [
-  "Session",
-  "GpsPoint",
-  "Trip",
-  "IngestMessage",
-  "Route",
-  "RouteCache",
-  "TrafficJob",
-  "AuditLog",
-  "ExportJob",
-  "BackupJob",
-  "Setting",
-  "_AlertState",
-] as const;
+const BACKUP_STORAGE_DIR = "/tmp/backups";
 
-// Tables that need BigInt revival for the timestamp column.
-const BIGINT_COLUMNS: Record<string, string[]> = {
-  GpsPoint: ["timestamp"],
-};
+const RestoreRequest = z.union([
+  z.object({ backupId: z.string().min(1) }),
+  z.object({ source: z.literal("github"), tagName: z.string().min(1).optional() }),
+]);
 
-// v2.16.0 (S3): колонки-вайлист для рестора. Раньше имена колонок из дампа
-// интерполировались в SQL напрямую (`INSERT INTO ${table} (${keys.join(", ")})`)
-// — подделанный/битый дамп мог вписать ЛЮБУЮ строку в SQL (инъекция) или
-// сломать рестор мусорными колонками. Теперь неизвестные колонки отбрасываются
-// (с журналом), полностью пустые строки — пропускаются.
-const ALLOWED_COLUMNS: Record<string, ReadonlyArray<string>> = {
-  Session: ["id", "userId", "deviceId", "clientId", "deviceName", "startTime", "endTime", "pointCount", "payloadBytes", "status", "deletedAt", "purgedAt", "routeId", "routeHash", "topologyHash", "trafficJobId", "notes", "tags", "createdAt", "updatedAt", "statsCache", "eventsCache", "trackCache", "cachePointCount", "cacheVersion"],
-  GpsPoint: ["id", "sessionId", "lat", "lon", "speed", "altitude", "accuracy", "timestamp", "bearing"],
-  // v2.29.0 (MA-2): Trip — колонки prisma/schema.prisma (без join-таблицы:
-  // состав поездки хранится в sessionIds JSON, _SessionTrips в БД нет).
-  Trip: ["id", "deviceId", "userId", "status", "startTime", "endTime", "spanStart", "spanEnd", "startLat", "startLon", "endLat", "endLon", "sessionIds", "sessionCount", "deletedAt", "trafficJobId", "createdAt", "updatedAt", "activeDurationSec", "movingTimeSec", "idleTimeSec", "gapTimeSec", "interFragmentGapSec", "internalStopTimeSec", "distanceM", "pointCountActual", "maxSpeedMs", "ecoScore", "planDistanceM", "planDurationSec", "planComparable", "planCoverage", "routingLegCount", "statsComputedAt"],
-  IngestMessage: ["deviceId", "messageId", "firstSeenAt"],
-  _AlertState: ["key", "value", "updatedAt"],
-  Route: ["id", "userId", "name", "description", "startLat", "startLon", "endLat", "endLon", "createdAt", "updatedAt"],
-  RouteCache: ["id", "hash", "result", "todBucket", "routeId", "expiresAt", "createdAt"],
-  TrafficJob: ["id", "sessionId", "status", "attempts", "priority", "scheduledFor", "lockedBy", "lockedAt", "result", "error", "createdAt", "updatedAt"],
-  AuditLog: ["id", "userId", "action", "targetId", "targetType", "actorType", "actorId", "metadata", "sessionId", "createdAt"],
-  ExportJob: ["id", "sessionId", "format", "status", "fileUrl", "fileSize", "expiresAt", "attempts", "lockedBy", "createdAt", "completedAt", "error"],
-  BackupJob: ["id", "status", "type", "filePath", "fileSize", "checksum", "attempts", "lockedBy", "createdAt", "completedAt", "error"],
-  Setting: ["key", "value", "updatedAt", "updatedBy"],
-};
-
-// FK-safe delete order: children first, then parents.
-// v2.29.0 (MA-2): Trip (состав = sessionIds JSON, ссылается на TrafficJob),
-// IngestMessage и _AlertState зависимостей не имеют.
-const DELETE_ORDER: ReadonlyArray<(typeof TABLES)[number]> = [
-  "GpsPoint",
-  "Trip",
-  "IngestMessage",
-  "_AlertState",
-  "AuditLog",
-  "ExportJob",
-  "TrafficJob",
-  "RouteCache",
-  "Session",
-  "Route",
-  "BackupJob",
-  "Setting",
-];
-
-// FK-safe insert order: parents first, then children.
-const INSERT_ORDER: ReadonlyArray<(typeof TABLES)[number]> = [
-  "Setting",
-  "BackupJob",
-  "Route",
-  "Session",
-  "Trip",
-  "RouteCache",
-  "TrafficJob",
-  "ExportJob",
-  "AuditLog",
-  "GpsPoint",
-  "IngestMessage",
-  "_AlertState",
-];
-
-interface BackupDump {
-  version: string;
-  timestamp: string;
-  users?: Array<Record<string, unknown>>;
-  [table: string]: unknown;
+interface RestoreSourceMeta {
+  backupId: string;
+  label: string;
+  checksum: string | null;
+  content: string;
+  filePath: string;
 }
 
-function reviveBigInt(value: unknown): unknown {
-  if (typeof value === "string" && value.startsWith("BIGINT:")) {
-    const digits = value.slice("BIGINT:".length);
-    try {
-      // Use global BigInt constructor (works even on lower ES targets).
-      return (globalThis as { BigInt?: (s: string) => unknown }).BigInt
-        ? (globalThis as { BigInt: (s: string) => unknown }).BigInt(digits)
-        : Number(digits);
-    } catch {
-      return Number(digits);
+/** Локальный путь: BackupJob из БД + файл из /tmp/backups (с path containment). */
+async function loadLocalSource(backupId: string): Promise<RestoreSourceMeta | { error: ReturnType<typeof json> }> {
+  const job = await db.backupJob.findUnique({ where: { id: backupId } });
+  if (!job) return { error: json({ error: "Backup not found" }, 404) };
+  const filePath = job.filePath == null ? "" : String(job.filePath);
+  if (!filePath) {
+    return { error: json({ error: "Backup has no filePath (not yet completed)" }, 400) };
+  }
+  if (job.status !== "completed") {
+    return { error: json({ error: `Backup status is '${job.status}', must be 'completed'` }, 400) };
+  }
+  // path containment — путь строго внутри /tmp/backups.
+  // Скомпрометированная строка в БД не должна давать чтение произвольного файла.
+  const resolvedPath = path.resolve(BACKUP_STORAGE_DIR, path.isAbsolute(filePath) ? path.basename(filePath) : filePath);
+  if (!resolvedPath.startsWith(BACKUP_STORAGE_DIR + path.sep) && resolvedPath !== BACKUP_STORAGE_DIR) {
+    return { error: json({ error: "Backup path escapes storage dir" }, 400) };
+  }
+  let content: string;
+  try {
+    content = await fs.readFile(resolvedPath, "utf8");
+  } catch (err) {
+    logger.error("Restore: read file failed", { backupId, path: resolvedPath, error: err instanceof Error ? err.message : String(err) });
+    return { error: json({ error: "Backup file not readable", path: resolvedPath }, 500) };
+  }
+  return { backupId, label: `local:${backupId}`, checksum: job.checksum == null ? null : String(job.checksum), content, filePath: resolvedPath };
+}
+
+/**
+ * GitHub-путь: durable-копия. Скачивает ассет draft-релиза, проверяет sha256
+ * по checksum из тела релиза, кладёт файл в /tmp/backups и создаёт BackupJob
+ * completed-строку (провенанс + видимость в listBackups). Работает и после
+ * рестарта/деплоя инстанса — в отличие от локальных /tmp-файлов.
+ */
+async function loadGitHubSource(tagName: string | undefined): Promise<RestoreSourceMeta | { error: ReturnType<typeof json> }> {
+  if (!isGitHubBackupConfigured()) {
+    return { error: json({ error: "GitHub backup is not configured (GITHUB_TOKEN)" }, 400) };
+  }
+  let src;
+  try {
+    src = await findGitHubBackupForRestore(tagName);
+  } catch (err) {
+    logger.error("Restore: GitHub lookup failed", { tagName, error: err instanceof Error ? err.message : String(err) });
+    return { error: json({ error: "GitHub release lookup failed" }, 502) };
+  }
+  if (!src) {
+    return { error: json({ error: tagName ? `GitHub backup '${tagName}' not found` : "No GitHub backup releases found" }, 404) };
+  }
+  let content: string;
+  try {
+    content = await downloadGitHubBackupAsset(src.assetUrl);
+  } catch (err) {
+    logger.error("Restore: GitHub asset download failed", { tagName: src.tagName, error: err instanceof Error ? err.message : String(err) });
+    return { error: json({ error: "GitHub asset download failed" }, 502) };
+  }
+  if (src.checksum) {
+    const actual = createHash("sha256").update(content).digest("hex");
+    if (actual !== src.checksum) {
+      return { error: json({ error: "Checksum mismatch — GitHub asset is corrupt", tagName: src.tagName, expected: src.checksum, actual }, 422) };
     }
   }
-  return value;
-}
-
-function reviveRow(table: string, row: Record<string, unknown>): Record<string, unknown> {
-  const bigintCols = BIGINT_COLUMNS[table] ?? [];
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(row)) {
-    out[k] = bigintCols.includes(k) ? reviveBigInt(v) : v;
-  }
-  return out;
+  // Файл в /tmp + BackupJob-строка: провенанс этого restore виден в UI/API
+  await fs.mkdir(BACKUP_STORAGE_DIR, { recursive: true });
+  const safeTag = src.tagName.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const fileName = `restore-gh-${safeTag}-${Date.now()}.json`;
+  const filePath = path.join(BACKUP_STORAGE_DIR, fileName);
+  await fs.writeFile(filePath, content, "utf8");
+  const job = await db.backupJob.create({
+    data: {
+      status: "completed",
+      type: "github",
+      filePath,
+      fileSize: Buffer.byteLength(content),
+      checksum: src.checksum || createHash("sha256").update(content).digest("hex"),
+      completedAt: new Date(),
+      lockedBy: "restore-from-github",
+    },
+  });
+  return { backupId: String(job.id), label: `github:${src.tagName}`, checksum: src.checksum, content, filePath };
 }
 
 export async function POST(request: NextRequest) {
@@ -147,139 +141,70 @@ export async function POST(request: NextRequest) {
     const auth = await authorizeRequest(request, "admin");
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
-    // v2.18.0: zod-валидация backupId (был голый as-каст: number/объект
-    // проваливались в db.backupJob.findUnique и падали 500 вместо честного 400)
     const body = await request.json().catch(() => ({}));
-    const parsed = z.object({ backupId: z.string().min(1) }).safeParse(body);
+    const parsed = RestoreRequest.safeParse(body);
     if (!parsed.success) {
-      return json({ error: "backupId required (string)" }, 400, { "X-Request-Id": requestId });
-    }
-    const backupId = parsed.data.backupId;
-
-    // 2) Find BackupJob
-    const job = await db.backupJob.findUnique({ where: { id: backupId } });
-    if (!job) return json({ error: "Backup not found" }, 404, { "X-Request-Id": requestId });
-    const filePath = job.filePath == null ? "" : String(job.filePath); // v2.18.0: типизированный db
-    if (!filePath) {
-      return json({ error: "Backup has no filePath (not yet completed)" }, 400, { "X-Request-Id": requestId });
-    }
-    if (job.status !== "completed") {
-      return json({ error: `Backup status is '${job.status}', must be 'completed'` }, 400, { "X-Request-Id": requestId });
+      return json({ error: "backupId required (string) or {source:'github', tagName?}" }, 400, { "X-Request-Id": requestId });
     }
 
-    // 3) Read file (BACKUP_STORAGE_DIR is /tmp/backups per src/lib/backup.ts).
-    // v2.11.0 (АУДИТ C-24a): path containment — путь строго внутри /tmp/backups.
-    // Раньше значение из BackupJob.filePath читалось с диска как есть —
-    // скомпрометированная строка в БД давала чтение произвольного файла.
-    const BACKUP_STORAGE_DIR = "/tmp/backups";
-    const resolvedPath = path.resolve(BACKUP_STORAGE_DIR, path.isAbsolute(filePath) ? path.basename(filePath) : filePath); // filePath: String(...) — ниже по потоку (типизированный db)
-    if (!resolvedPath.startsWith(BACKUP_STORAGE_DIR + path.sep) && resolvedPath !== BACKUP_STORAGE_DIR) {
-      return json({ error: "Backup path escapes storage dir" }, 400, { "X-Request-Id": requestId });
-    }
-    let content: string;
-    try {
-      content = await fs.readFile(resolvedPath, "utf8");
-    } catch (err) {
-      logger.error("Restore: read file failed", { requestId, backupId, path: resolvedPath, error: err instanceof Error ? err.message : String(err) });
-      return json({ error: "Backup file not readable", path: resolvedPath }, 500, { "X-Request-Id": requestId });
-    }
+    const loaded = "backupId" in parsed.data
+      ? await loadLocalSource(parsed.data.backupId)
+      : await loadGitHubSource(parsed.data.tagName);
+    if ("error" in loaded) return loaded.error;
+    const { backupId, label, checksum, content, filePath } = loaded;
 
-    // 4) Validate SHA256 checksum if recorded
+    // Validate SHA256 checksum if recorded
     let checksumVerified: boolean | null = null;
-    if (job.checksum) {
+    if (checksum) {
       const actual = createHash("sha256").update(content).digest("hex");
-      checksumVerified = actual === job.checksum;
+      checksumVerified = actual === checksum;
       if (!checksumVerified) {
         await writeAudit({
           action: "backup.restore",
           targetId: backupId,
           targetType: "BackupJob",
           actorType: auth.via === "cookie" ? "user" : "system",
-          actorId: (await getUserIdFromRequest(request)) ?? (auth.via === "cookie" ? "owner" : "admin-token"), // v2.18.0: честная идентификация
-          metadata: { checksumVerified: false, expected: job.checksum, actual },
+          actorId: (await getUserIdFromRequest(request)) ?? (auth.via === "cookie" ? "owner" : "admin-token"),
+          metadata: { checksumVerified: false, expected: checksum, actual, source: label },
         });
-        return json({ error: "Checksum mismatch — backup file is corrupt", backupId, expected: job.checksum, actual }, 422, { "X-Request-Id": requestId });
+        return json({ error: "Checksum mismatch — backup file is corrupt", backupId, expected: checksum, actual }, 422, { "X-Request-Id": requestId });
       }
     }
 
-    // 5) Parse dump JSON
+    // Parse dump JSON
     let dump: BackupDump;
     try {
       dump = JSON.parse(content) as BackupDump;
     } catch (err) {
-      // v2.16.0 (V10): детали парса — только в логи (клиенту — generic-текст)
       logger.warn("Restore: dump is not valid JSON", { requestId, backupId, error: err instanceof Error ? err.message : String(err) });
       return json({ error: "Backup file is not valid JSON" }, 422, { "X-Request-Id": requestId });
     }
 
-    // 6) Truncate + insert in a transaction. libsql client supports batch()
-    // for atomic multi-statement execution. We use individual execute() calls
-    // wrapped in BEGIN/COMMIT to keep semantics simple + portable.
+    // Truncate + insert in a transaction: один атомарный batch (hrana-HTTP:
+    // BEGIN/COMMIT отдельными execute() не гарантируют транзакцию).
     const restoredAt = new Date().toISOString();
-    const tablesCount: Record<string, number> = {};
-
-    // v2.11.0 (АУДИТ C-24b): атомарность через libsql.batch — BEGIN/COMMIT
-    // отдельными execute() на hrana-HTTP НЕ гарантируют одну транзакцию:
-    // сбой посередине оставлял БД полурезанной.
-    const stmts: Array<{ sql: string; args: unknown[] }> = [];
+    let tablesCount: Record<string, number>;
     try {
-      // (собираем statements в массив; выполняем одним batch ниже)
-      // Delete children first, parents last (FK-safe).
-      for (const table of DELETE_ORDER) {
-        // Preserve the current BackupJob row so the restore provenance is not lost.
-        if (table === "BackupJob") {
-          stmts.push({ sql: `DELETE FROM BackupJob WHERE id != ?`, args: [backupId] });
-        } else {
-          stmts.push({ sql: `DELETE FROM ${table}`, args: [] });
-        }
+      const { stmts, tablesCount: tc, unknownTables } = buildRestoreStatements(dump, backupId);
+      tablesCount = tc;
+      if (unknownTables.length > 0) {
+        logger.warn("Restore: unknown top-level keys in dump (skipped)", { requestId, backupId, unknownTables });
       }
-
-      // Insert parents first, children last (FK-safe).
-      for (const table of INSERT_ORDER) {
-        const rows = (dump[table] as Array<Record<string, unknown>> | undefined) ?? [];
-        if (rows.length === 0) {
-          tablesCount[table] = 0;
-          continue;
-        }
-        for (const rawRow of rows) {
-          // Don't re-insert the current BackupJob row (already preserved).
-          if (table === "BackupJob" && rawRow.id === backupId) continue;
-          const row = reviveRow(table, rawRow);
-          // v2.16.0 (S3): только колонки из вайлиста — неизвестные отбрасываем
-          const allowed = ALLOWED_COLUMNS[table] ?? [];
-          const keys = Object.keys(row).filter((k) => allowed.includes(k));
-          const unknownKeys = Object.keys(row).filter((k) => !allowed.includes(k));
-          if (unknownKeys.length > 0) {
-            logger.warn("Restore: unknown columns dropped", { requestId, backupId, table, unknownKeys });
-          }
-          if (keys.length === 0) continue;
-          const placeholders = keys.map(() => "?").join(", ");
-          const values = keys.map((k) => row[k]);
-          stmts.push({
-            sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders})`,
-            args: values as never[],
-          });
-        }
-        tablesCount[table] = rows.length;
-      }
-
-      // Один атомарный batch: либо всё, либо ничего
       await libsql.batch(stmts as never);
     } catch (err) {
       logger.error("Restore: transaction failed, rolled back", { requestId, backupId, error: err instanceof Error ? err.message : String(err) });
-      // Pre-restore audit (might be inside rolled-back tx → write again on the live DB)
       await writeAudit({
         action: "backup.restore",
         targetId: backupId,
         targetType: "BackupJob",
         actorType: auth.via === "cookie" ? "user" : "system",
         actorId: auth.via === "cookie" ? "owner" : "admin-token",
-        metadata: { error: err instanceof Error ? err.message : String(err), checksumVerified },
+        metadata: { error: err instanceof Error ? err.message : String(err), checksumVerified, source: label },
       });
       return json({ error: "Restore transaction failed — rolled back, DB unchanged" }, 500, { "X-Request-Id": requestId });
     }
 
-    // 7) Audit log entry for successful restore (written AFTER commit, so it
+    // Audit log entry for successful restore (written AFTER commit, so it
     // survives in the restored DB and is associated with the restore action).
     await writeAudit({
       action: "backup.restore",
@@ -287,12 +212,12 @@ export async function POST(request: NextRequest) {
       targetType: "BackupJob",
       actorType: auth.via === "cookie" ? "user" : "system",
       actorId: auth.via === "cookie" ? "owner" : "admin-token",
-      metadata: { restoredAt, sourceFile: filePath, checksumVerified, tablesCount, dumpVersion: dump.version, dumpTimestamp: dump.timestamp },
+      metadata: { restoredAt, source: label, sourceFile: filePath, checksumVerified, tablesCount, dumpVersion: dump.version, dumpTimestamp: dump.timestamp },
     });
 
     const totalRows = Object.values(tablesCount).reduce((a, b) => a + b, 0);
     return json(
-      { ok: true, restoredAt, backupId, filePath, checksumVerified, tablesCount, totalRows, dumpVersion: dump.version, dumpTimestamp: dump.timestamp },
+      { ok: true, restoredAt, backupId, source: label, filePath, checksumVerified, tablesCount, totalRows, dumpVersion: dump.version, dumpTimestamp: dump.timestamp },
       200,
       { "X-Request-Id": requestId }
     );

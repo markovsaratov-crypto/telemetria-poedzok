@@ -86,6 +86,11 @@ async function stateSet(key: string, value: string) {
   });
 }
 
+async function stateDelete(key: string) {
+  await ensureStateTable();
+  await libsql.execute({ sql: "DELETE FROM _AlertState WHERE key = ?", args: [key] });
+}
+
 function isoMsAgo(ms: number): string {
   return new Date(Date.now() - ms).toISOString();
 }
@@ -210,16 +215,26 @@ async function ruleApiLatencyP95(): Promise<AlertRule> {
 }
 
 async function ruleWorkerStuck(): Promise<AlertRule> {
+  // v2.32.0: порог «pending > 50» малозначим при одном пользователе (десятки
+  // заданий — норма после нескольких дней). Осмысленный сигнал — ВОЗРАСТ
+  // старейшего задания: очередь не двигается. Счётчик остаётся как OR-условие
+  // (массовый backlog), возраст — как основной.
   const base: Omit<AlertRule, "firing" | "value"> = {
     rule: "worker_stuck",
-    description: "pending > 50 в течение 10 мин",
-    threshold: "pending > 50",
+    description: "старейший pending > 30 мин ИЛИ pending > 50 в течение 10 мин",
+    threshold: "age > 30 мин | pending > 50",
     action: "Перезапуск воркера (Render: restart service)",
   };
   let pendingNow: number | null = null;
+  let oldestPendingSec: number | null = null;
   try {
-    const r = await libsql.execute("SELECT COUNT(*) AS n FROM TrafficJob WHERE status = 'pending'");
-    pendingNow = Number((r.rows[0] as Record<string, unknown>).n);
+    const r = await libsql.execute("SELECT COUNT(*) AS n, MIN(scheduledFor) AS oldest FROM TrafficJob WHERE status = 'pending'");
+    const row = r.rows[0] as Record<string, unknown>;
+    pendingNow = Number(row.n);
+    if (row.oldest != null) {
+      const oldestMs = Date.parse(String(row.oldest));
+      if (Number.isFinite(oldestMs)) oldestPendingSec = Math.max(0, (Date.now() - oldestMs) / 1000);
+    }
   } catch {
     return { ...base, firing: false, value: null, detail: "не удалось запросить TrafficJob" };
   }
@@ -228,14 +243,14 @@ async function ruleWorkerStuck(): Promise<AlertRule> {
   recordPendingSample(pendingNow as number);
   trimTo(pending, 10 * 60 * 1000, now);
   const windowSamples = pending.length;
-  if (windowSamples < 2) {
-    return { ...base, firing: false, value: `pending=${pendingNow}`, detail: "нужно ≥ 2 оценки за 10 мин (cron каждые 5 мин)" };
-  }
-  const stuckAllWindow = pending.every((s) => (s.n as number) > 50);
+  const stuckAllWindow = windowSamples >= 2 && pending.every((s) => (s.n as number) > 50);
+  const staleAge = oldestPendingSec != null && oldestPendingSec > 30 * 60;
+  const ageStr = oldestPendingSec == null ? "?" : `${Math.round(oldestPendingSec / 60)} мин`;
   return {
     ...base,
-    firing: stuckAllWindow,
-    value: `pending=${pendingNow} (${windowSamples} оценок за окно)`,
+    firing: staleAge || stuckAllWindow,
+    value: `pending=${pendingNow}, старейшему ${ageStr} (${windowSamples} оценок за окно)`,
+    detail: staleAge ? "старейшее задание ждёт > 30 мин — воркер не продвигает очередь" : undefined,
   };
 }
 
@@ -271,22 +286,40 @@ export async function evaluateAlerts(): Promise<AlertEvaluation> {
     alerts,
   };
 }
+// ——— v2.32.0: дедупликация уведомлений (претензия №8 ревью) ———
 
-/** Уведомление о сработавших правилах (Slack, если SLACK_WEBHOOK_URL задан). */
-export async function notifyFiring(evaluation: AlertEvaluation): Promise<number> {
-  const firing = evaluation.alerts.filter((a) => a.firing);
-  if (firing.length === 0) return 0;
+export interface DedupDecision {
+  notify: boolean;
+  reason: "no-state" | "cooldown" | "reminder" | "clear";
+}
+
+/**
+ * Чистое решение о дедупе (unit-тестируется). Правило горит:
+ *   - состояния нет → уведомить (первое срабатывание);
+ *   - уведомляли < cooldown назад → молчать (Slack не спамится каждые 5 мин);
+ *   - уведомляли ≥ cooldown назад → уведомить-напоминание (правило всё ещё горит).
+ * Правило не горит, но состояние есть → «clear» (вызывающий разоружает ключ).
+ */
+export function decideDedup(
+  firing: boolean,
+  lastNotifiedAt: number | null,
+  now: number,
+  cooldownMs: number
+): DedupDecision {
+  if (!firing) return { notify: false, reason: "clear" };
+  if (lastNotifiedAt == null) return { notify: true, reason: "no-state" };
+  if (now - lastNotifiedAt < cooldownMs) return { notify: false, reason: "cooldown" };
+  return { notify: true, reason: "reminder" };
+}
+
+const DEDUP_STATE_PREFIX = "alert.dedup.";
+
+/** Отправка текста в Slack (shared для алертов и read-back drill). true = доставлено. */
+export async function sendSlackMessage(text: string): Promise<boolean> {
   const webhook = env().SLACK_WEBHOOK_URL;
-  if (!webhook) return firing.length; // нет вебхука — только журнал/API (задокументировано)
-  const text = [
-    "🚨 «Телеметрия поездок»: сработали правила алертов (§14.4)",
-    ...firing.map((a) => `• ${a.rule}: ${a.value ?? "?"} — порог ${a.threshold}. Действие: ${a.action}`),
-  ].join("\n");
-  // v2.18.0: HTTP-статус вебхука проверяется. Раньше catch покрывал только
-  // сетевые сбои: 4xx/5xx от Slack (отозванный/битый webhook) проглатывались,
-  // а функция возвращала firing.length ВО ВСЕХ ветках — оператор верил, что
-  // уведомления доставлены. Теперь честно: доставлено = только res.ok.
-  let delivered = 0;
+  if (!webhook) return false; // нет вебхука — только журнал/API (задокументировано)
+  // HTTP-статус вебхука проверяется: 4xx/5xx от Slack (отозванный/битый webhook)
+  // не должны проглатываться, а вызывающий не должен верить в доставку.
   try {
     const res = await fetch(webhook, {
       method: "POST",
@@ -294,15 +327,68 @@ export async function notifyFiring(evaluation: AlertEvaluation): Promise<number>
       body: JSON.stringify({ text }),
       signal: AbortSignal.timeout(10_000),
     });
-    if (res.ok) {
-      delivered = firing.length;
-    } else {
-      // доставка уведомления не должна ломать оценку — ошибка видна в журнале вызывающего
-      console.warn(JSON.stringify({ time: new Date().toISOString(), level: "warn", msg: `alerts: Slack webhook ответил ${res.status} — уведомления НЕ доставлены` }));
-    }
+    if (res.ok) return true;
+    console.warn(JSON.stringify({ time: new Date().toISOString(), level: "warn", msg: `alerts: Slack webhook ответил ${res.status} — уведомления НЕ доставлены` }));
+    return false;
   } catch {
-    // сеть/таймаут — тоже не ломаем оценку алертов
     console.warn(JSON.stringify({ time: new Date().toISOString(), level: "warn", msg: "alerts: Slack webhook недоступен — уведомления НЕ доставлены" }));
+    return false;
   }
-  return delivered;
+}
+
+/**
+ * Уведомление о сработавших правилах (Slack, если SLACK_WEBHOOK_URL задан).
+ * v2.32.0: дедупликация — одно и то же горящее правило уведомляется не чаще
+ * раза в ALERT_DEDUP_COOLDOWN_MIN (по умолчанию 60 мин); переход в «не горит»
+ * разоружает правило (следующее срабатывание уведомит сразу). Состояние — в
+ * _AlertState (переживает рестарт, попадает в бэкапы). Возвращает число правил,
+ * о которых фактически доставлено уведомление.
+ */
+export async function notifyFiring(evaluation: AlertEvaluation): Promise<number> {
+  const firing = evaluation.alerts.filter((a) => a.firing);
+  const notFiring = evaluation.alerts.filter((a) => !a.firing);
+
+  // Разоружение погасших правил: состояние удаляется → следующее срабатывание
+  // уведомит мгновенно, а не будет съедено кулдауном прошлого эпизода.
+  for (const a of notFiring) {
+    try { await stateDelete(`${DEDUP_STATE_PREFIX}${a.rule}`); } catch { /* best-effort */ }
+  }
+  if (firing.length === 0) return 0;
+
+  const cooldownMs = env().ALERT_DEDUP_COOLDOWN_MIN * 60 * 1000;
+  const now = Date.now();
+  const toNotify: Array<{ rule: AlertRule; reminder: boolean }> = [];
+  const notified: string[] = [];
+  for (const a of firing) {
+    let lastNotifiedAt: number | null = null;
+    try {
+      const prev = await stateGet(`${DEDUP_STATE_PREFIX}${a.rule}`);
+      if (prev) {
+        const t = Date.parse(prev.updatedAt);
+        if (Number.isFinite(t)) lastNotifiedAt = t;
+      }
+    } catch { /* нет состояния = первое срабатывание */ }
+    const d = decideDedup(true, lastNotifiedAt, now, cooldownMs);
+    if (d.notify) toNotify.push({ rule: a, reminder: d.reason === "reminder" });
+  }
+  if (toNotify.length === 0) return 0; // все ещё горят, но уведомлены недавно
+
+  const text = [
+    "🚨 «Телеметрия поездок»: сработали правила алертов (§14.4)",
+    ...toNotify.map(({ rule, reminder }) =>
+      `• ${rule.rule}: ${rule.value ?? "?"} — порог ${rule.threshold}. Действие: ${rule.action}${reminder ? " (напоминание: правило всё ещё горит)" : ""}`
+    ),
+  ].join("\n");
+  const deliveredOk = await sendSlackMessage(text);
+  if (!deliveredOk) {
+    // нет вебхука или сбой доставки: дедуп-состояние НЕ ставим — иначе следующий
+    // успешный цикл был бы съеден кулдауном уведомления, которое не доставлено
+    return 0;
+  }
+  const nowIso = new Date().toISOString();
+  for (const { rule } of toNotify) {
+    notified.push(rule.rule);
+    try { await stateSet(`${DEDUP_STATE_PREFIX}${rule.rule}`, nowIso); } catch { /* best-effort */ }
+  }
+  return notified.length;
 }

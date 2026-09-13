@@ -748,7 +748,11 @@ export function computeSessionReliability(
   const avgAcc = avgAccuracy(points) ?? 0;
   const idleDrifts: number[] = [];
   for (let i = 1; i < points.length; i++) {
-    if (motion.states[i - 1] === "idle") {
+    // обе точки в idle: интервал ПОЛНОСТЬЮ внутри стационарного участка —
+    // переходы idle→moving (ползание на светофоре, старт разгона) не считаются
+    // «дрейфом»: иначе устройства с точным GPS (avgAcc 2–3 м) получали
+    // driftScore=0 за честные 2–3 м ползания в момент трогания
+    if (motion.states[i - 1] === "idle" && i < motion.states.length && motion.states[i] === "idle") {
       idleDrifts.push(
         haversineM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon)
       );

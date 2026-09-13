@@ -50,7 +50,7 @@ import { getCorpusEcoBaselines } from "./eco-corpus";
  * session-events.ts / session-track.ts (поля, нормализация, пороги) → bump
  * здесь: все существующие кэши станут протухшими и пересчитаются on-demand.
  */
-export const SESSION_CACHE_VERSION = 4; // driftScore §11.6: max → P95 (единичный GPS-глитч не обнуляет SessionReliability) — формулы в кэшированных payloads изменены
+export const SESSION_CACHE_VERSION = 5; // driftScore §11.6: P95 + «обе точки в idle» (переходы трогания — не дрейф) — формулы в кэшированных payloads изменены
 
 export interface SessionCacheMeta {
   id: string;

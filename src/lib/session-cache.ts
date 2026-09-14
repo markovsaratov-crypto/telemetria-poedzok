@@ -50,7 +50,7 @@ import { getCorpusEcoBaselines } from "./eco-corpus";
  * session-events.ts / session-track.ts (поля, нормализация, пороги) → bump
  * здесь: все существующие кэши станут протухшими и пересчитаются on-demand.
  */
-export const SESSION_CACHE_VERSION = 7; // v2.32.0: §7.7 BearingConsistency — круговая статистика (mean cos signedΔ, был линейный stddev свёрнутых дельт; на прод-данных значения почти те же, краевые случаи исправлены) — формулы в кэшированных payloads изменены
+export const SESSION_CACHE_VERSION = 8; // v2.33.0: план = время 2ГИС с пробками на момент старта (utc) — planDurationSec/speedDeviationPct/durationDeviationPct в кэшированных payloads пересчитаны; базовая линия §3.2 осталась только для timeLostToTrafficSec
 
 export interface SessionCacheMeta {
   id: string;

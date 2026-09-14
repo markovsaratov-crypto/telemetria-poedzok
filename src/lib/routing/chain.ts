@@ -49,7 +49,8 @@ async function route2Gis(
   startLat: number,
   startLon: number,
   endLat: number,
-  endLon: number
+  endLon: number,
+  departAtMs?: number
 ): Promise<RouteResult | null> {
   const key = getSettingSync("TWO_GIS_API_KEY");
   if (!key) return null;
@@ -63,15 +64,26 @@ async function route2Gis(
     const proxyUrl = getSettingSync("TWO_GIS_PROXY_URL") || process.env.TWO_GIS_PROXY_URL || "";
     const baseUrl = proxyUrl || "https://catalog.api.2gis.ru";
     const apiUrl = `${baseUrl}/carrouting/6.0.0/global?key=${key}`;
+    // v2.33.0 (требование владельца): utc — «Дата и время, на которые производится
+    // расчёт маршрута» (Unix-сек, см. справочник 2ГИС /carrouting/6.0.0). Без него
+    // 2ГИС считает пробки на МОМЕНТ ЗАПРОСА, а джоб исполняется после закрытия
+    // поездки. Передаём время старта маршрутизируемого участка: прошлое время →
+    // 2ГИС строит план по статистике пробок на этот момент («ожидаемое на момент
+    // старта»). Телеметрия не знает пункт назначения до конца поездки — другого
+    // способа получить план «на момент старта» нет.
+    const body: Record<string, unknown> = {
+      points: [
+        { lat: startLat, lon: startLon },
+        { lat: endLat, lon: endLon },
+      ],
+    };
+    if (departAtMs != null && Number.isFinite(departAtMs) && departAtMs > 0) {
+      body.utc = Math.floor(departAtMs / 1000);
+    }
     const res = await fetch(apiUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        points: [
-          { lat: startLat, lon: startLon },
-          { lat: endLat, lon: endLon },
-        ],
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) {
@@ -88,7 +100,10 @@ async function route2Gis(
     // 2ГИС returns total_distance and total_duration directly (not in legs[])
     const distanceM = route.total_distance || 0;
     const durationSec = route.total_duration || 0;
-    const hasTraffic = (route.algorithm || "").includes("traffic");
+    // v2.33.0: честный детектор трафика. 2ГИС возвращает algorithm РУССКИМ текстом
+    // («с учётом пробок») — поиск английского "traffic" (было) всегда давал false;
+    // поле не использовалось, теперь им честно помечаем trafficFetched.
+    const hasTraffic = /пробк|traffic/i.test(String(route.algorithm || ""));
 
     // Extract polyline from maneuvers
     // P1-7: per-segment дистанция/время — манёвр содержит outcoming_path {distance, duration, geometry[]};
@@ -151,11 +166,15 @@ async function route2Gis(
       durationSec,
       polyline,
       segments,
-      trafficFetched: true,
+      trafficFetched: hasTraffic,
       trafficUtc: new Date().toISOString(),
-      // 2ГИС даёт время с пробками; свободный поток отдельно не отдаёт → план = null
-      planDistanceM: null,
-      planDurationSec: null,
+      // v2.33.0: план = оценка 2ГИС (маршрут по дорогам, время с пробками на
+      // момент старта — utc в запросе). Свободный поток 2ГИС отдельно не отдаёт,
+      // его справочная оценка (гаверсинус/40) считается в planFactFromJobResult
+      // только для timeLostToTrafficSec. Раньше здесь был null — hotspots §10.6
+      // (route-comparison) всегда падали на базовую 40 км/ч.
+      planDistanceM: distanceM,
+      planDurationSec: durationSec,
       trafficDistanceM: distanceM,
       trafficDurationSec: durationSec,
     };
@@ -242,9 +261,12 @@ export async function routeRequest(
   startLat: number,
   startLon: number,
   endLat: number,
-  endLon: number
+  endLon: number,
+  departAtMs?: number
 ): Promise<RouteResult> {
-  const r1 = await route2Gis(startLat, startLon, endLat, endLon);
+  // v2.33.0: departAtMs (мс epoch) — только 2ГИС-канал использует его как utc
+  // («план на момент старта»); OSRM/гаверсинус свободного потока времени не знают.
+  const r1 = await route2Gis(startLat, startLon, endLat, endLon, departAtMs);
   if (r1) return r1;
   const r2 = await routeOsrm(startLat, startLon, endLat, endLon);
   if (r2) return r2;

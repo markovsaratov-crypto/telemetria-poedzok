@@ -72,7 +72,11 @@ interface JobWithPoints {
     // v2.25.0 (П.5): координаты границ каждой поездки (leg) записи — для
     // мульти-leg маршрутизации (запись «утром доехал → 8,5 ч парковка →
     // вечером уехал» больше не получает единый маршрут «дом→ почти дом» 1,7 км).
-    legEnds?: Array<{ startLat: number; startLon: number; endLat: number; endLon: number }>;
+    // v2.33.0: startMs (мс epoch) — время начала leg/поездки: 2ГИС-канал
+    // использует его как utc («план на момент старта», см. routing/chain.ts).
+    legEnds?: Array<{ startLat: number; startLon: number; endLat: number; endLon: number; startMs?: number }>;
+    // v2.33.0: время старта сессии/поездки (спан-фоллбек, если leg-границ нет).
+    departAtMs?: number;
   };
 }
 
@@ -137,17 +141,19 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
     const tripIds = tripJobs.map((c) => c.tripId as string);
     const tph = tripIds.map(() => "?").join(", ");
     const tripsRes = await libsql.execute({
-      sql: `SELECT id, deviceId, sessionIds FROM Trip WHERE id IN (${tph})`,
+      sql: `SELECT id, deviceId, sessionIds, startTime FROM Trip WHERE id IN (${tph})`,
       args: tripIds,
     });
-    const tripById = new Map<string, { deviceId: string; sessionIds: string[] }>();
+    const tripById = new Map<string, { deviceId: string; sessionIds: string[]; startTimeMs: number | null }>();
     for (const r of tripsRes.rows as Record<string, unknown>[]) {
       let ids: string[] = [];
       try {
         const parsed = JSON.parse(String(r.sessionIds ?? "[]"));
         if (Array.isArray(parsed)) ids = parsed.map(String);
       } catch { /* битый JSON → пустой состав → dead */ }
-      tripById.set(String(r.id), { deviceId: String(r.deviceId), sessionIds: ids });
+      // v2.33.0: время первого движения — «момент старта» для utc-плана 2ГИС
+      const startMs = r.startTime != null ? Date.parse(String(r.startTime)) : NaN;
+      tripById.set(String(r.id), { deviceId: String(r.deviceId), sessionIds: ids, startTimeMs: Number.isFinite(startMs) ? startMs : null });
     }
     // Точки всех записей всех поездок одним набором чанков
     const allSessionIds = [...new Set(tripJobs.flatMap((c) => tripById.get(c.tripId as string)?.sessionIds ?? []))];
@@ -211,6 +217,7 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
       const legEnds = legs.map((l) => ({
         startLat: l.startCoord.lat, startLon: l.startCoord.lon,
         endLat: l.endCoord.lat, endLon: l.endCoord.lon,
+        startMs: l.startTime, // v2.33.0: utc 2ГИС = начало каждого leg
       }));
       const gpsPoints = (active.hasActiveTrip
         ? pts.filter((p) => p.timestamp >= active.activeStartTime && p.timestamp <= active.activeEndTime)
@@ -218,7 +225,7 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
       ).map((p) => ({ lat: p.lat, lon: p.lon }));
       jobs.push({
         id: c.id, sessionId: null, tripId: c.tripId, attempts: c.attempts,
-        session: { id: `trip:${c.tripId}`, deviceId: trip.deviceId, gpsPoints, ...(legEnds.length > 0 ? { legEnds } : {}) },
+        session: { id: `trip:${c.tripId}`, deviceId: trip.deviceId, gpsPoints, departAtMs: trip.startTimeMs ?? undefined, ...(legEnds.length > 0 ? { legEnds } : {}) },
       });
     }
   } else if (tripJobs.length > 0) {
@@ -234,13 +241,16 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
   const placeholders = sessionIds.map(() => "?").join(",");
 
   const sessionsRes = await libsql.execute({
-    sql: `SELECT id, deviceId FROM Session WHERE id IN (${placeholders})`,
+    sql: `SELECT id, deviceId, startTime FROM Session WHERE id IN (${placeholders})`,
     args: sessionIds, // v2.19.0: string[] — валидные InValue (было `as any`)
   });
   const sessionMap = new Map<string, string>();
+  const sessionDepartMs = new Map<string, number>(); // v2.33.0: utc-план «на момент старта»
   for (const r of sessionsRes.rows) {
     const row = r as Record<string, unknown>;
     sessionMap.set(String(row.id), String(row.deviceId));
+    const ms = row.startTime != null ? Date.parse(String(row.startTime)) : NaN;
+    if (Number.isFinite(ms)) sessionDepartMs.set(String(row.id), ms);
   }
   const ptsRes = await libsql.execute({
     sql: `SELECT sessionId, lat, lon, speed, timestamp FROM GpsPoint WHERE sessionId IN (${placeholders}) ORDER BY sessionId, timestamp ASC`,
@@ -283,16 +293,18 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
               startLon: l.startCoord.lon,
               endLat: l.endCoord.lat,
               endLon: l.endCoord.lon,
+              startMs: l.startTime, // v2.33.0: utc 2ГИС = начало каждого leg
             }))
           : [{
               startLat: active.activeStartCoord.lat,
               startLon: active.activeStartCoord.lon,
               endLat: active.activeEndCoord.lat,
               endLon: active.activeEndCoord.lon,
+              startMs: active.activeStartTime,
             }])
       : undefined;
 
-    jobs2.push({ id: c.id, sessionId: c.sessionId, tripId: null, attempts: c.attempts, session: { id: c.sessionId as string, deviceId, gpsPoints, ...(legEnds ? { legEnds } : {}) } });
+    jobs2.push({ id: c.id, sessionId: c.sessionId, tripId: null, attempts: c.attempts, session: { id: c.sessionId as string, deviceId, gpsPoints, departAtMs: sessionDepartMs.get(c.sessionId as string), ...(legEnds ? { legEnds } : {}) } });
   }
   return [...jobs, ...jobs2];
 }
@@ -384,7 +396,8 @@ async function processOneJob(job: JobWithPoints, parentRequestId: string) {
         const providers = new Set<string>();
         const segments: RouteSegment[] = [];
         for (const leg of selected) {
-          const r = await routeRequest(leg.startLat, leg.startLon, leg.endLat, leg.endLon);
+          // v2.33.0: utc = момент начала leg (пробки 2ГИС на этот момент)
+          const r = await routeRequest(leg.startLat, leg.startLon, leg.endLat, leg.endLon, leg.startMs ?? job.session.departAtMs);
           if (!r) continue;
           distanceM += r.distanceM;
           durationSec += r.durationSec;
@@ -395,7 +408,7 @@ async function processOneJob(job: JobWithPoints, parentRequestId: string) {
         }
         if (distanceM <= 0) {
           // все legs не замаршрутизировались — честный fallback одним спаном
-          const fallback = await routeRequest(start.lat, start.lon, end.lat, end.lon);
+          const fallback = await routeRequest(start.lat, start.lon, end.lat, end.lon, job.session.departAtMs);
           return (
             fallback ?? {
               provider: "haversine",
@@ -429,8 +442,10 @@ async function processOneJob(job: JobWithPoints, parentRequestId: string) {
     // Одиночная поездка: активные (leg) границы вместо сырых первой/последней точки.
     const routeStart = legEnds && legEnds.length === 1 ? { lat: legEnds[0].startLat, lon: legEnds[0].startLon } : start;
     const routeEnd = legEnds && legEnds.length === 1 ? { lat: legEnds[0].endLat, lon: legEnds[0].endLon } : end;
+    // v2.33.0: utc = момент старта leg/поездки — «план на момент старта» (2ГИС)
+    const departAtMs = (legEnds && legEnds.length === 1 ? legEnds[0].startMs : undefined) ?? job.session.departAtMs;
     const result = await Promise.race<RouteResult | null>([
-      routeRequest(routeStart.lat, routeStart.lon, routeEnd.lat, routeEnd.lon),
+      routeRequest(routeStart.lat, routeStart.lon, routeEnd.lat, routeEnd.lon, departAtMs),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("routeRequest timeout 15s")), 15000)),
     ]);
     await completeJob(job.id, "completed", result, null, job.attempts, requestId);

@@ -429,8 +429,9 @@ export async function loadPlanFacts(sessionIds: string[]): Promise<Map<string, u
 
 /**
  * Чистый разбор plan-факта из JSON-результата TrafficJob — та же логика, что
- * была в computePlanFact (§6.3/§6.6/§6.7/§6.8): 2ГИС-трафик → план по базовой
- * линии гаверсинус/40 км/ч; отклонения с 2 знаками (v2.13.0 Ф5).
+ * была в computePlanFact (§6.3/§6.6/§6.7/§6.8). v2.33.0: план = время 2ГИС
+ * (с пробками, utc=момент старта); базовая линия гаверсинус/40 — справочная
+ * оценка свободного потока для timeLostToTrafficSec; отклонения с 2 знаками (v2.13.0 Ф5).
  * @returns null — джобы нет / битый JSON (вызывающий подставит EMPTY_PLAN_FACT)
  */
 export function planFactFromJobResult(
@@ -446,39 +447,31 @@ export function planFactFromJobResult(
   const plan = parsed as Record<string, unknown>; // v2.16.0 (V5): вместо any
   const provider = plan.provider ? String(plan.provider) : null;
 
-  // План: дистанция провайдера — всегда плановая (геометрия маршрута).
-  // Время: для OSRM — свободный поток (план); для 2ГИС total_duration включает пробки →
-  // план по времени считаем по базовой линии гаверсинус/40 км/ч (§3.2), трафик — от 2ГИС.
+  // v2.33.0 (требование владельца): ПЛАН = ОЦЕНКА 2ГИС — маршрут по дорогам,
+  // время с пробками на МОМЕНТ СТАРТА (воркер передаёт utc). Раньше при
+  // trafficFetched время 2ГИС отбрасывалось и «планом» была базовая линия
+  // гаверсинус/40 — прямая линия занижала дистанцию (−32% на извилистых
+  // маршрутах: 9,9 км против 14,6 км) и игнорировала пробки («план 15 мин»
+  // при оценке 2ГИС 22–28 мин). Дистанция провайдера — всегда плановая
+  // (геометрия маршрута). Базовая линия §3.2 остаётся СПРАВОЧНОЙ оценкой
+  // свободного потока — только для timeLostToTrafficSec.
   const distM = Number(plan.distanceM) || null;
   const durS = Number(plan.durationSec) || null;
   const trafficFetched = !!plan.trafficFetched;
   const planDistanceM = distM;
-  let planDurationSec = trafficFetched ? null : durS;
-  let trafficDurationSec = trafficFetched ? durS : null;
+  const planDurationSec = durS;
+  const trafficDurationSec = trafficFetched ? durS : null;
   let timeLostToTrafficSec: number | null = null;
 
   if (trafficFetched && durS && distM) {
-    // v2.25.0 (П.5): мульти-leg план (воркер маршрутизирует каждую поездку
-    // записи отдельно) — базовая линия считается по СУММЕ прямых участков legs
-    // (legDirectM от ворчера), а не по сквозному haversine первого→последнего
-    // сегмента (для «дом → работа → дом» сквозной спан ≈ 0 — план «3 мин»).
-    const legDirectM = Number(plan.legDirectM) || 0;
-    const legCount = Number(plan.legCount) || 0;
-    if (legCount > 1 && legDirectM > 1) {
-      const baselineDur = Math.round((legDirectM / 1000 / 40) * 3600); // Σ legs, гаверсинус @ 40 км/ч
-      planDurationSec = baselineDur;
-      timeLostToTrafficSec = durS - baselineDur; // §6.8
-    } else {
-      const direct =
-        Array.isArray(plan.segments) && (plan.segments as Array<{ lat: number; lon: number }>).length >= 2
-          ? haversineM((plan.segments as Array<{ lat: number; lon: number }>)[0].lat, (plan.segments as Array<{ lat: number; lon: number }>)[0].lon, (plan.segments as Array<{ lat: number; lon: number }>)[(plan.segments as Array<{ lat: number; lon: number }>).length - 1].lat, (plan.segments as Array<{ lat: number; lon: number }>)[(plan.segments as Array<{ lat: number; lon: number }>).length - 1].lon)
-          : null;
-      if (direct && direct > 1) {
-        const baselineDur = Math.round((direct / 1000 / 40) * 3600); // гаверсинус @ 40 км/ч
-        planDurationSec = baselineDur;
-        timeLostToTrafficSec = durS - baselineDur; // §6.8
-      }
-    }
+    // v2.33.0: timeLostToTrafficSec = «сколько пробки добавили к свободному
+    // потоку НА ТОМ ЖЕ МАРШРУТЕ»: свободный поток = плановая дистанция
+    // маршрута @ 40 км/ч (§3.2; мульти-leg — дистанция уже Σ маршрутов legs,
+    // см. processOneJob). Раньше базой была прямая старт→финиш (haversine) —
+    // извилистость маршрута (14,6 км дороги против 9,9 км прямой) целиком
+    // зачислялась в «пробки», а «планом» была та же прямая. План = время 2ГИС.
+    const freeFlowDur = Math.round((distM / 1000 / 40) * 3600);
+    timeLostToTrafficSec = durS - freeFlowDur; // §6.8
   }
 
   // v2.25.0 (П.5): ГЕЙТ СОПОСТАВИМОСТИ. План — это маршрут «откуда→куда» одной
@@ -505,10 +498,13 @@ export function planFactFromJobResult(
 
   let speedDeviationPct: number | null = null;
   if (comparable && actualAvgSpeed != null && planDistanceM && planDurationSec && planDurationSec > 0) {
+    // v2.33.0: план = время 2ГИС с пробками → плановая скорость РЕАЛЬНАЯ
+    // (раньше при базовой линии §3.2 это всегда было ~40 км/ч по прямой).
     const planSpeed = planDistanceM / planDurationSec;
     speedDeviationPct = planSpeed > 0 ? Math.round(((actualAvgSpeed - planSpeed) / planSpeed) * 1000) / 10 : null;
   }
-  // §6.7: если план по времени недоступен (2ГИС-трафик) — скорость плана = дистанция плана / трафик-время
+  // §6.7 (legacy-ветка, v2.33.0 практически недостижима — план и трафик теперь одно время):
+  // скорость плана = дистанция плана / трафик-время
   if (speedDeviationPct == null && comparable && actualAvgSpeed != null && planDistanceM && trafficDurationSec && trafficDurationSec > 0) {
     const trafficSpeed = planDistanceM / trafficDurationSec;
     speedDeviationPct = trafficSpeed > 0 ? Math.round(((actualAvgSpeed - trafficSpeed) / trafficSpeed) * 1000) / 10 : null;

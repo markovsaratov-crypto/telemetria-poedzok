@@ -1760,7 +1760,7 @@ function TripEntryBody({
           <span>план:</span>
           <b
             style={{ fontWeight: 600 }}
-            data-tip={`План поездки | Маршрут по дорогам для всей поездки целиком${r.planCoverage != null ? ` · покрытие ${(r.planCoverage * 100).toFixed(0)}%` : ""}${r.planComparable === false ? " · слишком мало данных GPS — честное сравнение с фактом невозможно" : ""}`}
+            data-tip={`План поездки | Оценка 2ГИС: маршрут по дорогам с пробками на момент старта${r.planCoverage != null ? ` · покрытие ${(r.planCoverage * 100).toFixed(0)}%` : ""}${r.planComparable === false ? " · слишком мало данных GPS — честное сравнение с фактом невозможно" : ""}`}
           >
             {r.planDurationSec != null ? `${fmtDurMin(r.planDurationSec / 60)}` : "—"}
             {r.planDurationSec != null && st.activeDurationSec > 0 && r.planComparable !== false

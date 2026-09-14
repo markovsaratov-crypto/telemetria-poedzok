@@ -269,6 +269,8 @@ function describePayloadShape(body: unknown): string {
 // поездку устройства, если её первая точка < TRIP_SPLIT_SEC от последней точки
 // поездки (решение ДО вставки точек, под тем же writeLock). Полный пересчёт
 // состава выполнит финализация; здесь — навигационное tripId + живой span.
+// v2.35.0: вливание ПОЛНОГО состава (sessionIds/sessionCount/паузы) — карточка
+// «Поездок» сразу показывает «2 записи» и живые статы всего потока.
 async function createRecordingSession(deviceId: string, deviceName: string, firstTsMs: number, userId: string | null): Promise<string> {
   const id = randomUUID();
   const now = new Date().toISOString();
@@ -280,7 +282,7 @@ async function createRecordingSession(deviceId: string, deviceName: string, firs
       ? [id, deviceId, randomUUID(), deviceName, startTime, startTime, now, now, userId]
       : [id, deviceId, randomUUID(), deviceName, startTime, startTime, now, now],
   });
-  const tripId = await joinNewSessionToTrip(deviceId, firstTsMs);
+  const tripId = await joinNewSessionToTrip(deviceId, id, firstTsMs);
   if (tripId) {
     await libsql
       .execute({ sql: `UPDATE Session SET tripId = ? WHERE id = ?`, args: [tripId, id] })

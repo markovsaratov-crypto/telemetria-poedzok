@@ -26,7 +26,7 @@ import {
   heatColor,
   type PeriodKey,
 } from "@/lib/v4-utils";
-import { fmtSecShort, fmtSecFull, fmtDurMin, fmtNumber, pluralRu, fmtPointsRu } from "@/lib/format";
+import { fmtSecShort, fmtSecFull, fmtDurMin, fmtNumber, pluralRu } from "@/lib/format";
 import {
   useSessionStats,
   useRouteComparison,
@@ -320,6 +320,13 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
 function fmtNum(n: number | null | undefined, decimals = 1): string {
   if (n == null || !Number.isFinite(n)) return "—";
   return n.toFixed(decimals).replace(".", ",");
+}
+// v2.34.0: штрафы EcoScore — в % шкалы (0–100), а не «баллах»: «−14,8%",
+// как в подписи плашки «до 45 / 30 / 25 %» (ТЗ владельца, п.4).
+function fmtPctRu(p: number): string {
+  if (!Number.isFinite(p)) return "—";
+  if (Math.abs(p) < 0.05) return "0%";
+  return `${p < 0 ? "−" : "+"}${Math.abs(p).toFixed(1).replace(".", ",")}%`;
 }
 // v2.12.0 (D-1): разделители тысяч — «15 148», а не «15148».
 const intFmt = new Intl.NumberFormat("ru-RU");
@@ -792,8 +799,22 @@ function DrivingScoreBlock({
   const effBigValue = hasPlan
     ? `${eff > 0 ? "+" : "−"}${Math.abs(eff).toFixed(1).replace(".", ",")}`
     : "—";
+  // v2.34.0 (ТЗ владельца, п.5): бейдж плашки — отклонение в % вместо словесной
+  // зоны «экономия · ≤−1 мин» (минуты не читались). Источник — §6.3
+  // DurationDeviation из API (период-агрегат — Σ/Σ сопоставимых записей),
+  // локальный пересчёт — fallback. Стиль бейджа (score-band) не менялся.
+  const effPct = React.useMemo(() => {
+    if (!hasPlan) return null;
+    if (stats?.route?.durationDeviationPct != null) return stats.route.durationDeviationPct;
+    if (planDurationSec != null && planDurationSec > 0 && actualDuration != null) {
+      return ((actualDuration - planDurationSec) / planDurationSec) * 100;
+    }
+    return null;
+  }, [hasPlan, stats, planDurationSec, actualDuration]);
   const effBand = hasPlan
-    ? ez.band
+    ? effPct != null
+      ? `${effPct > 0 ? "+" : "−"}${Math.abs(effPct).toFixed(1).replace(".", ",")}%`
+      : "нет данных о плане"
     : planNotComparable
       ? "план не сопоставим"
       : "нет данных о плане";
@@ -813,18 +834,20 @@ function DrivingScoreBlock({
         </span>
       </div>
       <div className="score-grid">
-        {/* === Виджет 1: Плавность · EcoScore (v2.21.0: bullet chart) === */}
+        {/* === Виджет 1: Плавность · EcoScore (v2.21.0: bullet chart; v2.34.0: значение
+            в % «52%», зона «агрессивно» разбита на две — «агрессивно · 40–59» и
+            «опасно · ниже 40», ТЗ владельца) === */}
         <BulletChart
           title="Плавность · EcoScore"
-          helpTip="Оценка плавности вождения: 0–100 | Балл снижается за резкие торможения (вес 45%), разгоны (30%) и рывки (25%) | Сравнение — с обычными поездками всех пользователей сервиса (медианный корпус) | Зоны: 80+ плавно · 60–79 умеренно · ниже 60 агрессивный стиль"
-          bigValue={String(ecoScore)}
-          bigValueSuffix="/ 100"
+          helpTip="Оценка плавности вождения: 0–100 | Балл снижается за резкие торможения (вес 45%), разгоны (30%) и рывки (25%) | Сравнение — с обычными поездками всех пользователей сервиса (медианный корпус) | Зоны: 80+ плавно · 60–79 умеренно · 40–59 агрессивно · ниже 40 опасно"
+          bigValue={`${ecoScore}%`}
           bandText={z.band}
           bandCls={z.cls}
           min={0}
           max={100}
           ranges={[
-            { from: 0, to: 60, color: "var(--red-dim)", label: "агрессивно · ниже 60" },
+            { from: 0, to: 40, color: "var(--danger-dim)", label: "опасно · ниже 40" },
+            { from: 40, to: 60, color: "var(--red-dim)", label: "агрессивно · 40–59" },
             { from: 60, to: 80, color: "var(--amber-dim)", label: "умеренно · 60–79" },
             { from: 80, to: 100, color: "var(--plum-dim)", label: "плавно · 80+" },
           ]}
@@ -832,9 +855,9 @@ function DrivingScoreBlock({
             from: 0,
             to: ecoScore,
             color: z.cls === "c-plum" ? "var(--plum)" : z.cls === "c-amber" ? "var(--amber)" : "var(--red)",
-            tip: `EcoScore: ${ecoScore} из 100 · цель 80 — от этой отметки езда считается плавной`,
+            tip: `EcoScore: ${ecoScore}% · цель 80% — от этой отметки езда считается плавной`,
           }}
-          target={{ value: 80, tip: "Цель: 80 баллов — порог «плавной» езды" }}
+          target={{ value: 80, tip: "Цель: 80% — порог «плавной» езды" }}
           ticks={[
             { value: 0, label: "0" },
             { value: 20, label: "20" },
@@ -845,35 +868,40 @@ function DrivingScoreBlock({
           ]}
           note={
             <>
-              Штраф за каждый манёвр — до 45 / 30 / 25 баллов (торможения / разгоны / рывки). Полосы ниже показывают вклад каждого манёвра в итоговый балл; норма для сравнения — {baselineVersion}.
+              {/* v2.34.0 (ТЗ владельца, п.3-4): дословный текст — «до 45/30/25 %»
+                  (не «баллов») + пороги зон: «агрессивно = ниже 60% · опасно = ниже 40%»;
+                  норма сравнения осталась в тултипе «?» заголовка */}
+              Штраф за каждый манёвр — до 45 / 30 / 25 % (торможения / разгоны / рывки). Полосы ниже показывают вклад каждого манёвра в оценку. Агрессивно = ниже 60% · опасно = ниже 40%.
             </>
           }
           rows={[
             {
               label: "Торможения",
-              tip: `Как энергично вы тормозите | Самый весомый вклад в оценку — 45%: резкое торможение опаснее всего (риск удара сзади) | Штраф: ${fmtPointsRu(-brakingPenalty)}`,
+              tip: `Как энергично вы тормозите | Самый весомый вклад в оценку — 45%: резкое торможение опаснее всего (риск удара сзади) | Штраф: ${fmtPctRu(-brakingPenalty)}`,
               barPct: brakingBarPct,
-              value: fmtPointsRu(-brakingPenalty),
+              value: fmtPctRu(-brakingPenalty),
             },
             {
               label: "Разгоны",
-              tip: `Как энергично вы разгоняетесь | Вклад в оценку — 30%: сильные разгоны повышают расход топлива | Штраф: ${fmtPointsRu(-accelPenalty)}`,
+              tip: `Как энергично вы разгоняетесь | Вклад в оценку — 30%: сильные разгоны повышают расход топлива | Штраф: ${fmtPctRu(-accelPenalty)}`,
               barPct: accelBarPct,
-              value: fmtPointsRu(-accelPenalty),
+              value: fmtPctRu(-accelPenalty),
             },
             {
               label: "Рывки",
-              tip: `Насколько «дёрганая» езда — как быстро меняется ускорение | Вклад в оценку — 25%: комфорт пассажиров | Штраф: ${fmtPointsRu(-jerkPenalty)}`,
+              tip: `Насколько «дёрганая» езда — как быстро меняется ускорение | Вклад в оценку — 25%: комфорт пассажиров | Штраф: ${fmtPctRu(-jerkPenalty)}`,
               barPct: jerkBarPct,
-              value: fmtPointsRu(-jerkPenalty),
+              value: fmtPctRu(-jerkPenalty),
             },
           ]}
         />
 
-        {/* === Виджет 2: Эффективность · экономия к плану (v2.21.0: bullet chart) === */}
+        {/* === Виджет 2: Эффективность · отклонение от плана (v2.21.0: bullet chart;
+            v2.34.0: словесный бейдж «экономия · ≤−1 мин» заменён отклонением в %,
+            большие минуты сохранены — шкала в минутах по ТЗ владельца, п.5-6) === */}
         <BulletChart
-          title="Эффективность · экономия к плану"
-          helpTip="Насколько быстрее или медленнее плана вы проезжаете | Минус — приехали раньше (экономия времени), плюс — опоздание | План — оценка 2ГИС того же маршрута с пробками на момент старта; берётся активная часть поездки без длительных стоянок"
+          title="Эффективность · отклонение от плана"
+          helpTip="Насколько быстрее или медленнее плана вы проезжаете | Минус — приехали раньше плана, плюс — позже | Бейдж — отклонение в % (§6.3), большое число — в минутах | План — оценка 2ГИС того же маршрута с пробками на момент старта; берётся активная часть поездки без длительных стоянок"
           bigValue={effBigValue}
           bigValueSuffix={effUnit}
           bandText={effBand}
@@ -881,9 +909,9 @@ function DrivingScoreBlock({
           min={-5}
           max={5}
           ranges={[
-            { from: -5, to: -1, color: "var(--plum-dim)", label: "экономия · ≤−1 мин" },
+            { from: -5, to: -1, color: "var(--plum-dim)", label: "раньше плана · ≤−1 мин" },
             { from: -1, to: 1, color: "var(--amber-dim)", label: "в пределах ±1 мин" },
-            { from: 1, to: 5, color: "var(--red-dim)", label: "перерасход · ≥+1 мин" },
+            { from: 1, to: 5, color: "var(--red-dim)", label: "позже плана · ≥+1 мин" },
           ]}
           measure={
             hasPlan
@@ -906,15 +934,10 @@ function DrivingScoreBlock({
           emptyHint={hasPlan ? undefined : planNotComparable ? `план не сопоставим с поездкой${planCoveragePct != null ? ` (покрытие ${planCoveragePct}%)` : ""}` : "план не рассчитан"}
           note={
             <>
-              Шкала bullet: −5…+5 мин/поездку, целевой маркер — 0 (план). Полоса-мера идёт от 0 влево —
-              экономия (слива), вправо — перерасход (алый). Отклонение = (ActiveDuration − PlanDuration)/60 — стоянки-«хвосты» записи не учитываются.
-              {aggregated && hasPlan && planTrips > 1 && effTotalMin != null
-                ? ` За период — среднее на поездку: Σ отклонений записей с сопоставимым планом ${(effTotalMin > 0 ? "+" : "−") + Math.abs(effTotalMin).toFixed(1).replace(".", ",")} мин делится на ${planTrips} ${pluralRu(planTrips, ["поездку", "поездки", "поездок"])} с планом.`
-                : ""}
-              {!hasPlan && planNotComparable
-                ? ` Маршрут плана не покрывает фактическую дистанцию записи${planCoveragePct != null ? ` — покрытие ${planCoveragePct}%` : ""}: сравнение времени с планом для такой записи не имеет смысла.`
-                : ""}
-              {!hasPlan && !planNotComparable ? " Для этой записи план маршрута не рассчитан — сравнение с планом недоступно." : ""}
+              {/* v2.34.0 (ТЗ владельца, п.6): дословная подпись под графиком;
+                  прежнее пояснение механики bullet и агрегата снято —
+                  «экономия/перерасход» ушли из плашки вместе с бейджем минут */}
+              Шкала: в минутах за выбранные поездки. Стоянки перед началом и после окончания движения НЕ учитываются.
             </>
           }
           rows={[
@@ -1001,6 +1024,10 @@ function SpeedProfileBlock({
   // «движущиеся» сэмплы, st-флаг 2 км/ч) — одноимённые метрики на одном экране
   // (блок 03 и блок 07) давали разные числа. speedP50/speedStdDev — м/с → км/ч;
   // speedVariation (§5.6) — СЧЁТНИК перепадов |Δv|>10 км/ч за ≤10 с, а не std/mean.
+  // v2.34.0 (ТЗ владельца): плитка «Перепады скорости» показывает не счётчик, а
+  // σ в % — стандартное отклонение скорости к медианной (оба поля уже в payload
+  // и в период-агрегате — правка только отображения; база — медиана, а не средняя:
+  // робастна и не зеркалит «Равномерность» §7.6). Счётчик сохранён в подсказке.
   const sp = React.useMemo(() => {
     const m = stats?.methodology;
     const p50Kmh = msToKmh(m?.speedP50 ?? null);
@@ -1013,10 +1040,15 @@ function SpeedProfileBlock({
       at?.hasActiveTrip && at.activeDuration > 0 ? at.activeDuration : (stats?.duration ?? 0);
     const sharePct = (sec: number | null) =>
       activeSec > 0 && sec != null ? Math.round((sec / activeSec) * 100) : 0;
+    const cvPct =
+      m?.speedStdDev != null && m?.speedP50 != null && (m?.speedP50 ?? 0) > 0
+        ? Math.round((m.speedStdDev / m.speedP50) * 100)
+        : null;
     return {
       p50: p50Kmh != null ? fmtNum(p50Kmh, 0) : "—",
       std: stdKmh != null ? fmtNum(stdKmh, 0) : "—",
       vr: vrCount != null ? fmtInt(vrCount) : "—",
+      cv: cvPct,
       jam: jamSec != null ? `${fmtInt(jamSec / 60)} мин · ${sharePct(jamSec)}%` : "—",
       cruise: cruiseSec != null ? `${fmtInt(cruiseSec / 60)} мин · ${sharePct(cruiseSec)}%` : "—",
     };
@@ -1104,10 +1136,12 @@ function SpeedProfileBlock({
             tip="Разброс скорости | Насколько скорость «прыгает» вверх-вниз | Меньше — ровнее езда"
             label="Разброс скорости"
           />
-          {/* v2.31.0 (MAJ-6): §5.6 — счётчик перепадов, а не std/mean */}
+          {/* v2.31.0 (MAJ-6): §5.6 — счётчик перепадов, а не std/mean;
+              v2.34.0: плитка показывает σ в % (ТЗ владельца), счётчик — в подсказке */}
           <Stat
-            value={sp.vr}
-            tip="Перепады скорости | Сколько раз скорость менялась сильнее 10 км/ч за короткое время | Меньше — ровнее ритм"
+            value={sp.cv != null ? `${sp.cv}%` : "—"}
+            cls={sp.cv == null ? "c-faint" : sp.cv < 30 ? "c-plum" : sp.cv < 60 ? "c-amber" : "c-red"}
+            tip={`Перепады скорости | Стандартное отклонение скорости (σ) в % от медианной скорости поездки | Насколько скорость «прыгает» относительно типичного уровня | Меньше — ровнее ритм | Перепадов >10 км/ч за короткое время: ${sp.vr}`}
             label="Перепады скорости"
           />
           <Stat
@@ -1548,6 +1582,14 @@ function BehaviorBlock({
   // (1 − σ/μ скорости) — ровно то, что обещает подпись «насколько ровно держите
   // скорость». Раньше 1 − accelRMS/10 — самодельная формула не про ровность хода.
   const uniformity = mStats?.speedConsistencyIndex ?? null;
+  // v2.34.0 (ТЗ владельца): метрики §7.4/§7.5 — в %, как «Равномерность» §7.6.
+  // Резкость = AccelerationRMS / 2,5 м/с² × 100 (лимит 100%): 2,5 ≈ p90 корпуса
+  // и уровень, где RMS ускорений догоняет порог резкого события 0,28g (§7.1);
+  // пороги таблицы §7.4 ложатся на шкалу ровно: 0,5→20% · 1,0→40% · 1,5→60%.
+  // Дёрганость = JerkRMS / 5 м/с³ × 100 (лимит 100%; утверждённая методика 2):
+  // пороги §7.5: 0,5→10% · 2,0→40%. Физические единицы (км/ч·с, g) — в подсказках.
+  const accelPct = accelRMS > 0 ? Math.min(100, Math.round((accelRMS / 2.5) * 100)) : 0;
+  const jerkPct = jerkRMS > 0 ? Math.min(100, Math.round((jerkRMS / 5) * 100)) : 0;
 
   const ggPointsCount = events?.gg?.points?.length ?? 0;
 
@@ -1617,22 +1659,25 @@ function BehaviorBlock({
           <div className="card">
             <div className="card-title">Резкость</div>
             <div className="stats-grid" style={{ marginTop: 0 }}>
+              {/* v2.34.0 (ТЗ): «Ср. ускорение» → «Резкость» в % (методика 1 — физика
+                  км/ч·с и g — первой строкой в подсказке); «Ср. рывок» → «Дёрганость»
+                  в % с лимитом 100%; «Равномерность» — в % от 100 */}
               <Stat
-                value={fmtNum(accelRMS, 2)}
-                cls={accelRMS > 1.5 ? "c-red" : accelRMS > 0.5 ? "c-amber" : "c-plum"}
-                tip="Среднее ускорение | Насколько энергичны разгоны и торможения | До 0,5 — плавно · 0,5–1,5 — умеренно · выше 1,5 — агрессивно"
-                label="Ср. ускорение"
+                value={`${accelPct}%`}
+                cls={accelPct > 60 ? "c-red" : accelPct > 20 ? "c-amber" : "c-plum"}
+                tip={`Резкость | Насколько энергичны разгоны и торможения | ${accelRMS > 0 ? `${(accelRMS * 3.6).toFixed(1).replace(".", ",")} км/ч за секунду · ${(accelRMS / 9.81).toFixed(2).replace(".", ",")} g | ` : ""}До 20% — плавно · 20–40% — умеренно · 40–60% — рвано · выше 60% — агрессивно | 100% — уровень резкого события (0,28g)`}
+                label="Резкость"
               />
               <Stat
-                value={fmtNum(jerkRMS, 2)}
-                cls={jerkRMS > 2 ? "c-red" : jerkRMS > 0.5 ? "c-amber" : "c-plum"}
-                tip="Средний рывок | Как быстро меняется ускорение — «дёрганость» езды | До 0,5 — плавно · 0,5–2,0 — умеренно · выше 2,0 — агрессивно"
-                label="Ср. рывок"
+                value={`${jerkPct}%`}
+                cls={jerkPct > 40 ? "c-red" : jerkPct > 10 ? "c-amber" : "c-plum"}
+                tip={`Дёрганость | Как быстро меняется ускорение — дёрганая ли езда | ${jerkRMS > 0 ? `${fmtNum(jerkRMS, 2)} м/с³ | ` : ""}До 10% — плавно · 10–40% — умеренно · выше 40% — агрессивно | 100% — рывок 5 м/с³`}
+                label="Дёрганость"
               />
               <Stat
-                value={fmtNum(uniformity, 2)}
+                value={uniformity == null ? "—" : `${Math.round(uniformity * 100)}%`}
                 cls={uniformity == null ? "c-faint" : uniformity > 0.8 ? "c-plum" : uniformity > 0.4 ? "c-amber" : "c-red"}
-                tip="Равномерность хода | Насколько ровно вы держите скорость (индекс §7.6) | Выше 0,8 — ровно · 0,4–0,8 — средне · ниже 0,4 — рвано"
+                tip="Равномерность хода | Насколько ровно вы держите скорость (индекс §7.6) | Выше 80% — ровно · 40–80% — средне · ниже 40% — рвано"
                 label="Равномерность"
               />
             </div>
@@ -1641,9 +1686,17 @@ function BehaviorBlock({
             <div className="card-title">Сложность маршрута</div>
             <div className="stats-grid" style={{ marginTop: 0 }}>
               <Stat
-                value={fmtNum(stats?.methodology?.bearingConsistency ?? null, 2)}
-                cls="c-amber"
-                tip="Прямолинейность маршрута | Насколько маршрут прямой (круговая статистика §7.7) | 0,98+ — трасса · 0,94–0,98 — город · ниже 0,94 — манёвренный маршрут"
+                value={stats?.methodology?.bearingConsistency != null ? `${Math.round((stats?.methodology?.bearingConsistency ?? 0) * 100)}%` : "—"}
+                cls={
+                  stats?.methodology?.bearingConsistency == null
+                    ? "c-faint"
+                    : stats.methodology.bearingConsistency >= 0.98
+                      ? "c-plum"
+                      : stats.methodology.bearingConsistency >= 0.94
+                        ? "c-amber"
+                        : "c-red"
+                }
+                tip="Прямолинейность маршрута | Насколько маршрут прямой (круговая статистика §7.7) | 98%+ — трасса · 94–98% — город · ниже 94% — манёвренный маршрут"
                 label="Прямолинейность"
               />
               <Stat

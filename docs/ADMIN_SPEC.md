@@ -1012,6 +1012,7 @@ GET /health
 | eco_score_calculations_total          | counter           | Расчёты EcoScore (CAP)                                    |
 | eco_score_low_reliability_total       | counter           | Сессии с SessionReliability < порога (excluded из корпуса)|
 | moving_time_control_sum_violations    | counter           | Нарушения инварианта MovingTime+IdleTime+GapTime=Duration  |
+| trip_live_join_total                  | counter           | v2.35.0: живое вливание записи в поездку (полный состав, METHODOLOGY §4.11а) |
 
 ### 14.2. Health-check
 

@@ -1,4 +1,20 @@
-// src/lib/trip-grouping.ts — v2.26.0 (ТЗ «Поездка не рвётся на куски», §4/§7/§13).
+// src/lib/trip-grouping.ts — v2.26.0 (ТЗ «Поездка не рвётся на куски», §4/§7/§13);
+// v2.35.0 — ЖИВАЯ СКЛЕЙКА СОСТАВА (кейс 14.09: iOS-провал пуша 65 c посреди
+// поездки создавал вторую запись; поездка-«хвост» показывала «1 запись» и
+// замороженные статы первого фрагмента до финализации, а пересчёт финализации
+// пересоздавал строку Trip — id менялся, план-джоб осиротевал). Теперь:
+//   • joinNewSessionToTrip вливает новую запись в ПОЕЗДКУ ЦЕЛИКОМ: состав
+//     (sessionIds/sessionCount/interFragmentGapSec), spanEnd, status=recording,
+//     инвалидация кэшей метрик — карточка «Поездок» сразу показывает
+//     «2 записи» и живые статы всего потока (computeTripStats по составу);
+//   • матчинг пересчёта — по СТАРТУ ±120 c (startTime = первое движение —
+//     стабильная идентичность цепочки): endTime у живой поездки «дышит»
+//     (последняя точка батча), а канонический endTime — последнее ДВИЖЕНИЕ;
+//     парковочный хвост после финиша раньше превышал допуск ±120 c →
+//     delete+insert с новым id. Старт двух разных поездок устройства всегда
+//     разделён ≥ TRIP_SPLIT_SEC — коллизий ±120 c нет;
+//   • план-джоб при живой склейке НЕ сбрасывается (маршрут до финиша ещё
+//     неизвестен) — его переустановит пересчёт финализации по drift'у окна.
 //
 // КАНОНИЧЕСКОЕ ПРАВИЛО ГРАНИЦ ПОЕЗДКИ (§4 ТЗ) — чистая функция потока точек
 // устройства, записи в ней НЕ участвуют:
@@ -357,7 +373,14 @@ export async function recomputeTripsForDevice(
     });
   }
 
-  // Матчинг: то же окно движения ±120 с (стабильные id при пересчёте)
+  // Матчинг: тот же СТАРТ ±120 с. v2.35.0: startTime (первое движение) —
+  // стабильная идентичность цепочки: старт двух разных поездок устройства
+  // всегда разделён ≥ TRIP_SPLIT_SEC (между ними тишина/стоянка ≥ 900 c) —
+  // коллизий допуска ±120 c не бывает. Раньше требовалось совпадение ещё и
+  // endTime: у ЖИВОЙ поездки endTime «дышит» (extendTripOnPoints тянет его к
+  // последней точке батча), а канонический endTime — последнее ДВИЖЕНИЕ;
+  // парковочный хвост после финиша превышал допуск → delete+insert с новым
+  // id (кейс 14.09: поездка 2e5f267b пересоздана как 659ab189 в 18:52).
   const MATCH_MS = 120_000;
   const matchedExisting = new Set<string>();
   const stmts: Array<{ sql: string; args: unknown[] }> = [];
@@ -368,8 +391,7 @@ export async function recomputeTripsForDevice(
     const match = existing.find(
       (e) =>
         !matchedExisting.has(e.id) &&
-        Math.abs(e.startTimeMs - trip.startTime) <= MATCH_MS &&
-        Math.abs(e.endTimeMs - trip.endTime) <= MATCH_MS
+        Math.abs(e.startTimeMs - trip.startTime) <= MATCH_MS
     );
     const sessionIdsJson = JSON.stringify(trip.sessionIds);
     const status = trip.hasRecordingSession ? "recording" : "completed";
@@ -630,36 +652,93 @@ export async function recomputeAfterSessionDelete(sessionId: string): Promise<vo
 
 /**
  * Живое вливание записи в существующую поездку при СОЗДАНИИ записи (§7 ТЗ
- * «поздние данные»): батч, начинающийся < TRIP_SPLIT_SEC после последней
- * точки поездки, присоединяет запись к поездке сразу (до вставки точек,
- * под тем же ingestWriteLock). Полное расширение окна выполнит пересчёт
- * при финализации; здесь — навигационное tripId + живое расширение span.
+ * «поздние данные»; v2.35.0 — ПОЛНЫЙ СОСТАВ, кейс 14.09): батч, начинающийся
+ * < TRIP_SPLIT_SEC после последнего фикса поездки, присоединяет запись к
+ * поездке сразу (до вставки точек, под тем же ingestWriteLock).
+ * v2.26.0 вливал только навигационное Session.tripId + spanEnd: карточка
+ * «Поездок» до финализации показывала «1 запись» и ЗАМОРОЖЕННЫЕ статы
+ * первого фрагмента (computeTripStats читает sessionIds). v2.35.0 обновляет
+ * состав целиком — sessionIds/sessionCount/interFragmentGapSec, status=
+ * 'recording', инвалидация кэшей метрик: карточка сразу показывает
+ * «2 записи» и живые статы всего потока (поллинг /api/trips/[id] 15 c).
+ * План-джоб НЕ сбрасывается: маршрут до финиша неизвестен — его переустановит
+ * пересчёт финализации (drift окна: живой endTime = последняя точка,
+ * канонический = последнее движение).
+ * CAS по sessionIds (двойная попытка): параллельный recompute воркера мог
+ * изменить состав между чтением и записью.
+ * Полное расширение окна выполнит пересчёт при финализации.
  * @returns tripId если запись влита, null иначе
  */
-export async function joinNewSessionToTrip(deviceId: string, firstPointTsMs: number): Promise<string | null> {
+export async function joinNewSessionToTrip(
+  deviceId: string,
+  sessionId: string,
+  firstPointTsMs: number
+): Promise<string | null> {
   if (!tripsEnabled()) return null;
   try {
-    const lastRes = await libsql.execute({
-      sql: `SELECT id, endTime FROM Trip
-            WHERE deviceId = ? AND deletedAt IS NULL ORDER BY spanStart DESC LIMIT 1`,
-      args: [deviceId],
-    });
-    if (lastRes.rows.length === 0) return null;
-    const t = lastRes.rows[0] as Record<string, unknown>;
-    const tripId = String(t.id);
-    const endMs = t.endTime == null ? 0 : new Date(String(t.endTime)).getTime();
-    if (!Number.isFinite(endMs)) return null;
-    if (firstPointTsMs - endMs >= env().TRIP_SPLIT_SEC * 1000) return null; // новая цепочка
-    const now = new Date().toISOString();
-    await libsql.execute({
-      sql: `UPDATE Trip SET spanEnd = MAX(COALESCE(spanEnd, spanStart), ?), status = 'recording', updatedAt = ?
-            WHERE id = ?`,
-      args: [iso(firstPointTsMs), now, tripId],
-    });
-    return tripId;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const lastRes = await libsql.execute({
+        sql: `SELECT id, startTime, endTime, spanStart, spanEnd, sessionIds, sessionCount, interFragmentGapSec
+              FROM Trip
+              WHERE deviceId = ? AND deletedAt IS NULL ORDER BY spanStart DESC LIMIT 1`,
+        args: [deviceId],
+      });
+      if (lastRes.rows.length === 0) return null;
+      const t = lastRes.rows[0] as Record<string, unknown>;
+      const tripId = String(t.id);
+      // Граница цепочки = последний фикс поездки (spanEnd; живая парковка/хвост
+      // уже включены). Фallback на endTime/startTime для вырожденных строк.
+      const boundaryMs =
+        t.spanEnd != null
+          ? new Date(String(t.spanEnd)).getTime()
+          : t.endTime != null
+            ? new Date(String(t.endTime)).getTime()
+            : new Date(String(t.startTime)).getTime();
+      if (!Number.isFinite(boundaryMs)) return null;
+      if (firstPointTsMs - boundaryMs >= env().TRIP_SPLIT_SEC * 1000) return null; // новая цепочка
+      // Состав (канонический порядок — asc по времени вхождения; новая запись
+      // всегда позже последнего фрагмента существующего состава)
+      let ids: string[] = [];
+      try {
+        const parsed = JSON.parse(String(t.sessionIds ?? "[]"));
+        if (Array.isArray(parsed)) ids = parsed.map(String);
+      } catch { /* битый JSON — пустой состав */ }
+      if (ids.includes(sessionId)) return tripId; // уже влита (идемпотентность)
+      const newIds = [...ids, sessionId];
+      const gapSec = Math.max(0, Math.round(((firstPointTsMs - boundaryMs) / 1000) * 10) / 10);
+      const prevGap = t.interFragmentGapSec == null || !Number.isFinite(Number(t.interFragmentGapSec))
+        ? 0
+        : Number(t.interFragmentGapSec);
+      const now = new Date().toISOString();
+      // CAS по sessionIds: состав под руками мог сменить recompute воркера
+      const cas = await libsql.execute({
+        sql: `UPDATE Trip SET
+                sessionIds = ?, sessionCount = ?, interFragmentGapSec = ?,
+                spanEnd = MAX(COALESCE(spanEnd, spanStart), ?), status = 'recording',
+                activeDurationSec = NULL, distanceM = NULL, movingTimeSec = NULL, idleTimeSec = NULL,
+                gapTimeSec = NULL, internalStopTimeSec = NULL, pointCountActual = NULL, maxSpeedMs = NULL,
+                ecoScore = NULL, planDistanceM = NULL, planDurationSec = NULL, planComparable = NULL,
+                planCoverage = NULL, routingLegCount = NULL, statsComputedAt = NULL,
+                updatedAt = ?
+              WHERE id = ? AND sessionIds = ? AND deletedAt IS NULL`,
+        args: [
+          JSON.stringify(newIds), newIds.length, Math.round((prevGap + gapSec) * 10) / 10,
+          iso(firstPointTsMs), now, tripId, String(t.sessionIds ?? "[]"),
+        ],
+      });
+      if ((cas.rowsAffected ?? 0) === 0) continue; // гонка — перечитываем состав
+      inc("trip_live_join_total", "Live session joined into trip (full composition)", 1);
+      logger.info("session live-joined into trip", {
+        deviceId, sessionId, tripId,
+        sessionCount: newIds.length, gapSec,
+      });
+      return tripId;
+    }
+    // CAS не прошёл дважды — состав назначит канонический пересчёт финализации
+    return null;
   } catch (err) {
-    logger.warn("trip join on session create failed (non-fatal)", {
-      deviceId, error: err instanceof Error ? err.message : String(err),
+    logger.warn("trip live join failed (non-fatal)", {
+      deviceId, sessionId, error: err instanceof Error ? err.message : String(err),
     });
     return null;
   }

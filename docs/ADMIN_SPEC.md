@@ -4,7 +4,7 @@
 > **Расположение:** https://github.com/markovsaratov-crypto/telemetria-poedzok/blob/main/docs/ADMIN_SPEC.md
 > **Объём:** 21 раздел · архитектура, деплой, токены, API, бэкапы, STRIDE, наблюдаемость
 > Формат: Markdown (только MD, без DOCX-издания)
-> Источник истины по метрикам: `docs/METHODOLOGY.md` (62 метрики в 8 группах + служебный идентификатор `routeId`).
+> Источник истины по метрикам: `docs/METHODOLOGY.md` (62 метрики в 8 группах + служебный идентификатор `routeHash`).
 
 ## Содержание
 
@@ -28,7 +28,7 @@
   - [4.6. MovingTime (state machine)](#46-movingtime-state-machine)
   - [4.7. EcoScore (CAP-методика)](#47-ecoscore-cap-методика)
   - [4.8. HMM map matching (Viterbi)](#48-hmm-map-matching-viterbi)
-  - [4.9. Сравнительные метрики (Theil-Sen, P75, routeId)](#49-сравнительные-метрики-theil-sen-p75-routeid)
+  - [4.9. Сравнительные метрики (Theil-Sen, P75, routeHash)](#49-сравнительные-метрики-theil-sen-p75-routehash)
   - [4.10. Retention и удаление](#410-retention-и-удаление)
 - [5. Авторизация и токены](#5-авторизация-и-токены)
   - [5.1. Механизмы авторизации](#51-механизмы-авторизации)
@@ -119,12 +119,12 @@
 
 Документ дополняет:
 
-- **Методологию** (`docs/METHODOLOGY.md`) — источник истины по формулам всех 62 метрик в 8 группах + служебный идентификатор `routeId` (snap-to-grid + topologyHash, раздел 10.0 методологии).
+- **Методологию** (`docs/METHODOLOGY.md`) — источник истины по формулам всех 62 метрик в 8 группах + служебный идентификатор `routeHash` (snap-to-grid + topologyHash, раздел 10.0 методологии; поле Session.routeHash — FK routeId → админская Route отдельная сущность).
 - Техническое задание «Метрики и мобильный интерфейс».
 
-Фокус настоящего документа — эксплуатационные аспекты: установка, настройка, переменные окружения, HMM/Viterbi map matching, state machine для MovingTime, CAP-методика для EcoScore, routeId-группировка, резервное копирование, мониторинг, устранение неполадок.
+Фокус настоящего документа — эксплуатационные аспекты: установка, настройка, переменные окружения, HMM/Viterbi map matching, state machine для MovingTime, CAP-методика для EcoScore, routeHash-группировка, резервное копирование, мониторинг, устранение неполадок.
 
-> Состав: +9 метрик (ActiveTrip, AccelerationRMS, JerkRMS, SpeedConsistencyIndex, BearingConsistency, UTurnCount, TurnCount, HighSpeedCornering, SessionReliability), +`routeId` как служебный идентификатор с `topologyHash`, изменённые формулы MovingTime/IdleTime/AvgSpeed/EcoScore/Map matching/RouteTrend/HotspotSegments, переименование групп и заголовков, расширенный глоссарий (см. приложение Б). Подробности — в методологии.
+> Состав: +9 метрик (ActiveTrip, AccelerationRMS, JerkRMS, SpeedConsistencyIndex, BearingConsistency, UTurnCount, TurnCount, HighSpeedCornering, SessionReliability), +`routeHash` как служебный идентификатор с `topologyHash`, изменённые формулы MovingTime/IdleTime/AvgSpeed/EcoScore/Map matching/RouteTrend/HotspotSegments, переименование групп и заголовков, расширенный глоссарий (см. приложение Б). Подробности — в методологии.
 
 ## 2. Обзор системы
 
@@ -138,7 +138,7 @@
 
 - API-сервер — Next.js 16 (App Router) с API Routes, обрабатывающий ingest, CRUD сессий и маршрутов, экспорт, администрирование, а также on-demand расчёт метрик по 62 показателям методологии.
 
-- Ворчер — отдельный процесс на Bun (порт 3001), опрашивающий очередь TrafficJob и обрабатывающий задачи маршрутизации (2ГИС → OSRM → гаверсинус) + state machine для MovingTime + CAP-EcoScore + HMM map matching + routeId-расчёт.
+- Ворчер — **in-process-воркер** (Next.js `instrumentation.ts`, работает внутри web-сервиса Render): опрашивает очередь TrafficJob и обрабатывает задачи маршрутизации (2ГИС с `utc` = момент старта → OSRM → гаверсинус; мульти-leg маршрутизация поездок). Отдельный мини-сервис на Bun (`mini-services/worker`, порт 3001) — опциональная изолированная альтернатива для песочницы, в проде НЕ развёрнут (render.yaml содержит только web + 5 cron; см. §12.6, TECHNICAL §17).
 
 - Веб-клиент — React-фронтенд с Leaflet-картой, 5 вкладок (Обзор, Поездки, Маршруты, Импорт, Администрирование) и мобильным интерфейсом на /m.
 
@@ -156,10 +156,10 @@
 | Маршрутизация             | 2ГИС carrouting 6.0.0                | Построение маршрутов и пробки                |
 | Маршрутизация (резерв)    | OSRM Demo Server                     | Fallback при отказе 2ГИС                     |
 | Маршрутизация (последний) | Гаверсинус (40 км/ч)                 | Прямая дистанция                             |
-| Map matching               | HMM (Viterbi)                        | Сопоставление GPS-точек сегментам (раздел 17.2 методологии) |
+| Map matching               | HMM (Viterbi) — НЕ задействован в проде | Сопоставление GPS-точек сегментам — проектная спецификация (раздел 17.2 методологии; план-факт — трип-уровень) |
 | Сравнительная статистика  | Theil-Sen + bootstrap CI 95%         | Устойчивый тренд (раздел 10.5 методологии)   |
 | Скоринг водителя          | CAP (Continuous Acceleration Profiling) | EcoScore, калибруется по референсному корпусу |
-| Ворчер                    | Bun (порт 3001)                      | Асинхронная обработка TrafficJob             |
+| Ворчер                    | Next.js instrumentation (in-process) | Асинхронная обработка TrafficJob (2ГИС→OSRM→гаверсинус) |
 | Логирование               | Pino (JSON)                          | Структурированные логи с requestId           |
 | Метрики                   | prom-client                          | Prometheus text exposition на /api/metrics   |
 | Лимиты                    | In-memory LRU / Redis sliding window | Защита от перегрузки                         |
@@ -175,7 +175,7 @@
 
 - **Корректность метрик** — state machine для MovingTime с гистерезисом 5/2 км/ч + cross-check по displacement + debounce 5 сек; контрольная сумма `MovingTime + IdleTime + GapTime = Duration` проверяется в рантайме; ActiveTrip отсекает «хвосты» записи, поэтому аналитические метрики (AvgSpeed, SpeedDistribution, EcoScore, DurationDeviation) не искажаются стоянками до/после поездки.
 
-- **Группировка маршрутов** — детерминированный `routeId` (sha256 от snap-to-grid старта/финиша + topologyHash ключевых поворотов, раздел 10.0 методологии) позволяет сравнивать концептуально одинаковые маршруты, даже если пользователь менял название в админ-панели.
+- **Группировка маршрутов** — детерминированный `routeHash` (sha256 от snap-to-grid старта/финиша + topologyHash ключевых поворотов, раздел 10.0 методологии) позволяет сравнивать концептуально одинаковые маршруты, даже если пользователь менял название в админ-панели.
 
 - **Устойчивость к выбросам** — `RouteTrend` считается через Theil-Sen (breakdown point 29%) вместо МНК; `HotspotSegments` — через перцентиль P75 вместо среднего; bootstrap в `RouteTrend` детерминирован через PRNG seed из входных данных (принцип идемпотентности).
 
@@ -216,12 +216,13 @@ bun run db:push
 ```
 # Запуск dev-сервера (порт 3000)
 bun run dev
-# Запуск ворчера в отдельном терминале (порт 3001)
+# Ворчер запускается АВТОМАТИЧЕСКИ in-process (instrumentation.ts) — и в песочнице, и в проде
+# Опционально (изолированная альтернатива для песочницы): мини-сервис на Bun (порт 3001)
 cd mini-services/worker
 bun --hot index.ts
 ```
 
-В песочнице ворчер запускается автоматически через `instrumentation.ts` (in-process). В продакшене — как отдельный сервис.
+И в песочнице, и в продакшене ворчер запускается in-process через `instrumentation.ts` (один процесс с API — известное ограничение, см. §12.6 / TECHNICAL §17). Мини-сервис `mini-services/worker` (порт 3001) — опциональная изолированная альтернатива, в проде НЕ развёрнут.
 
 ### 3.4. Сборка для продакшена
 
@@ -235,12 +236,12 @@ bun run start
 
 ### 3.5. Конфигурация render.yaml
 
-Для развёртывания на Render используется конфигурация `render.yaml`. В ней определены два сервиса: `web` (Next.js) и `worker` (Bun), с переменными окружения и health-check.
+Для развёртывания на Render используется конфигурация `render.yaml`. В ней определён web-сервис (Next.js + in-process ворчер) и 5 cron-сервисов, с переменными окружения и health-check.
 
 ```
 services:
   - type: web
-    name: telemetria-web
+    name: telemetria-poedzok
     env: node
     buildCommand: bun install && bun run build
     startCommand: bun run start
@@ -250,16 +251,12 @@ services:
         sync: false
       - key: LOGIN_PASSWORD
         sync: false
-      # ... остальные env vars (MOVING_TIME_*, HMM_*, ECO_SCORE_*, ROUTE_TREND_*, HOTSPOT_SEGMENTS_*, ROUTE_ID_SNAP_GRID_M)
-  - type: worker
-    name: telemetria-worker
-    env: bun
-    buildCommand: bun install
-    startCommand: cd mini-services/worker && bun index.ts
-    envVars:
-      - key: CRON_SECRET
-        sync: false
+      # ... остальные env vars (MOVING_TIME_*, ECO_SCORE_*, ROUTE_TREND_*, ...)
+  # + 5 cron-сервисов: retention / alerts / backup / github-backup / finalize-sessions
+  # Worker-сервиса НЕТ: ворчер работает in-process в web-сервисе (§2.1, §12.6)
 ```
+
+> v2.33.0: выдержка синхронизирована с фактическим `render.yaml` (только web + 5 cron). Ранее здесь фигурировал отдельный worker-сервис `telemetria-worker` (mini-services/worker, порт 3001) — эта альтернатива в проде никогда не разворачивалась.
 
 ## 4. Переменные окружения
 
@@ -346,7 +343,7 @@ services:
 
 | **Переменная**                       | **По умолчанию**        | **Описание**                                                              |
 |--------------------------------------|-------------------------|---------------------------------------------------------------------------|
-| ECO_SCORE_CAP_BASELINE               | (пусто)                 | Базовая линия CAP: пусто = авто-калибровка по медиане референсного корпуса (≥30 сессий, SessionReliability ≥ 0.85); иначе — 0.5/0.4/0.3 (braking/accel/jerk) |
+| ECO_SCORE_CAP_BASELINE               | (пусто)                 | Базовая линия CAP: пусто = авто-калибровка по медиане корпуса живых сессий (≥60 точек каждая; фильтра по SessionReliability НЕТ); <5 сессий → дефолты 0.5/0.4/0.3, < ECO_SCORE_MIN_CALIBRATION_CORPUS (30) → маржа ×1.2; иначе — 0.5/0.4/0.3 (braking/accel/jerk) |
 | ECO_SCORE_CAP_PENALTY_EXPONENT       | 1.5                     | Показатель степени в насыщающей функции штрафа (сигмоида)                |
 | ECO_SCORE_REFERENCE_CORPUS_PATH      | (пусто)                 | Путь к JSON-файлу с предрасчитанным корпусом rate'ов; пусто — вычисление на лету |
 | ECO_SCORE_MIN_CALIBRATION_CORPUS     | 30                      | Минимальный размер референсного корпуса для калибровки (иначе дефолт)     |
@@ -367,7 +364,7 @@ services:
 
 > Значения синхронны с env-дефолтами `src/lib/env.ts`, `render.yaml` и разделом 17.2 методологии (σ = 5, β = 5). Сам конвейер HMM map matching в продакшене НЕ задействован (примечание в §12.6).
 
-### 4.9. Сравнительные метрики (Theil-Sen, P75, routeId)
+### 4.9. Сравнительные метрики (Theil-Sen, P75, routeHash)
 
 Параметры для устойчивых агрегатов по группе «Сравнительные метрики по маршруту».
 
@@ -377,7 +374,7 @@ services:
 | ROUTE_TREND_BOOTSTRAP_SAMPLES        | 200              | Количество случайных попарных наклонов в bootstrap; seed = FNV-1a(даты)   |
 | HOTSPOT_SEGMENTS_PERCENTILE          | 75               | Перцентиль для отсечения хронически пробочных сегментов                   |
 | HOTSPOT_SEGMENTS_THRESHOLD           | 0.5              | Порог P75: сегмент попадает в HotspotSegments, если `P75 < 0.5`           |
-| ROUTE_ID_SNAP_GRID_M                 | 50               | Шаг snap-to-grid для routeId/topologyHash, м (~0.0005° на широте Москвы) |
+| ROUTE_ID_SNAP_GRID_M                 | 50               | Шаг snap-to-grid для routeHash/topologyHash, м (~0.0005° на широте Москвы) |
 
 ### 4.10. Retention и удаление
 
@@ -391,7 +388,7 @@ services:
 
 ## 5. Авторизация и токены
 
-Система использует однопользовательскую модель (single-user, personal-use). Модель `User` НЕ вводится как преждевременная оптимизация. Все данные принадлежат единственному владельцу. IDOR-риск неприменим. Любой аутентифицированный запрос имеет полный доступ.
+Изначально система строилась как однопользовательская (single-user, personal-use). С v2.23.0 — **multi-user с изоляцией данных**: `REGISTRATION_ENABLED=true` (прод), каждая сессия/поездка/маршрут принадлежит пользователю (`userId`); права через роли: `role=user` видит ТОЛЬКО свои данные (scope-фильтры `dataScopeFor()` во всех пользовательских роутах — /api/sessions, /api/trips, /api/routes/*, /api/stats, /api/sessions/[id]/*); `admin` и cron-токены видят всё; legacy-записи без `userId` видит только legacy-владелец (unclaimed-режим). IDOR закрыт изоляцией: чужая запись неотличима от отсутствующей (404).
 
 ### 5.1. Механизмы авторизации
 
@@ -433,8 +430,8 @@ Payload cookie: `base64url(JSON({sub:"owner", iat, exp})) + "." + base64url(HMAC
 | **Модель** | **Назначение**                       | **Ключевые поля**                                                                           |
 |------------|--------------------------------------|---------------------------------------------------------------------------------------------|
 | User       | Пользователь (multi-user расширение) | email, passwordHash, role, apiKey (= личный инжест-токен)                                  |
-| Session    | Поездка                              | deviceId, clientId, startTime, endTime, pointCount, status, deletedAt, routeId, topologyHash, notes, tags |
-| GpsPoint   | GPS-точка                            | sessionId, lat, lon, speed, altitude, accuracy, timestamp (BigInt), **bearing** (используется в BearingConsistency, UTurnCount, TurnCount, HighSpeedCornering, routeId/topologyHash) |
+| Session    | Поездка                              | deviceId, clientId, startTime, endTime, pointCount, status, deletedAt, routeHash, topologyHash, routeId (FK → Route), notes, tags |
+| GpsPoint   | GPS-точка                            | sessionId, lat, lon, speed, altitude, accuracy, timestamp (BigInt), **bearing** (используется в BearingConsistency, UTurnCount, TurnCount, HighSpeedCornering, routeHash/topologyHash) |
 | Route      | Избранный маршрут                    | name, startLat/Lon, endLat/Lon, **topologyHash** (для стабильной идентификации при переименовании) |
 | RouteCache | Кэш маршрутизации                    | hash (unique), result JSON, todBucket, expiresAt                                            |
 | TrafficJob | Задача обработки трафика             | sessionId, status, attempts, priority, scheduledFor, lockedBy, result, error                |
@@ -446,7 +443,7 @@ Payload cookie: `base64url(JSON({sub:"owner", iat, exp})) + "." + base64url(HMAC
 
 | **Поле**                 | **Тип**  | **Модель** | **Назначение**                                                              |
 |--------------------------|----------|------------|-----------------------------------------------------------------------------|
-| topologyHash             | String?  | Session    | Хэш последовательности ключевых точек маршрута; компонент для routeId (раздел 10.0 методологии) |
+| topologyHash             | String?  | Session    | Хэш последовательности ключевых точек маршрута; компонент для routeHash (раздел 10.0 методологии) |
 | topologyHash             | String?  | Route      | Стабильная идентификация маршрута при переименовании (для группировки сравнительных метрик) |
 | activeDuration           | Float?   | Session    | Кэш `ActiveDuration` для избежания пересчёта on-demand                     |
 | preTripIdle              | Float?   | Session    | Хвост записи в начале (сек)                                                |
@@ -486,7 +483,7 @@ Payload cookie: `base64url(JSON({sub:"owner", iat, exp})) + "." + base64url(HMAC
 prisma migrate dev --name add_v2_9_topology_and_caches
 # 2. Пуш в прод-Turso через прод-креды
 bun run db:push
-# 3. Бэк-заполнение routeId/topologyHash для существующих сессий (ворчер, см. 13.3)
+# 3. Бэк-заполнение routeHash/topologyHash для существующих сессий (ворчер, см. 13.3)
 # 4. Бэк-заполнение кэшей метрик on-demand (ленивая стратегия: при первом открытии)
 ```
 
@@ -762,7 +759,7 @@ Turso предоставляет автоматические point-in-time snap
 | Tampering              | SQL-инъекция                 | libsql prepared statements (no raw SQL)            |
 | Repudiation            | Отказ от действия            | AuditLog всех деструктивных операций                 |
 | Information Disclosure | Утечка токенов в bundle      | NEXT_PUBLIC_ не используется                        |
-| Information Disclosure | IDOR                         | Неприменим (single-user модель)                      |
+| Information Disclosure | IDOR                         | Изоляция данных v2.23.0: scope-фильтры во всех пользовательских роутах (role=user → только свои; чужие записи неотличимы от отсутствующих) |
 | Denial of Service      | Flood /api/ingest            | Rate limit 120/мин, in-memory LRU                    |
 | Denial of Service      | Брутфорс /api/auth/login     | Rate limit 5/мин с IP                                |
 | Elevation of Privilege | Обычный пользователь → админ | Разделение токенов по scope (API_KEY vs ADMIN_TOKEN) |
@@ -816,7 +813,7 @@ Fallback при отказе 2ГИС. URL: `https://router.project-osrm.org` (`O
 
 Двухуровневое кэширование результатов маршрутизации. Ключ: `hash(snap-to-grid(start, end) + tod_bucket)`. Snap-to-grid: округление координат до сетки ~55 м × ~35 м (погрешность приемлема для автомобильной маршрутизации). Time-of-day бакеты: 0, 3, 6, 9, 12, 15, 18, 21 (час) — учитывает зависимость пробок от времени суток. TTL кэша: настраиваемый (по умолчанию 24 часа). Хранилище: in-memory LRU + SQLite persistent (`RouteCache`).
 
-> Тот же механизм snap-to-grid используется для `routeId` (раздел 10.0 методологии), но с шагом `ROUTE_ID_SNAP_GRID_M` = 50 м (округление 0.0005° на широте Москвы).
+> Тот же механизм snap-to-grid используется для `routeHash` (раздел 10.0 методологии), но с шагом `ROUTE_ID_SNAP_GRID_M` = 50 м (округление 0.0005° на широте Москвы).
 
 ### 12.6. HMM map matching (Viterbi)
 
@@ -906,14 +903,14 @@ RETURNING id, sessionId, attempts;
    - `preTripIdle`, `postTripIdle`, `activeIdleTime` — хвосты и внутренние стоянки.
    - Инвариант: `preTripIdle + activeDuration + postTripIdle = Duration`.
 
-5. **Маршрутизация.** `routeRequest(start, end)` — цепочка 2ГИС → OSRM → гаверсинус (раздел 12).
+5. **Маршрутизация.** `routeRequest(start, end, departAtMs)` — цепочка 2ГИС → OSRM → гаверсинус (раздел 12). v2.33.0: в запрос 2ГИС передаётся `utc` (Unix-сек) — время старта маршрутизируемого участка (поездка: `Trip.startTime`; запись: `Session.startTime`; мульти-leg: `startTime` каждого leg) — 2ГИС считает время по статистике пробок на этот момент («план на момент старта»). У мульти-leg поездок маршрутизируется каждый leg отдельно (дистанции/времена суммируются).
    - Если точек < 2 — завершить с `provider='haversine'`, `distanceM=0`, `segments=[]`.
    - Старт/финиш — `activeStartCoord`/`activeEndCoord` (не «первые/последние точки»!), чтобы хвосты записи не уводили план-факт.
 
 6. **CAP-расчёт EcoScore.** Если `hasActiveTrip` и `Distance ≥ ECO_SCORE_MIN_ACTIVE_DISTANCE_KM` и `activeDuration ≥ ECO_SCORE_MIN_ACTIVE_DURATION_SEC`:
    - `BrakingRate = Σ a[i]²·dt[i] / Distance_km` для `a[i] < 0`.
    - `AccelRate`, `JerkRate` — аналогично.
-   - Базовая линия: если `ECO_SCORE_CAP_BASELINE` задан — используется; иначе — авто-калибровка по медиане референсного корпуса (`SessionReliability ≥ 0.85`, ≥ 30 сессий), иначе дефолт `0.5/0.4/0.3`.
+   - Базовая линия: если `ECO_SCORE_CAP_BASELINE` задан — используется; иначе — авто-калибровка по медиане корпуса ВСЕХ живых сессий с ≥60 точками (фильтра по SessionReliability НЕТ); <5 сессий → дефолты 0.5/0.4/0.3, корпус < `ECO_SCORE_MIN_CALIBRATION_CORPUS` (30) → маржа ×1.2 к медиане (семантика single-user корпуса — коучинг относительно собственной медианы, см. §7.3 методологии).
    - `EcoScore = 100 × (1 − 0.45·penalty(BrakingRate, BASELINE_BRAKING) − 0.30·penalty(AccelRate, BASELINE_ACCEL) − 0.25·penalty(JerkRate, BASELINE_JERK))`, `clamp(0, 100)`.
    - При `hasActiveTrip = false` или NaN/Infinity → `EcoScore = null`, `rating = insufficient_data`.
 
@@ -922,22 +919,24 @@ RETURNING id, sessionId, attempts;
    - `JerkRMS` — СКО рывков (`da/dt`), м/с³.
    - `SpeedConsistencyIndex` — `1 − SpeedStdDev / AvgSpeed`, clamp(0, 1).
    - `BearingConsistency` — `1 − circularStdDev(bearings) / 180`, clamp(0, 1).
-   - `UTurnCount` — счётчик разворотов (|Δbearing| > 150° при displacement > 30 м).
-   - `TurnCount` — счётчик поворотов (|Δbearing| > 60° и < 150°).
-   - `HighSpeedCornering` — счётчик резких манёвров на высокой скорости (speed > 80 км/ч + |Δbearing| > 45° за < 3 сек).
+   - `UTurnCount` — счётчик разворотов (|Δbearing| > 150°, dt ≤ 10 с, скорость > 10 км/ч; displacement-гейта нет).
+   - `TurnCount` — счётчик поворотов (30° < |Δbearing| ≤ 150°, dt ≤ 5 с, скорость > 5 км/ч).
+   - `HighSpeedCornering` — счётчик резких манёвров на высокой скорости (|Δbearing| > 45°, dt ≤ 5 с, скорость > 60 км/ч).
    - `HarshBrakingCount`, `HarshAccelCount` — события считаются только в активной части (старт движения = нормальный разгон, не harsh).
 
 8. **SessionReliability composite.** `SessionReliability = CompletenessScore × driftScore × PlausibilityScore` (раздел 11.6 методологии). `driftScore` — P95 displacement между соседними точками стационарного участка (обе точки в `idle`, записанная скорость < 1 м/с, dt > 0), отсекает GPS-дрейф на стоянке; физическое движение (ползание, импульс разгона) дрейфом не считается, пустой набор стационарных интервалов — нейтральный множитель 1,0. При < 2 точках — `null`, rating `insufficient_data`.
 
-9. **HMM (Viterbi) map matching** для план-фактного `SpeedDeviation`:
+9. **HMM (Viterbi) map matching** (проектная спецификация; в проде НЕ задействован — см. §12.6 и §17.2 методологии):
    - Если `segments.length > 0` и `points.length ≥ 2`: `hmmMapMatch(points, segments, HMM_EMISSION_SIGMA_M, HMM_TRANSITION_BETA)` → `segmentPerPoint[]`.
    - Если Viterbi вернул пустой результат (нет валидного пути) — счётчик `hmm_mapmatching_fallback_total`++, метрика `SpeedDeviation = null`.
    - Разрыв > `MOVING_TIME_GAP_SEC` → Viterbi сбрасывается и стартует заново.
+   - **Фактически (v2.33.0):** `SpeedDeviation` считается на уровне поездки/записи — `(actualAvgSpeed − planSpeed) / planSpeed`, где `planSpeed = PlanDistance / PlanDuration` (реальная плановая скорость 2ГИС).
 
-10. **routeId computation via topologyHash (snap-to-grid):**
+10. **routeHash computation via topologyHash (snap-to-grid):**
     - `snapToGrid(activeStartCoord, ROUTE_ID_SNAP_GRID_M)` + `snapToGrid(activeEndCoord, ROUTE_ID_SNAP_GRID_M)` + `topologyHash` (sha256 последовательности ключевых точек поворота с |Δbearing| > 60°, округлённых через snap-to-grid).
-    - `routeId = sha256(startGrid + ":" + endGrid + ":" + topologyHash).slice(0, 16)`.
-    - Гарантия: одинаковый `routeId` для двух поездок по одному пути с небольшим отличием в старте/финиша (до 50 м); разный `routeId` для разных путей с одинаковыми концами.
+    - `routeHash = sha256(startGrid + ":" + endGrid + ":" + topologyHash).slice(0, 16)`.
+    - Гарантия: одинаковый `routeHash` для двух поездок по одному пути с небольшим отличием в старте/финиша (до 55 м); разный `routeHash` для разных путей с одинаковыми концами.
+    - Именование: в БД/коде/API — `Session.routeHash` (группировка); `Session.routeId` — отдельный FK на админскую сущность Route, назначается вручную, в группировке не участвует.
 
 11. **Сравнительные метрики (обновлённые):**
     - `RouteAvgDuration`, `RouteBestDuration`, `RouteWorstDuration`, `RouteTrafficPattern` — агрегаты по `activeDuration` (не по `Duration`).
@@ -945,27 +944,31 @@ RETURNING id, sessionId, attempts;
     - `HotspotSegments` — `P75 < HOTSPOT_SEGMENTS_THRESHOLD` (раздел 12.8).
     - Фильтр: только сессии с `SessionReliability ≥ 0.5` участвуют в сравнительных метриках.
 
-12. **Завершение задачи.** `completeJob(status='completed', result={provider, distanceM, durationSec, segments, trafficFetched, routeId, topologyHash, activeDuration, ...})`. При ошибке — `completeJob(status='failed', error=msg)`; если `attempts < 3` — backoff и возврат в pending.
+12. **Завершение задачи.** `completeJob(status='completed', result={provider, distanceM, durationSec, polyline, segments, trafficFetched, trafficUtc, legCount, legDirectM, planDistanceM, planDurationSec})`. При ошибке — `completeJob(status='failed', error=msg)`; если `attempts < 3` — backoff и возврат в pending.
 
-13. **Обновление Session.** `Session.status = 'completed'`, заполнение кэш-полей (`activeDuration`, `preTripIdle`, `postTripIdle`, `activeIdleTime`, `accelerationRms`, `jerkRms`, `speedConsistencyIndex`, `bearingConsistency`, `uTurnCount`, `turnCount`, `highSpeedCornering`, `sessionReliability`, `topologyHash`). Поле `routeId` на `Session` устанавливается в рассчитанное значение.
+13. **Обновление Session.** `Session.status = 'completed'`, заполнение кэш-полей (`activeDuration`, `preTripIdle`, `postTripIdle`, `activeIdleTime`, `accelerationRms`, `jerkRms`, `speedConsistencyIndex`, `bearingConsistency`, `uTurnCount`, `turnCount`, `highSpeedCornering`, `sessionReliability`, `topologyHash`). Поля `routeHash`/`routeId` на Session устанавливаются пайплайном метрик (routeHash — группировка, routeId — FK на админскую Route).
 
 ### 13.4. Health endpoint
 
+Health web-сервиса (ворчер in-process — его состояние в поле `worker`; метрики очереди — `/api/worker/health` с cron-токеном):
+
 ```
-GET /health?XTransformPort=3001
+GET /health
 {
   "status": "ok",
-  "workerId": "worker-local",
-  "pendingJobs": 0,
-  "runningJobs": 0,
-  "inFlight": 0,
-  "apiRunningJobs": 0,
-  "totalProcessed": 42,
-  "totalFailed": 1,
-  "uptimeSec": 3600,
-  "version": "2.11.0"
+  "db": "ok",
+  "worker": "ok",
+  "workerUptimeSec": 3600,
+  "circuits": {},
+  "rateLimiter": { "buckets": 0, "backend": "memory" },
+  "version": "2.33.0",
+  "uptime": 3600.5,
+  "targetLoadRpm": 100,
+  "rateLimitMaxIngest": 120
 }
 ```
+
+> v2.33.0: пример синхронизирован с фактическим ответом прод-`/health`. Ранее здесь фигурировал `GET /health?XTransformPort=3001` — это роут мини-сервиса mini-services/worker (порт 3001), который в проде НЕ развёрнут; отдельного процесса ворчера нет.
 
 ### 13.5. Graceful shutdown
 
@@ -1005,7 +1008,7 @@ GET /health?XTransformPort=3001
 | active_trip_computations_total        | counter           | Расчёты ActiveTrip (разовые на сессию)                    |
 | hmm_mapmatching_runs_total            | counter           | Запуски HMM/Viterbi map matching                          |
 | hmm_mapmatching_fallback_total        | counter           | Fallback HMM (Viterbi не нашёл валидного пути)            |
-| route_id_assignments_total            | counter           | Установленные routeId на Session                          |
+| route_id_assignments_total            | counter           | Установленные routeHash на Session                        |
 | eco_score_calculations_total          | counter           | Расчёты EcoScore (CAP)                                    |
 | eco_score_low_reliability_total       | counter           | Сессии с SessionReliability < порога (excluded из корпуса)|
 | moving_time_control_sum_violations    | counter           | Нарушения инварианта MovingTime+IdleTime+GapTime=Duration  |
@@ -1031,10 +1034,10 @@ GET /health
 
 ### 14.3. Структурированное логирование
 
-Логи в формате JSON (Pino-совместимый). Каждая запись содержит: `time`, `level`, `msg`, `requestId` (сквозной идентификатор запроса), и контекстные поля (`sessionId`, `jobId`, `deviceId`, `routeId`, `topologyHash`, и т.д.).
+Логи в формате JSON (Pino-совместимый). Каждая запись содержит: `time`, `level`, `msg`, `requestId` (сквозной идентификатор запроса), и контекстные поля (`sessionId`, `jobId`, `deviceId`, `routeHash`, `topologyHash`, и т.д.).
 
 ```
-{"time":"2026-08-28T12:00:00.000Z","level":"info","msg":"job completed","requestId":"uuid","jobId":"cmtj_xxx","status":"completed","provider":"osrm","distanceM":12345,"durationSec":678,"routeId":"a1b2c3d4e5f60718","topologyHash":"9f8a7b6c","activeDuration":672}
+{"time":"2026-08-28T12:00:00.000Z","level":"info","msg":"job completed","requestId":"uuid","jobId":"cmtj_xxx","status":"completed","provider":"osrm","distanceM":12345,"durationSec":678,"routeHash":"a1b2c3d4e5f60718","topologyHash":"9f8a7b6c","activeDuration":672}
 ```
 
 Нарушение контрольной суммы:
@@ -1241,7 +1244,7 @@ groups:
 
 - **Smoke-test ActiveTrip:** для тестовой сессии с ≥2 точками проверено, что `MovingTime + IdleTime + GapTime = Duration` (контрольная сумма); лог `moving_time_control_sum_violations` не растёт.
 
-- **Проверка routeId:** для завершённой сессии с `pointCount ≥ 2` поле `Session.routeId` не null (присвоено через `topologyHash`).
+- **Проверка routeHash:** для завершённой сессии с `pointCount ≥ 2` поле `Session.routeHash` не null (присвоено через `topologyHash`).
 
 - **HMM map matching edge cases:** проверено, что вызов HMM с `< 2` точками и/или с `segments.length = 0` не крашит процесс (возвращает пустой массив). `hmm_mapmatching_fallback_total` инкрементируется корректно.
 
@@ -1266,7 +1269,7 @@ sqlite3 db/custom.db .dump > dump.sql
 # 4. Импортировать в Turso (через libsql CLI)
 libsql dump.sql -u libsql://... -t token
 # 5. Обновить DATABASE_URL и TURSO_AUTH_TOKEN в env
-# 6. Backfill routeId/topologyHash для исторических сессий (ворчер)
+# 6. Backfill routeHash/topologyHash для исторических сессий (ворчер)
 ```
 
 ## 19. Устранение неполадок
@@ -1277,7 +1280,7 @@ libsql dump.sql -u libsql://... -t token
 | 429 Too Many Requests                | Превышен rate limit                                  | Уменьшить частоту запросов, увеличить `RATE_LIMIT_MAX_*`                     |
 | 401 Unauthorized                      | Неверный токен или истёкшая cookie                   | Проверить `Authorization` заголовок, перекнопиться                           |
 | 500 Internal Server Error            | Внутренняя ошибка, см. requestId в логах             | Найти requestId в логах, проверить stack trace                               |
-| Ворчер не забирает задачи             | `CRON_SECRET` не совпадает или ворчер не запущен     | Проверить `/health?XTransformPort=3001`, сверить `CRON_SECRET`                |
+| Ворчер не забирает задачи             | `CRON_SECRET` не совпадает или ворчер не запущен     | Проверить `/health` (поле `worker`) и `/api/worker/health` (с cron-токеном), сверить `CRON_SECRET`                |
 | 2ГИС timeout                          | Сеть или API 2ГИС недоступен                         | Проверить `TWO_GIS_API_KEY`, circuit breaker переключит на OSRM              |
 | База данных заблокирована             | SQLite single-writer, конкурентная запись            | Проверить `p-limit(1)` на write, мигрировать на Turso                       |
 | Cookie не устанавливается             | Secure flag без HTTPS или `__Host-` префикс          | Использовать HTTPS, проверить cookie name                                    |
@@ -1287,7 +1290,7 @@ libsql dump.sql -u libsql://... -t token
 | Dead TrafficJob                       | 3 неудачные попытки                                  | `POST /api/admin/requeue` с `jobId`                                          |
 | MovingTime control sum violated       | Несовпадение `MovingTime+IdleTime+GapTime ≠ Duration`| Проверить `MOVING_TIME_*` env vars, особенно `GAP_SEC`; проверить timestamps |
 | HMM map matching всегда fallback      | `segments` пустые или `nextSegmentIds` не отдаётся   | Проверить, что провайдер (2ГИС/OSRM) возвращает `segments[]` с топологией    |
-| routeId = null для завершённой сессии | < 2 точек или `hasActiveTrip = false`                | Проверить GPS-данные; для коротких/нулевых сессий routeId не присваивается  |
+| routeHash = null для завершённой сессии | < 2 точек или `hasActiveTrip = false`              | Проверить GPS-данные; для коротких/нулевых сессий routeHash не присваивается |
 | EcoScore = null                       | `hasActiveTrip=false` или Distance < 5 км            | Нормально для коротких/нулевых записей; см. методология 7.3 edge cases      |
 | SessionReliability = null             | < 2 точек                                            | Нормально; см. методология 11.6                                              |
 | Bootstrap Theil-Sen недетерминирован  | Seed не зависит от входных данных                    | Проверить, что FNV-1a получает строку дат сессий, а не системные часы      |
@@ -1309,14 +1312,14 @@ libsql dump.sql -u libsql://... -t token
 | /api/ingest                               | POST             | Bearer INGEST_TOKEN | Приём GPS-точек                                         |
 | /api/ingest/sensorlogger                  | POST             | Bearer INGEST_TOKEN | Формат Sensor Logger                                    |
 | /api/sessions                             | GET              | Cookie/API_KEY      | Список сессий                                           |
-| /api/sessions/[id]                        | GET              | Cookie/API_KEY      | Детали сессии (включая routeId, topologyHash, activeDuration) |
+| /api/sessions/[id]                        | GET              | Cookie/API_KEY      | Детали сессии (включая routeHash, topologyHash, activeDuration) |
 | /api/sessions/[id]                        | DELETE           | Cookie/API_KEY      | Soft-delete                                             |
 | /api/sessions/[id]/notes                  | PATCH            | Cookie/API_KEY      | Заметки и теги                                          |
-| /api/sessions/[id]/stats                  | GET              | Cookie/API_KEY      | Статистика (62 метрики + routeId)                  |
+| /api/sessions/[id]/stats                  | GET              | Cookie/API_KEY      | Статистика (62 метрики + routeHash)                  |
 | /api/sessions/[id]/share                  | POST             | Cookie/API_KEY      | Публичная ссылка                                        |
 | /api/sessions/[id]/share                  | GET              | token (query)       | Публичный доступ                                        |
 | /api/sessions/[id]/export                 | POST             | Cookie/API_KEY      | Экспорт GPX/KML/JSON                                    |
-| /api/sessions/[id]/route-comparison       | GET              | Cookie/API_KEY      | Сравнительные метрики (RouteAvg/Best/Worst/StdDev, RouteTrafficPattern, RouteDayOfWeekPattern) по routeId |
+| /api/sessions/[id]/route-comparison       | GET              | Cookie/API_KEY      | Сравнительные метрики (RouteAvg/Best/Worst/StdDev, RouteTrafficPattern, RouteDayOfWeekPattern) по routeHash |
 | /api/sessions/batch                       | POST             | Cookie/API_KEY      | Пакетный GET                                            |
 | /api/sessions/batch-stats                 | POST             | Cookie/API_KEY      | Пакетная статистика                                     |
 | /api/sessions/bulk-delete                 | POST             | Cookie/API_KEY      | Массовое удаление                                       |
@@ -1328,8 +1331,8 @@ libsql dump.sql -u libsql://... -t token
 | /api/routes/[id]                          | GET/PATCH/DELETE | Cookie/API_KEY      | CRUD одного маршрута                                    |
 | /api/routes/grouped                       | GET              | Cookie/API_KEY      | routeHash-группы концептуально одинаковых поездок (§10.0) с агрегатами |
 | /api/routes/heavy-segments                | GET              | Cookie/API_KEY      | Агрегация худших P75-хотспотов всех групп для дашборда |
-| /api/routes/[id]/trend                    | GET              | Cookie/API_KEY      | Theil-Sen-тренд activeDuration по сессиям routeId + CI 95% |
-| /api/routes/[id]/hotspots                 | GET              | Cookie/API_KEY      | HotspotSegments (P75 < 0.5) по сессиям routeId          |
+| /api/routes/[id]/trend                    | GET              | Cookie/API_KEY      | Theil-Sen-тренд activeDuration по сессиям routeHash + CI 95% |
+| /api/routes/[id]/hotspots                 | GET              | Cookie/API_KEY      | HotspotSegments (P75 < 0.5) по сессиям routeHash        |
 | /api/routes/[id]/gpx                      | GET              | Cookie/API_KEY      | GPX 1.1-трек канонического маршрута группы routeHash |
 | /api/routes/grouped/export                | GET              | Cookie/API_KEY      | CSV-экспорт агрегатов всех routeHash-групп        |
 | /api/exports/[jobId]                      | GET              | Cookie/API_KEY      | Статус экспорта                                         |
@@ -1388,9 +1391,9 @@ libsql dump.sql -u libsql://... -t token
 | Retention                        | Политика хранения данных (10 лет)                                                     |
 | Idempotency                      | Свойство повторного запроса возвращать тот же результат (через `clientId`)              |
 | Circuit breaker                  | Защитный механизм, размыкающий цепь при отказах провайдера                            |
-| Snap-to-grid                     | Округление координат до сетки (~55 м для кэша маршрутизации, ~50 м для `routeId`)     |
-| TopologyHash                     | Хэш последовательности ключевых точек маршрута (повороты с |Δbearing|>60°); компонент `routeId` |
-| routeId                          | Детерминированный 16-символьный хэш, группирующий концептуально одинаковые маршруты для сравнительных метрик |
+| Snap-to-grid                     | Округление координат до сетки (~55 м для кэша маршрутизации, ~50 м для `routeHash`)   |
+| TopologyHash                     | Хэш последовательности ключевых точек маршрута (повороты с |Δbearing|>60°); компонент `routeHash` |
+| routeHash                        | Детерминированный 16-символьный хэш, группирующий концептуально одинаковые маршруты для сравнительных метрик (Session.routeHash; FK routeId → админская Route — назначается вручную) |
 | TrafficJob                       | Задача обработки маршрута с пробками в ворчере                                        |
 | BackupJob                        | Задача резервного копирования                                                         |
 | ExportJob                        | Задача экспорта сессии в файл                                                         |
@@ -1422,8 +1425,8 @@ libsql dump.sql -u libsql://... -t token
 | Cross-check (MovingTime)         | Сравнение GPS-скорости с displacement-скоростью для отсева дрейфа                      |
 | Debounce                         | Минимальная длительность состояния перед переходом; отсекает краткие всплески          |
 | Gap (разрыв записи)              | Интервал между соседними точками более 30 сек; потеря данных, не стоянка               |
-| Базовая линия (EcoScore)         | Калибруемый параметр CAP: медианное значение энергии ускорений по референсному корпусу |
-| Референсный корпус               | Набор сессий с высоким `SessionReliability` (≥ 0.85), по которому калибруются базовые линии EcoScore |
+| Базовая линия (EcoScore)         | Калибруемый параметр CAP: медианное значение энергии ускорений по корпусу калибровки |
+| Корпус калибровки EcoScore        | Все живые сессии с ≥60 точками (фильтра по SessionReliability НЕТ), по медиане скоростей разгона/торможения/рывков которых калибруются базовые линии EcoScore; <5 сессий → дефолты, <30 → маржа ×1.2 |
 | Seed (PRNG)                      | Начальное состояние генератора псевдослучайных чисел; при фиксированном seed выборка воспроизводима |
 | GPS-дрейф                        | Медленное «ползание» координат при нулевой скорости; отсекается cross-check по displacement |
 | Time-of-day бакет                | 3-часовой диапазон времени для кэширования пробок                                      |
@@ -1442,7 +1445,7 @@ libsql dump.sql -u libsql://... -t token
 
 - `TWO_GIS_API_KEY` получен и установлен.
 
-- Ворчер запущен (проверить `/health?XTransformPort=3001`).
+- Ворчер запущен (проверить `/health` — поле `worker: ok`).
 
 - Бэкапы настроены (ежедневный + GitHub).
 
@@ -1470,13 +1473,13 @@ libsql dump.sql -u libsql://... -t token
 
 **Критерии готовности (специфичные):**
 
-- **62 метрики + routeId**: на тестовой сессии с `pointCount ≥ 2` API `GET /api/sessions/[id]/stats` возвращает все метрики из 8 групп методологии (Базовые 13, Скоростной анализ 6, План-фактный анализ 8, Поведенческие 10, Географические 6, Трафик-метрики 5, Сравнительные 8 + routeId, Качество данных 6). Каталог — `приложение А` методологии.
+- **62 метрики + routeHash**: на тестовой сессии с `pointCount ≥ 2` API `GET /api/sessions/[id]/stats` возвращает все метрики из 8 групп методологии (Базовые 13, Скоростной анализ 6, План-фактный анализ 8, Поведенческие 10, Географические 6, Трафик-метрики 5, Сравнительные 8 + routeHash, Качество данных 6). Каталог — `приложение А` методологии.
 
 - **Контрольная сумма MovingTime**: для всех завершённых сессий инвариант `MovingTime + IdleTime + GapTime = Duration` выполнен с точностью до мс; счётчик `moving_time_control_sum_violations` = 0 за последние 24 часа.
 
 - **CAP EcoScore range**: для всех сессий, где `EcoScore` не null — значение в диапазоне `[0..100]`. Нет `NaN`/`Infinity` в ответе.
 
-- **routeId presence**: для всех завершённых сессий с `pointCount ≥ 2` поле `Session.routeId` не null; `topologyHash` также не null. Сравнение двух одинаковых поездок даёт одинаковый `routeId`.
+- **routeHash presence**: для всех завершённых сессий с `pointCount ≥ 2` поле `Session.routeHash` не null; `topologyHash` также не null. Сравнение двух одинаковых поездок даёт одинаковый `routeHash`.
 
 - **HMM map matching**: `hmm_mapmatching_runs_total > 0` для сессий с `segments.length > 0`; `hmm_mapmatching_fallback_total / hmm_mapmatching_runs_total < 0.20` за час.
 

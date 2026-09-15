@@ -3,6 +3,14 @@
 // State machine с гистерезисом 5/2 км/ч + cross-check по displacement + debounce 5 сек
 // + разрыв (gap) > 30 сек. Контрольная сумма: MovingTime + IdleTime + GapTime = Duration.
 //
+// v2.36.0 (кейс 15.09 «блипы», §4.6а): РАЗРЕЖЕННОЕ ДВИЖЕНИЕ — интервал тишины
+// > 30 сек с перемещением ≥ SPARSE_MOVE_MIN_M (75 м) несёт неоспоримое
+// доказательство физического перемещения устройства (логгер телефона
+// деградировал: блипы по 1–2 точки раз в 6–10 мин, «прыжки» 90 м – 3,4 км при
+// accuracy 2–7 м). Средняя скорость jump/dt проходит общий state machine —
+// движение подтверждается, граница legs едет за блипами (см. §4.6а в
+// METHODOLOGY.md). Дебаунс не блокирует: dt разреженного интервала ≥ 30 с.
+//
 // Возвращает массив состояний states[] длиной points.length − 1, который используется в
 // других метриках (SpeedConsistency, BearingConsistency, UTurnCount, TurnCount,
 // HighSpeedCornering, SessionReliability) и в UI (timeline «движение / стоянка / разрыв»).
@@ -124,16 +132,33 @@ export function computeMovingTime(points: MethodologyPoint[]): MotionResult {
     dt: number; // сек
     v: number; // effective_speed, м/с
     isGap: boolean;
+    // v2.36.0 (§4.6а): разреженный интервал (тишина > 30 сек с перемещением
+    // ≥ SPARSE_MOVE_MIN_M) — средняя скорость «прыжка»; медианой НЕ заменяется
+    // (это уже среднее по интервалу), соседом для плотных интервалов служит.
+    isSparse: boolean;
   }
   const intervals: Interval[] = [];
   for (let i = 1; i < points.length; i++) {
     const dt = (points[i].timestamp - points[i - 1].timestamp) / 1000;
     if (dt <= 0) {
-      intervals.push({ dt: 0, v: 0, isGap: false });
+      intervals.push({ dt: 0, v: 0, isGap: false, isSparse: false });
       continue;
     }
     if (dt > GAP_THRESHOLD_SEC) {
-      intervals.push({ dt, v: 0, isGap: true });
+      // v2.36.0 (§4.6а): разреженное движение — тишина > 30 сек, но устройство
+      // физически переместилось (≥ SPARSE_MOVE_MIN_M). Средняя скорость
+      // перемещения/дt идёт в state machine как обычный интервал: при ≥ 5 км/ч
+      // движение подтверждается мгновенно (dt ≥ 30 c > debounce 5 c), при
+      // парковочном дрейфе (< 75 м) остаётся прежняя семантика gap.
+      const jump = haversineM(
+        points[i - 1].lat, points[i - 1].lon,
+        points[i].lat, points[i].lon
+      );
+      if (jump >= e.SPARSE_MOVE_MIN_M) {
+        intervals.push({ dt, v: jump / dt, isGap: false, isSparse: true });
+      } else {
+        intervals.push({ dt, v: 0, isGap: true, isSparse: false });
+      }
       continue;
     }
 
@@ -153,10 +178,13 @@ export function computeMovingTime(points: MethodologyPoint[]): MotionResult {
     } else {
       v = dispSpeed;
     }
-    intervals.push({ dt, v, isGap: false });
+    intervals.push({ dt, v, isGap: false, isSparse: false });
   }
 
-  // Шаг 2: медианное сглаживание по окну 3 (соседи — ближайшие не-gap интервалы)
+  // Шаг 2: медианное сглаживание по окну 3 (соседи — ближайшие не-gap интервалы).
+  // v2.36.0: разреженные интервалы своим значением остаются (v = jump/dt —
+  // уже среднее по интервалу; сглаживать среднее по соседям бессмысленно),
+  // но соседями для плотных интервалов быть могут — как и не-gap.
   const n = intervals.length;
   const smoothed: number[] = intervals.map((it) => it.v);
   const median3 = (xs: number[]): number => {
@@ -168,7 +196,7 @@ export function computeMovingTime(points: MethodologyPoint[]): MotionResult {
         : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
   };
   for (let i = 0; i < n; i++) {
-    if (intervals[i].isGap) continue;
+    if (intervals[i].isGap || intervals[i].isSparse) continue;
     const win: number[] = [intervals[i].v];
     // ближайший предыдущий не-gap
     for (let j = i - 1; j >= 0; j--) {
@@ -322,6 +350,22 @@ export function computeActiveTrip(
   for (let i = firstMoving; i <= lastMoving; i++) {
     const st = motion.states[i];
     const dt = Math.max(0, (points[i + 1].timestamp - points[i].timestamp) / 1000);
+    // v2.36.0 (§4 ТЗ, канон): интервал ≥ splitSec — граница цепочки при ЛЮБОЙ
+    // природе тишины, включая разреженное движение внутри дыры ≥ 15 мин: leg
+    // закрывается (движение в дыре не принадлежит ни одной поездке, точки по
+    // краям дыры — разные поездки). Конец — по конвенции run-close: последний
+    // moving-интервал (правая точка = первый парковочный фикс), при отсутствии
+    // стоянки-run — левая точка самой дыры.
+    if (st === "moving" && dt >= splitSec) {
+      if (curLegStartState != null) {
+        closeLeg(curLegStartState, (runStartState ?? i) - 1, legIdleSec);
+        curLegStartState = null;
+        legIdleSec = 0;
+      }
+      runStartState = null;
+      runSec = 0;
+      continue;
+    }
     if (st === "moving") {
       if (curLegStartState == null) curLegStartState = i;
       runStartState = null;

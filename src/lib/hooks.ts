@@ -203,6 +203,8 @@ export interface SessionsQuery {
   routeId?: string;
   status?: string;
   deviceId?: string;
+  // v2.36.0 (кейс 15.09): фильтр микро-фрагментов логгера (блипы 1–3 точки)
+  minPoints?: number;
 }
 
 export function useSessions(params: SessionsQuery, opts?: { enabled?: boolean }) {

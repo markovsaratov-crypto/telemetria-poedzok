@@ -334,8 +334,9 @@ services:
 | MOVING_TIME_HYSTERESIS_LOW_KMH          | 2                | Порог перехода moving → idle (км/ч); между 2 и 5 состояние сохраняется   |
 | MOVING_TIME_DEBOUNCE_SEC                | 5                | Минимальная длительность состояния перед подтверждением перехода (сек)   |
 | MOVING_TIME_GAP_SEC                     | 30               | Порог разрыва записи (сек); интервалы > этого попадают в GapTime         |
+| SPARSE_MOVE_MIN_M                       | 75               | v2.36.0 (§4.6а): порог перемещения (м) для разреженного движения в тишине > 30 c; ниже — GapTime как раньше |
 
-> Контрольная сумма `MovingTime + IdleTime + GapTime = Duration` инвариантна; нарушение логируется на уровне warn с `requestId`.
+> Контрольная сумма `MovingTime + IdleTime + GapTime = Duration` инвариантна; нарушение логируется на уровне warn с `requestId`. Разреженные интервалы подтверждённого движения (§4.6а) начисляются в MovingTime.
 
 ### 4.7. EcoScore (CAP-методика)
 
@@ -1312,7 +1313,7 @@ libsql dump.sql -u libsql://... -t token
 | /api/auth/register                        | POST             | —                   | Регистрация (multi-user)                                |
 | /api/ingest                               | POST             | Bearer INGEST_TOKEN | Приём GPS-точек                                         |
 | /api/ingest/sensorlogger                  | POST             | Bearer INGEST_TOKEN | Формат Sensor Logger                                    |
-| /api/sessions                             | GET              | Cookie/API_KEY      | Список сессий                                           |
+| /api/sessions                             | GET              | Cookie/API_KEY      | Список сессий (+ `minPoints` — фильтр микро-фрагментов, v2.36.0) |
 | /api/sessions/[id]                        | GET              | Cookie/API_KEY      | Детали сессии (включая routeHash, topologyHash, activeDuration) |
 | /api/sessions/[id]                        | DELETE           | Cookie/API_KEY      | Soft-delete                                             |
 | /api/sessions/[id]/notes                  | PATCH            | Cookie/API_KEY      | Заметки и теги                                          |

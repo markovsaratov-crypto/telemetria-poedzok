@@ -67,7 +67,7 @@ services:
       - key: TARGET_LOAD_RPM
         value: "100"
       - key: APP_VERSION
-        value: "2.35.0"
+        value: "2.36.0"
       # v2.16.0 (V7): read-скоп 240/мин — синхронизирован с env-дефолтом
       # (v2.14.1+ код его использует, в yaml значения не было)
       - key: RATE_LIMIT_MAX_READ
@@ -81,6 +81,10 @@ services:
         value: "5"
       - key: MOVING_TIME_GAP_SEC
         value: "30"
+      # v2.36.0 (§4.6а): разреженное движение — порог перемещения (м) для
+      # интервала тишины > 30 с (кейс 15.09 «блипы»)
+      - key: SPARSE_MOVE_MIN_M
+        value: "75"
       # v2.9: CAP EcoScore (§7.3)
       - key: ECO_SCORE_CAP_BASELINE
         value: ""

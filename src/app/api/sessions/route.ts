@@ -37,6 +37,11 @@ export async function GET(request: NextRequest) {
     if (q.routeId) where.routeId = q.routeId;
     if (q.status) where.status = q.status;
     if (q.deviceId) where.deviceId = { contains: q.deviceId };
+    // v2.36.0 (кейс 15.09): фильтр микро-фрагментов (блипы 1–3 точки) —
+    // денормализованный pointCount обновляется инжестом на каждом батче;
+    // для фильтра списка его точности достаточно (фактический счётчик —
+    // pointCountActual — остаётся в ответе для отображения).
+    if (q.minPoints != null) where.pointCount = { gte: q.minPoints };
 
     const sessions = await db.session.findMany({
       where,

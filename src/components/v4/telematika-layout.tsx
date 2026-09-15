@@ -163,7 +163,12 @@ export function TelematikaLayout(props: LayoutProps) {
   const kbdSearch = isMac ? "⌘⇧F" : "Ctrl+Shift+F";
 
   // Live sessions list for trip-filter dropdown.
-  const sessions = useSessions({ limit: 50 });
+  // v2.36.0 (кейс 15.09 «блипы»): minPoints 10 — микро-фрагменты деградировавшего
+  // логгера (1–3 точки: iOS будил приложение раз в 6–10 мин) не несут аналитики
+  // и мусорили селектор девятью пунктами за день; их данные живут в составе
+  // поездок (вкладка «Поездки», §4.6а METHODOLOGY). Период-агрегат и счётчики
+  // продолжают видеть все записи (без фильтра) — статистика не теряется.
+  const sessions = useSessions({ limit: 50, minPoints: 10 });
   const sessionsList = sessions.data?.sessions ?? [];
 
   // v2.17.2 (батч-статс): префетч статов всех записей на КОРНЕ лейаута —

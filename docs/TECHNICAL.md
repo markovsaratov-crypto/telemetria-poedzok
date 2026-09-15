@@ -218,7 +218,8 @@
 | `TARGET_LOAD_RPM` | 100 | целевая нагрузка (блок capacity в /api/stats) |
 | `REGISTRATION_ENABLED` | true | публичная саморегистрация (POST /api/auth/register; новые аккаунты — role=user) |
 | `MOVING_TIME_HYSTERESIS_HIGH_KMH` / `_LOW_KMH` | 5 / 2 | гистерезис state machine §4.6 |
-| `MOVING_TIME_DEBOUNCE_SEC` / `MOVING_TIME_GAP_SEC` | 5 / 30 | debounce и gap state machine |
+| `MOVING_TIME_DEBOUNCE_SEC` / `MOVING_TIME_GAP_SEC` | 5 / 30 | debounce и gap state machine §4.6 |
+| `SPARSE_MOVE_MIN_M` | 75 | порог разреженного движения §4.6а (v2.36.0): перемещение (м) в тишине > 30 с, подтверждающее движение |
 | `ECO_SCORE_CAP_BASELINE` / `_PENALTY_EXPONENT` | "" / 1.5 | EcoScore CAP §7.3 |
 | `ECO_SCORE_MIN_CALIBRATION_CORPUS` | 30 | мин. корпус калибровки EcoScore |
 | `ECO_SCORE_MIN_BASELINE_VALUE` / `_MIN_ACTIVE_DISTANCE_KM` / `_MIN_ACTIVE_DURATION_SEC` | 0.05 / 5 / 300 | пороги применимости EcoScore |

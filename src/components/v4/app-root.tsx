@@ -33,7 +33,11 @@ export function AppRoot() {
   const [searchOpen, setSearchOpen] = React.useState(false);
 
   // Fetch sessions list (used for auto-select on first mount).
-  const sessions = useSessions({ limit: 50 });
+  // v2.36.0 (кейс 15.09 «блипы»): minPoints 10 — автоселект открывает последнюю
+  // ПОЛНОЦЕННУЮ запись; без фильтра новейшей сессией оказывался микро-фрагмент
+  // логгера (1–3 точки) и «Аналитика» встречала владельца пустой карточкой
+  // «0 сек · 1 точка». Тот же queryKey, что у layout — один HTTP-запрос.
+  const sessions = useSessions({ limit: 50, minPoints: 10 });
 
   // v2.10.0 R1: Auto-select first session on first mount (when sessions loaded and nothing selected).
   const autoSelectedRef = React.useRef(false);

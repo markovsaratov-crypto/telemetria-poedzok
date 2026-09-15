@@ -258,6 +258,13 @@ export const db = {
         params.push(w.id);
       }
       if (typeof w.status === "string") { conditions.push("status = ?"); params.push(w.status); }
+      // v2.36.0 (кейс 15.09 «блипы»): pointCount {gte} — фильтр микро-фрагментов
+      // логгера (1–3 точки) в списке записей (раньше поле молча игнорировалось)
+      const pcW = w.pointCount as { gte?: number } | number | undefined;
+      if (typeof pcW === "number") { conditions.push("pointCount >= ?"); params.push(pcW); }
+      else if (pcW && typeof pcW === "object" && typeof pcW.gte === "number") {
+        conditions.push("pointCount >= ?"); params.push(pcW.gte);
+      }
       // v2.23.0: userId — изоляция данных (null | string | {not: null});
       // отдельная ветка, чтобы не ломать существующие текстовые фильтры
       const wUid = w.userId;

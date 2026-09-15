@@ -53,6 +53,10 @@ export const zSessionsQuery = z.object({
   routeId: z.string().optional(),
   status: z.string().optional(),
   deviceId: z.string().optional(),
+  // v2.36.0 (кейс 15.09 «блипы»): минимальный pointCount записи для списка —
+  // микро-фрагменты деградировавшего логгера (1–3 точки) не несут аналитики,
+  // но мусорят селектор «Все записи». Селектор передаёт 10.
+  minPoints: z.coerce.number().int().min(1).max(100000).optional(),
 });
 
 export const zAuditQuery = z.object({

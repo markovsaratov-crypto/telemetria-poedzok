@@ -1014,6 +1014,8 @@ GET /health
 | eco_score_low_reliability_total       | counter           | Сессии с SessionReliability < порога (excluded из корпуса)|
 | moving_time_control_sum_violations    | counter           | Нарушения инварианта MovingTime+IdleTime+GapTime=Duration  |
 | trip_live_join_total                  | counter           | v2.35.0: живое вливание записи в поездку (полный состав, METHODOLOGY §4.11а) |
+| trip_stats_cache_hit_total            | counter           | v2.38.0: статы поездки отданы из in-memory кэша (отпечаток строки Trip + ключ базлайнов; TECHNICAL §10.3а) |
+| trip_stats_cache_miss_total           | counter           | v2.38.0: полный пересчёт статов поездки (холод/инвалидация/сдвиг корпус-калибровки) |
 
 ### 14.2. Health-check
 

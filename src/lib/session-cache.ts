@@ -190,9 +190,25 @@ export async function persistSessionCaches(
       Promise.all(
         chunk.map((row) => {
           const args: unknown[] = [row.cachePointCount, SESSION_CACHE_VERSION];
-          if (fields.includes("stats")) args.push(row.statsJson ?? null);
-          if (fields.includes("events")) args.push(row.eventsJson ?? null);
-          if (fields.includes("track")) args.push(row.trackJson ?? null);
+          // v2.37.0 (миграция D1): строка/блоб в D1 ≤ 2 МБ. Кэш — производные
+          // данные (null = «не посчитано», пересчёт on-demand): oversized-payload
+          // пишем как NULL — сессия просто пересчитывается при каждом запросе
+          // (замеры сентября 2026: единственный кейс — trackCache 4 МБ одной
+          // сессии из 56К точек). На Turso-пути гвард нейтрален.
+          const D1_MAX_CACHE = 1_500_000; // запас до лимита 2 МБ
+          const guard = (name: "statsJson" | "eventsJson" | "trackJson", v: string | undefined): string | null => {
+            if (v == null) return null;
+            if (v.length > D1_MAX_CACHE) {
+              logger.warn("session cache payload oversized → NULL (per-request recompute)", {
+                sessionId: row.id, field: name, bytes: v.length,
+              });
+              return null;
+            }
+            return v;
+          };
+          if (fields.includes("stats")) args.push(guard("statsJson", row.statsJson));
+          if (fields.includes("events")) args.push(guard("eventsJson", row.eventsJson));
+          if (fields.includes("track")) args.push(guard("trackJson", row.trackJson));
           args.push(row.id);
           return libsql.execute({ sql, args: args as never[] });
         })

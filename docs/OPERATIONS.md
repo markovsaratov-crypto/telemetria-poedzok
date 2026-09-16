@@ -247,3 +247,56 @@ accuracy > 100 м (AUDIT B-5), 400 (невалидный формат), 401 (т�
 | `no_gps` (янтарный) | запрос доходит, но координаты не извлечены — гистограмма сенсоров в L1: если `location` в ней нет — включить GPS/Location в приложении; если есть — «полный дамп» для анализа парсера |
 | `dropped_all` (янтарный) | слабый GPS-сигнал, все точки точнее 100 м отброшены |
 | `accepted` (сливовый) | канал работает, точки в БД |
+
+## 5. Миграция БД Turso → Cloudflare D1 (v2.37.0, 16.09.2026)
+
+### Причина
+Turso free исчерпал месячную квоту чтений (блокировка до 1 октября): все экраны
+с данными падали 500, инжест не работал — новые поездки терялись. D1 — тот же
+SQLite-диалект (SQL без изменений) с дневными лимитами и дневным сбросом.
+
+### Архитектура
+```
+приложение (Render) ──HTTPS──▶ d1-gateway (Cloudflare Worker,
+  │ x-gateway-secret              markov-saratov.workers.dev/d1-gateway)
+  │                                     │ Workers-биндинг DB
+  ▼                                     ▼
+src/lib/db-d1.ts (Client)         Cloudflare D1 «telemetria»
+  execute() → POST /query          (database_id 9dec0a90-7d38-46ae-
+  batch()   → POST /batch            9921-29eb83706b3d)
+  (batch = АТОМАРНАЯ транзакция D1)
+```
+- Токен владельца («Edit Cloudflare Workers») не имеет прав D1 API → доступ
+  идёт через воркер с биндингом: воркер авторизует секретом `GATEWAY_SECRET`,
+  приложение — тем же секретом в `D1_GATEWAY_SECRET`.
+- `src/lib/db.ts`: ветка `USING_D1` (env `D1_GATEWAY_URL`) подменяет клиент;
+  без env — прежний путь Turso/файл. `$transaction` на D1 — буферизованный
+  атомарный batch (интерактивных транзакций в D1 нет; контракт DbTx — только
+  записи с клиентскими id, эхо-строки строятся локально).
+- Воркер: `cloudflare-worker/d1-gateway.js` в репо; код шлюза — /query,
+  /batch (≤500 стейтментов), /health; ошибки D1 → HTTP 500 `{error, d1:true}`.
+
+### Лимиты и особенности D1 (учтены в коде)
+- ≤100 связанных параметров на запрос → чанки createMany 90/N (GpsPoint 10 строк)
+- строка/блоб ≤ 2 МБ → гвард в persistSessionCaches (oversized кэш → NULL,
+  пересчёт on-demand; кейс: trackCache 4 МБ у сессии 173b5354)
+- `PRAGMA page_count` запрещён (алерт db_size деградирует мягко, заложено)
+- `sqlite_version()` запрещён — не используется приложением
+- rows_written/read видны в meta ответов шлюза (диагностика квот)
+- индекс `GpsPoint_sessionId_idx` НЕ создан (избыточен: составной
+  (sessionId, timestamp) покрывает все запросы; экономия ~56К записей)
+- `_SessionTrips` не создана (приложение не использует — состав в sessionIds)
+
+### Развёртывание/откат
+- Активация: `.env.production.local` в корне (подгружается `next start`).
+- **Откат на Turso**: удалить `.env.production.local`, redeploy; Turso-переменные
+  в окружении Render не тронуты (однако чтения Turso заблокированы до 01.10 —
+  откат вернёт сайт только после сброса квоты).
+- Секреты шлюза: `D1_GATEWAY_SECRET` в `.env.production.local`;
+  воркер-секрет задаётся через Workers API (PUT .../secrets).
+
+### Сверка миграции (16.09.2026)
+Session 101 (живых 55), GpsPoint 56 299 (распределение по 61 сессии — байт-в-байт
+с бекапом backup-2026-09-16-0334.json: count/min/max по каждой сессии), Trip 20,
+TrafficJob 120, AuditLog 129, User 2, Setting 90, IngestMessage 4 071 (окно 48ч),
+ExportJob 5, BackupJob 56, _AlertState 1; `PRAGMA foreign_key_check` — 0 нарушений.

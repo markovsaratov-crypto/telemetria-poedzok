@@ -67,7 +67,15 @@ services:
       - key: TARGET_LOAD_RPM
         value: "100"
       - key: APP_VERSION
-        value: "2.36.2"
+        value: "2.37.0"
+      # v2.37.0 (миграция Turso → D1): SQL-шлюз через Cloudflare Workers.
+      # Значения живут в .env.production.local (next start подгружает его сам);
+      # здесь — документация конфигурации. SECRET в дашборде НЕ задаём —
+      # приоритет env-дашборда выше файла, дублирование не нужно.
+      - key: D1_GATEWAY_URL
+        value: https://d1-gateway.markov-saratov.workers.dev
+      - key: D1_GATEWAY_SECRET
+        sync: false
       # v2.16.0 (V7): read-скоп 240/мин — синхронизирован с env-дефолтом
       # (v2.14.1+ код его использует, в yaml значения не было)
       - key: RATE_LIMIT_MAX_READ

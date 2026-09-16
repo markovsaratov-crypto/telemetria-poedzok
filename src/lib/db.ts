@@ -9,12 +9,27 @@
 // Замена: глобальный Web Crypto API `crypto.randomUUID()` — стандартный Web API,
 // доступен и в Node.js (>=14.18) и в Edge Runtime. Семантика идентична.
 import { createClient, type Client, type InValue } from "@libsql/client";
+import { createD1Client } from "./db-d1";
 
 const globalForDb = globalThis as unknown as {
   libsqlClient: Client | undefined;
 };
 
+// v2.37.0 (миграция Turso → D1): все запросы через gateway-воркер Cloudflare D1
+// (https://d1-gateway.<subdomain>.workers.dev). Активируется env-парой
+// D1_GATEWAY_URL + D1_GATEWAY_SECRET; без них — прежний путь Turso/файл
+// (мгновенный откат миграции = убрать пару из окружения).
+export const USING_D1 =
+  typeof process.env.D1_GATEWAY_URL === "string" && process.env.D1_GATEWAY_URL.length > 0;
+
 function createDbClient(): Client {
+  if (USING_D1) {
+    // Секрет обязателен: шлюз без него отвечает 401 — падаем на старте,
+    // а не молча на первом запросе.
+    const secret = process.env.D1_GATEWAY_SECRET || "";
+    if (!secret) throw new Error("D1_GATEWAY_URL задан, но D1_GATEWAY_SECRET пуст");
+    return createD1Client(process.env.D1_GATEWAY_URL!, secret);
+  }
   const url = process.env.DATABASE_URL || "";
   const authToken = process.env.TURSO_AUTH_TOKEN;
 
@@ -545,14 +560,28 @@ export const db = {
       const cols = Object.keys(items[0]);
       const rows = items.map((item) => normVals(cols.map((c) => (item[c] === undefined ? null : item[c]))));
       const ph = `(${cols.map(() => "?").join(", ")})`;
-      const CH = Math.max(1, Math.floor(900 / cols.length)); // < 999 переменных SQLite
+      // v2.37.0: D1 — ≤100 связанных параметров на запрос; libsql — < 999
+      const CH = Math.max(1, Math.floor((USING_D1 ? 90 : 900) / cols.length));
+      const chunkStmts: Array<{ sql: string; args: InValue[] }> = [];
       for (let i = 0; i < rows.length; i += CH) {
         const chunk = rows.slice(i, i + CH);
         const placeholders = chunk.map(() => ph).join(", ");
-        await libsql.execute({
+        chunkStmts.push({
           sql: `INSERT INTO GpsPoint (${cols.join(", ")}) VALUES ${placeholders}`,
           args: chunk.flat() as InValue[],
         });
+      }
+      // v2.37.0: на D1 чанки идут атомарными группами (gateway-batch ≤400
+      // стейтментов) — меньше раунд-трипов и нет частично вставленных батчей
+      // внутри группы; на libsql — прежние последовательные execute.
+      if (USING_D1) {
+        for (let i = 0; i < chunkStmts.length; i += 400) {
+          await libsql.batch(chunkStmts.slice(i, i + 400) as never);
+        }
+      } else {
+        for (const st of chunkStmts) {
+          await libsql.execute(st);
+        }
       }
       return { count: rows.length };
     },
@@ -767,6 +796,19 @@ export const db = {
   // (напр. select в trafficJob.findMany) проходили молча. Теперь — отдельный
   // интерфейс DbTx: db получает честный выведенный тип, компилятор снова видит формы.
   $transaction: async <T>(fn: (tx: DbTx) => Promise<T>): Promise<T> => {
+    // v2.37.0 (миграция D1): интерактивных транзакций в D1 нет. DbTx-исполнитель
+    // БУФЕРИЗУЕТ стейтменты (create/createMany/update — только записи с
+    // клиентскими id, чтений между ними нет по контракту DbTx), затем буфер
+    // уходит ОДНИМ batch-запросом gateway-воркера: D1 batch = транзакция
+    // «всё или ничего». Бросок внутри fn → буфер не отправляется (идеальный
+    // откат, даже безопаснее интерактивной схемы, где сбой сети до commit
+    // оставлял dangling-транзакцию).
+    if (USING_D1) {
+      const buf: Array<{ sql: string; args: InValue[] }> = [];
+      const out = await fn(makeBufferedTxExecutor(buf) as unknown as DbTx);
+      if (buf.length > 0) await libsql.batch(buf);
+      return out;
+    }
     const txClient = await libsql.transaction("write");
     try {
       const out = await fn(makeTxExecutor(txClient) as unknown as DbTx);
@@ -804,6 +846,73 @@ export interface DbTx {
   auditLog: TxModelApi;
   exportJob: TxModelApi;
   backupJob: TxModelApi;
+}
+
+// v2.37.0 (миграция D1): буферный исполнитель $transaction для D1 — те же
+// create/createMany/update, что и в makeTxExecutor, но каждый вызов НЕ ходит
+// в сеть: стейтмент с клиентскими id ставится в очередь, а вызывающему сразу
+// возвращается ЭХО-строка (id/штампы генерирует клиент, колонки схемы
+// camelCase → эхо = валидная строка БД). Все 3 call-site $transaction
+// (import/csv, import/zip, /api/ingest) используют из эха только .id —
+// проверено при миграции. Буфер применяется одним атомарным batch (см.
+// $transaction), UPDATE без RETURNING: результат эха строится локально.
+function makeBufferedTxExecutor(buf: Array<{ sql: string; args: InValue[] }>): Record<string, unknown> {
+  return new Proxy({}, {
+    get(_target, modelRaw: string | symbol) {
+      const model = String(modelRaw);
+      const table = model.charAt(0).toUpperCase() + model.slice(1);
+      const stamps = TABLE_STAMPS[table];
+      const requireStamps = (op: string) => {
+        if (!stamps) throw new Error(`tx.${model}.${op}: таблица ${table} не поддерживается в транзакции`);
+        return stamps;
+      };
+      return {
+        async create(args: { data: Record<string, unknown> }) {
+          const s = requireStamps("create");
+          const now = new Date().toISOString();
+          const data = {
+            id: crypto.randomUUID(),
+            ...(s.createdAt ? { createdAt: now } : {}),
+            ...(s.updatedAt ? { updatedAt: now } : {}),
+            ...pruneUndefined(args.data),
+          };
+          const keys = Object.keys(data);
+          const values = normVals(Object.values(data));
+          buf.push({ sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`, args: values as InValue[] });
+          return { ...data };
+        },
+        async createMany(args: { data: Array<Record<string, unknown>> }) {
+          requireStamps("createMany");
+          if (args.data.length === 0) return { count: 0 };
+          const items: Array<Record<string, unknown>> = args.data.map((item) => ({ id: crypto.randomUUID(), ...pruneUndefined(item) }));
+          const cols = Object.keys(items[0]);
+          const ph = `(${cols.map(() => "?").join(", ")})`;
+          const CH = Math.max(1, Math.floor((USING_D1 ? 90 : 900) / cols.length));
+          let count = 0;
+          for (let i = 0; i < items.length; i += CH) {
+            const chunk = items.slice(i, i + CH);
+            const placeholders = chunk.map(() => ph).join(", ");
+            const rows = chunk.map((item) => normVals(cols.map((c) => (item[c] === undefined ? null : item[c]))));
+            buf.push({ sql: `INSERT INTO ${table} (${cols.join(", ")}) VALUES ${placeholders}`, args: rows.flat() as InValue[] });
+            count += chunk.length;
+          }
+          return { count };
+        },
+        async update(args: { where: { id: string }; data: Record<string, unknown> }) {
+          const s = requireStamps("update");
+          const data: Record<string, unknown> = { ...pruneUndefined(args.data) };
+          if (s.updatedAt) data.updatedAt = new Date().toISOString();
+          const keys = Object.keys(data);
+          if (keys.length === 0) return null;
+          const setSql = keys.map((k) => `${k} = ?`).join(", ");
+          const values = normVals([...Object.values(data), args.where.id]);
+          buf.push({ sql: `UPDATE ${table} SET ${setSql} WHERE id = ?`, args: values as InValue[] });
+          // эхо: {id, ...data} — поля RETURNING в call-site не используются
+          return { id: args.where.id, ...data };
+        },
+      };
+    },
+  });
 }
 
 // Транзакционный исполнитель: session.create / gpsPoint.createMany и т.п.,
@@ -844,7 +953,7 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
           const items: Array<Record<string, unknown>> = args.data.map((item) => ({ id: crypto.randomUUID(), ...pruneUndefined(item) }));
           const cols = Object.keys(items[0]);
           const ph = `(${cols.map(() => "?").join(", ")})`;
-          const CH = Math.max(1, Math.floor(900 / cols.length));
+          const CH = Math.max(1, Math.floor((USING_D1 ? 90 : 900) / cols.length)); // v2.37.0: D1 ≤100 параметров
           let count = 0;
           for (let i = 0; i < items.length; i += CH) {
             const chunk = items.slice(i, i + CH);

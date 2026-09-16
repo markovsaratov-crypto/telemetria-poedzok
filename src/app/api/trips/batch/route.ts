@@ -5,7 +5,9 @@
 // Формат TripStatsPayload идентичен GET /api/trips/[id] — кэш react-query
 // сеется per-trip, карточки «Поездок» рендерятся без поштучных запросов.
 //
-// Лимиты: ≤50 id; каждый id — [A-Za-z0-9_-]{1,64}. Read-скоп (proxy.ts).
+// v2.38.0: ids обрабатываются параллельными чанками по 8 (быстрый путь —
+// 2 запроса на поездку к D1-шлюзу; последовательные раундтрипы 15 поездок
+// стоили 2-3 с). Лимиты: ≤50 id; каждый id — [A-Za-z0-9_-]{1,64}. Read-скоп (proxy.ts).
 import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
 import { dataScopeFor } from "@/lib/scope";
@@ -48,22 +50,27 @@ export async function GET(request: NextRequest) {
     const baselines = await getCorpusEcoBaselines(); // ОДНА corpus-калибровка на батч (§7.3)
     const stats: Record<string, unknown>[] = [];
     const missing: string[] = [];
-    for (const id of ids) {
+
+    // v2.38.0: параллельные чанки по 8 (порядок ответа сохранён — map по ids)
+    const computeOne = async (id: string): Promise<Record<string, unknown> | null> => {
       const trip = await loadTripById(id);
       // Изоляция: чужая поездка неотличима от отсутствующей
       const visible =
         trip != null &&
         (scope.mode === "all" || (scope.mode === "unclaimed" && trip.userId == null) || (scope.mode === "own" && trip.userId === scope.userId));
-      if (!trip || !visible) {
-        missing.push(id);
-        continue;
-      }
+      if (!trip || !visible) return null;
       const payload = await computeTripStats(trip, baselines);
-      if (payload == null) {
-        missing.push(id);
-        continue;
-      }
-      stats.push(payload as unknown as Record<string, unknown>);
+      if (payload == null) return null;
+      return payload as unknown as Record<string, unknown>;
+    };
+    const CHUNK = 8;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const chunk = ids.slice(i, i + CHUNK);
+      const results = await Promise.all(chunk.map(computeOne));
+      results.forEach((r, idx) => {
+        if (r == null) missing.push(chunk[idx]);
+        else stats.push(r);
+      });
     }
 
     const body = { stats, missing };

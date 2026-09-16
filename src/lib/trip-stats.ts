@@ -14,8 +14,24 @@
 //
 // План-факт (§9 ТЗ): ОДИН TrafficJob на поездку (tripId); разбор — тот же
 // planFactFromJobResult (мульти-leg Σ, PLAN_MIN_COVERAGE-гейт), что и для записей.
+//
+// v2.38.0 — КЭШ ЧТЕНИЙ (оптимизация расхода D1): пересчёт читает ВСЕ точки
+// состава (56К строк на полную вкладку «Поездки»), а фронтенд поллит
+// /api/trips/batch каждые 30 с — главный жгут чтений БД. Теперь результат
+// конвейера кэшируется в ПАМЯТИ процесса и валидируется ОТПЕЧАТКОМ строки
+// Trip (tripFingerprint: состав sessionIds + окно startTime/endTime/spanStart/
+// spanEnd + statsComputedAt) и ключом корпус-калибровки EcoScore. Любая
+// инвалидация trip-grouping NULL-ит statsComputedAt → отпечаток меняется →
+// пересчёт; продление живой поездки (extendTripOnPoints) двигает spanEnd →
+// пересчёт; смену состава ловит sessionIds. План-факт читается СВЕЖИМ на каждый
+// запрос (1 строка TrafficJob) — завершение маршрутного джоба видно сразу,
+// без инвалидаций. Гигиена памяти: TTL 1 ч + LRU 128 (ttl-cache.ts, globalThis).
+// Промах = прежний полный путь, включая запись кэш-полей Trip.* (теперь —
+// только при реальном пересчёте, а не на каждый TTL-промах ответа).
 import { libsql } from "./db";
 import { logger } from "./logger";
+import { inc } from "./metrics";
+import { getTtlCache } from "./ttl-cache";
 import { computeSessionStats, composeRoute, type RoutePlanFact, type FullSessionStatsPayload, type SessionStatsResult } from "./session-stats";
 import { getCorpusEcoBaselines } from "./eco-corpus";
 import type { EcoScoreBaselines } from "./metrics-methodology";
@@ -210,11 +226,27 @@ export interface TripStatsPayload {
  * (computeSessionStats), на конкатенированном потоке точек. План-факт — из
  * поездкового TrafficJob. Кэш пишется в Trip.* (null-поля означают «не
  * посчитано» — их вычислит следующий вызов).
+ * v2.38.0: сначала — быстрый путь in-memory кэша (отпечаток строки + ключ
+ * базлайнов); при совпадении полный конвейер не выполняется, докупается
+ * только свежий план-факт (1 строка TrafficJob).
  */
 export async function computeTripStats(
   trip: TripRow,
   baselines?: EcoScoreBaselines
 ): Promise<TripStatsPayload | null> {
+  const eco = baselines ?? (await getCorpusEcoBaselines());
+  const bk = baselinesKey(eco);
+
+  // ——— Быстрый путь: состав/окно/инвалидации и базлайны не менялись ———
+  const fp = tripFingerprint(trip);
+  const hit = TRIP_CORE_CACHE.get(trip.id);
+  if (hit != null && hit.fp === fp && hit.bk === bk) {
+    inc("trip_stats_cache_hit_total", "Trip stats served from in-memory core cache", 1);
+    const route = await tripPlanRoute(trip, hit.core);
+    return assembleTripStatsPayload(trip, hit.core, route);
+  }
+  inc("trip_stats_cache_miss_total", "Trip stats recomputed (fingerprint/baselines changed or cold)", 1);
+
   const allPoints = await loadTripPoints(trip.sessionIds);
   if (allPoints.length === 0) return null;
 
@@ -236,7 +268,6 @@ export async function computeTripStats(
   );
   if (points.length === 0) return null;
 
-  const eco = baselines ?? (await getCorpusEcoBaselines());
   const result: SessionStatsResult = computeSessionStats(
     {
       id: trip.id,
@@ -250,20 +281,23 @@ export async function computeTripStats(
   );
 
   if (result.kind === "empty") return null;
-  const p = result.payload;
+  const core: TripStatsCore = {
+    p: result.payload,
+    activeDistanceM: result.activeDistanceM,
+    actualDurationSec: result.actualDurationSec,
+    avgSpeedRawMs: result.avgSpeedRawMs,
+    spanSec,
+  };
 
   // План-факт: поездковый джоб (tripId), разбор — planFactFromJobResult (§9 ТЗ)
-  const facts = await loadPlanFactsByTrip([trip.id]);
-  const route = composeRoute(
-    facts.get(trip.id),
-    result.activeDistanceM,
-    result.actualDurationSec,
-    result.avgSpeedRawMs
-  );
+  const route = await tripPlanRoute(trip, core);
 
   // Кэш в Trip (конвенция §6.1: null = «не посчитано»; сюда попадаем при
-  // отсутствии кэша — маршрутизация/инвалидация уже NULL-нули поля)
-  const ecoValue = p.methodology?.ecoScore?.value ?? null;
+  // отсутствии кэша — маршрутизация/инвалидация уже NULL-нули поля).
+  // v2.38.0: запись ТОЛЬКО на полном пути — быстрый путь не тратит квоту
+  // записи D1 (раньше каждый TTL-промах ответа переписывал 15 строк Trip).
+  const writtenAt = new Date().toISOString();
+  let persisted = false;
   try {
     await libsql.execute({
       sql: `UPDATE Trip SET
@@ -274,37 +308,106 @@ export async function computeTripStats(
               statsComputedAt = ?
             WHERE id = ?`,
       args: [
-        round1(p.methodology?.activeTrip?.activeDuration ?? result.actualDurationSec),
-        round1(p.movingTime),
-        round1(p.idleTime),
-        round1(p.gapTime),
-        round1(p.methodology?.activeTrip?.internalStopTime ?? 0),
+        round1(core.p.methodology?.activeTrip?.activeDuration ?? core.actualDurationSec),
+        round1(core.p.movingTime),
+        round1(core.p.idleTime),
+        round1(core.p.gapTime),
+        round1(core.p.methodology?.activeTrip?.internalStopTime ?? 0),
         round1(trip.interFragmentGapSec ?? 0),
-        Math.round(p.distance),
-        p.pointCount,
-        p.maxSpeed,
-        ecoValue != null ? Math.max(0, Math.min(100, Math.round(ecoValue))) : null,
+        Math.round(core.p.distance),
+        core.p.pointCount,
+        core.p.maxSpeed,
+        ecoClamped(core.p.methodology?.ecoScore?.value ?? null),
         route.planDistanceM,
         route.planDurationSec,
         route.planComparable,
         route.planCoverage,
-        new Date().toISOString(),
+        writtenAt,
         trip.id,
       ] as never[],
     });
+    persisted = true;
   } catch (err) {
     logger.warn("trip stats cache write failed (non-fatal)", {
       tripId: trip.id, error: err instanceof Error ? err.message : String(err),
     });
   }
 
+  // Памятный отпечаток — под ЗНАЧЕНИЕ statsComputedAt, которое увидит следующий
+  // читатель строки: свежезаписанное при успехе UPDATE, прежнее при сбое
+  // (строка не изменилась). Гонки двух параллельных пересчётов сходятся к
+  // значению последней записи — худший исход один лишний пересчёт, не ошибка.
+  TRIP_CORE_CACHE.set(trip.id, {
+    fp: tripFingerprint({ ...trip, statsComputedAt: persisted ? writtenAt : trip.statsComputedAt }),
+    bk,
+    core,
+  });
+
+  return assembleTripStatsPayload(trip, core, route);
+}
+
+/** Ядро конвейера статов — всё, что выводится из (точки ∩ окно, базлайны). */
+interface TripStatsCore {
+  p: FullSessionStatsPayload;
+  activeDistanceM: number;
+  actualDurationSec: number;
+  avgSpeedRawMs: number | null;
+  spanSec: number;
+}
+
+interface TripCoreCacheEntry {
+  fp: string;
+  bk: string;
+  core: TripStatsCore;
+}
+
+const TRIP_CORE_CACHE = getTtlCache<TripCoreCacheEntry>("trips-stats-core", 60 * 60 * 1000, 128);
+
+/** Отпечаток строки Trip: всё, от чего зависит конвейер статов. */
+function tripFingerprint(t: TripRow): string {
+  return [
+    t.sessionIds.join(","),
+    t.startTime,
+    t.endTime ?? "",
+    t.spanStart,
+    t.spanEnd ?? "",
+    t.statsComputedAt ?? "",
+  ].join("|");
+}
+
+/** Ключ корпус-калибровки: сдвиг базлайнов EcoScore → пересчёт. */
+function baselinesKey(b: EcoScoreBaselines): string {
+  const r = (v: number) => (Number.isFinite(v) ? Math.round(v * 1e4) / 1e4 : v);
+  return `${b.version}:${b.corpusSize}:${r(b.braking)}:${r(b.accel)}:${r(b.jerk)}`;
+}
+
+/** Свежий план-факт поездки (1 строка TrafficJob) — мимо кэша сознательно:
+ * маршрутный джоб может завершиться позже расчёта статов — план должен
+ * появиться в карточке без ожидания инвалидации. */
+async function tripPlanRoute(trip: TripRow, core: TripStatsCore): Promise<RoutePlanFact> {
+  const facts = await loadPlanFactsByTrip([trip.id]);
+  return composeRoute(facts.get(trip.id), core.activeDistanceM, core.actualDurationSec, core.avgSpeedRawMs);
+}
+
+function ecoClamped(v: number | null): number | null {
+  return v != null ? Math.max(0, Math.min(100, Math.round(v))) : null;
+}
+
+/** Сборка ответа из ТЕКУЩЕЙ строки Trip + кэшированного ядра конвейера
+ * (поля строки — startTime/endTime/interFragmentGapSec — всегда свежие). */
+function assembleTripStatsPayload(
+  trip: TripRow,
+  core: TripStatsCore,
+  route: RoutePlanFact
+): TripStatsPayload {
+  const p = core.p;
   return {
     tripId: trip.id,
     pointCount: p.pointCount,
     distance: p.distance,
     rawDistanceM: p.rawDistanceM,
-    duration: Math.round(spanSec),
-    activeDurationSec: round1(p.methodology?.activeTrip?.activeDuration ?? result.actualDurationSec) ?? 0,
+    duration: Math.round(core.spanSec),
+    activeDurationSec: round1(p.methodology?.activeTrip?.activeDuration ?? core.actualDurationSec) ?? 0,
     interFragmentGapSec: trip.interFragmentGapSec ?? 0,
     movingTime: p.movingTime,
     idleTime: p.idleTime,
@@ -318,7 +421,7 @@ export async function computeTripStats(
     internalStopTimeSec: round1(p.methodology?.activeTrip?.internalStopTime ?? 0) ?? 0,
     avgSpeed: p.avgSpeed,
     maxSpeed: p.maxSpeed,
-    ecoScore: ecoValue != null ? Math.max(0, Math.min(100, Math.round(ecoValue))) : null,
+    ecoScore: ecoClamped(p.methodology?.ecoScore?.value ?? null),
     speedProfile: p.speedProfile,
     startTime: trip.startTime,
     endTime: trip.endTime,

@@ -1,15 +1,18 @@
 "use client";
 
 // src/components/command-palette.tsx — Cmd+K command palette для быстрой навигации.
+// v2.38.2 · F78: команды навигации соответствуют ФАКТИЧЕСКИМ вкладкам v4
+// (Аналитика / Поездки / Администрирование). Legacy-команды «Обзор/Сессии/
+// Маршруты/Импорт CSV» удалены: их id не существовали в v4 (mapLegacyTab в
+// app-root дефолтил неизвестные id в «admin» — «Маршруты» открывала «Админ»).
+// Команда «Администрирование» скрыта для role=user (вкладка для неё 403).
 
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Search,
-  LayoutDashboard,
-  Map,
-  Route as RouteIcon,
-  Upload,
+  BarChart3,
+  Car,
   ShieldCheck,
   Moon,
   Sun,
@@ -25,6 +28,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useTheme } from "next-themes";
+import { useAuth } from "@/lib/hooks";
 
 interface CommandItem {
   id: string;
@@ -52,67 +56,62 @@ export function CommandPalette({
   onRefresh,
 }: CommandPaletteProps) {
   const { theme, setTheme } = useTheme();
+  // v2.38.2 · F78: роль — из общего auth-кэша (тот же queryKey ["auth","me"],
+  // что и в app-root: без дополнительного запроса). Команда «Администрирование»
+  // скрыта для role=user — раньше она молча игнорировалась гвардом app-root.
+  const auth = useAuth();
+  // (cast — как в app-root: у owner-сессии поля user нет в типе ветки {authenticated:false})
+  const userRole = (auth.data as { user?: { role?: string } } | null | undefined)?.user?.role;
+  const showAdmin = !userRole || userRole === "admin";
   const [query, setQuery] = React.useState("");
   const [selected, setSelected] = React.useState(0);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
   const items = React.useMemo<CommandItem[]>(() => {
     return [
+      // v2.38.2 · F78: передаются фактические v4-id вкладок — mapLegacyTab
+      // в app-root понимает их напрямую; legacy-id (overview/sessions/routes/
+      // import) больше не отправляются (их дефолт-ветка вела в «admin»).
       {
-        id: "tab-overview",
-        label: "Перейти: Обзор",
-        icon: <LayoutDashboard className="h-4 w-4" />,
+        id: "tab-analytics",
+        label: "Перейти: Аналитика",
+        icon: <BarChart3 className="h-4 w-4" />,
         group: "Навигация",
         action: () => {
-          onTabChange("overview");
+          onTabChange("analytics");
           onOpenChange(false);
         },
-        keywords: "обзор dashboard home",
+        // legacy-поисковые термины (обзор/сессии/маршруты/импорт) сохранены в
+        // keywords — пользователь их найдёт, но попадёт на реальную вкладку v4
+        keywords: "аналитика analytics kpi дашборд обзор overview маршруты",
       },
       {
-        id: "tab-sessions",
-        label: "Перейти: Сессии",
-        icon: <Map className="h-4 w-4" />,
+        id: "tab-trips",
+        label: "Перейти: Поездки",
+        icon: <Car className="h-4 w-4" />,
         group: "Навигация",
         action: () => {
-          onTabChange("sessions");
+          onTabChange("trips");
           onOpenChange(false);
         },
-        keywords: "сессии trips tracks",
+        keywords: "поездки trips сессии записи sessions треки импорт zip",
       },
-      {
-        id: "tab-routes",
-        label: "Перейти: Маршруты",
-        icon: <RouteIcon className="h-4 w-4" />,
-        group: "Навигация",
-        action: () => {
-          onTabChange("routes");
-          onOpenChange(false);
-        },
-        keywords: "маршруты routes plan",
-      },
-      {
-        id: "tab-import",
-        label: "Перейти: Импорт CSV",
-        icon: <Upload className="h-4 w-4" />,
-        group: "Навигация",
-        action: () => {
-          onTabChange("import");
-          onOpenChange(false);
-        },
-        keywords: "импорт csv upload",
-      },
-      {
-        id: "tab-admin",
-        label: "Перейти: Администрирование",
-        icon: <ShieldCheck className="h-4 w-4" />,
-        group: "Навигация",
-        action: () => {
-          onTabChange("admin");
-          onOpenChange(false);
-        },
-        keywords: "админ backup audit admin",
-      },
+      // v2.38.2 · F78: только владельцу/админу (role=user вкладку не видит)
+      ...(showAdmin
+        ? [
+            {
+              id: "tab-admin",
+              label: "Перейти: Администрирование",
+              icon: <ShieldCheck className="h-4 w-4" />,
+              group: "Навигация",
+              action: () => {
+                onTabChange("admin");
+                onOpenChange(false);
+              },
+              keywords: "админ admin администрирование настройки backup audit импорт csv",
+            } as CommandItem,
+          ]
+        : []),
       ...(onRefresh
         ? [
             {
@@ -151,7 +150,7 @@ export function CommandPalette({
         keywords: "logout exit выход",
       },
     ];
-  }, [theme, setTheme, onTabChange, onOpenChange, onLogout, onRefresh]);
+  }, [theme, setTheme, onTabChange, onOpenChange, onLogout, onRefresh, showAdmin]);
 
   const filtered = React.useMemo(() => {
     if (!query.trim()) return items;

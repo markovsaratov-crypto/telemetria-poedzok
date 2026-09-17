@@ -102,6 +102,38 @@ export function fmtNumber(n?: number | null, digits = 0): string {
   }).format(n);
 }
 
+// v2.38.2 · F82 (кодревью): общие форматы, дублировавшиеся в компонентах —
+// массив коротких месяцев («ЯНВ»…) жил в 4 копиях (layout/trips/shared),
+// локальные fmtNum/fmtInt и инлайн `n.toFixed(d).replace(".", ",")` — в 29
+// местах. Длительности уже покрыты fmtSecShort/fmtSecFull/fmtDurMin выше —
+// новых копий не добавляем (дубли форматов = источник расхождений).
+
+// Короткие капс-месяцы для меток записей: «12 ЯНВ 14:05».
+export const MONTHS_RU = [
+  "ЯНВ", "ФЕВ", "МАР", "АПР", "МАЙ", "ИЮН",
+  "ИЮЛ", "АВГ", "СЕН", "ОКТ", "НОЯ", "ДЕК",
+] as const;
+
+// Метка месяца по индексу Date.getMonth() (0–11); вне диапазона — «—».
+export function fmtMonthShort(month: number): string {
+  return MONTHS_RU[month] ?? "—";
+}
+
+// Число с ru-запятой и разделителями тысяч — канон вместо локальных fmtNum /
+// инлайн `n.toFixed(d).replace(".", ",")`: делегирует fmtNumber (Intl ru-RU;
+// D-1: «15 148», не «15148»). null/undefined/±Infinity → «—».
+export function fmtNum(n?: number | null, digits = 1): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  return fmtNumber(n, digits);
+}
+
+// Дистанция из метров в человекочитаемые км: «12,5 км»; null → «—».
+// Заменяет инлайн `(x / 1000).toFixed(1).replace(".", ",") + " км"`.
+export function fmtDistKm(meters?: number | null, digits = 1): string {
+  if (meters == null || !Number.isFinite(meters)) return "—";
+  return `${fmtNum(meters / 1000, digits)} км`;
+}
+
 // v2.31.0 (NIT-1): avgSpeed (mean-of-points, м/с → км/ч) удалён — 0 потребителей
 // и ловушка дрейфа от §4.3 (средняя = Σдистанции/Σактивного времени, не среднее
 // по точкам); все поверхности считают её на сервере или из stats.avgSpeed.

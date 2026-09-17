@@ -33,6 +33,11 @@
 //      пикового легитимного трафика, останавливает runaway-циклы и
 //      скан-штормы с украденным секретом. Проверяется ПОСЛЕ auth — без
 //      секрета нельзя бесплатно 429-нуть легитимного вызывающего.
+//
+// v2.38.2 (ревью F33, minor): (а) секрет сравнивается по SHA-256-дайджестам
+//      без раннего выхода по длине (раньше тайминг ответа 401 выдавал ДЛИНУ
+//      секрета); (б) опциональный READ-ONLY режим (env GATEWAY_READ_ONLY) —
+//      только SELECT и read-only PRAGMA, см. isReadOnly().
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
@@ -67,6 +72,13 @@ const ALLOWED_TABLES = new Set(
 //    существующей таблице, существующие данные не трогает.
 const PRAGMA_RE = /^PRAGMA\s+(page_count|page_size)\s*$/i;
 const CREATE_ALERTSTATE_RE = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?_AlertState"?\s*\(/i;
+// v2.38.2 (ревью F50): идемпотентные индексы ensure-on-boot. Приложение
+// создаёт Session_userId_startTime_idx лениво при первом списковом запросе
+// (db.ts, fire-and-forget). IF NOT EXISTS = no-op на существующем индексе;
+// допустимы только индексы на таблицах из ALLOWED_TABLES, имя индекса
+// ограничено [A-Za-z0-9_] чтобы не протащить инъекцию в имя.
+const CREATE_INDEX_RE =
+  /^CREATE\s+(UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+"?([A-Za-z0-9_]+)"?\s+ON\s+"?([A-Za-z0-9_]+)"?\s*\(/i;
 
 // ——— v2.38.1 (ревью F1): лимит тела и rate-limit ———
 const MAX_BODY_BYTES_DEFAULT = 2 * 1024 * 1024; // 2 МБ
@@ -74,11 +86,24 @@ const RATE_LIMIT_WINDOW_MS = 60000;
 const RATE_LIMIT_MAX_DEFAULT = 3000; // см. комментарий в шапке — почему не 60
 const RATE_BUCKETS_MAX = 10000;
 
-// Сравнение секрета без раннего выхода (timing-safe на длину).
-function secretEquals(a, b) {
-  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+// v2.38.2 (ревью F33): секрет сравнивается по ДАЙДЖЕСТАМ SHA-256 (как
+// src/lib/token-check.ts в приложении — здесь inline, воркер отдельный файл):
+// сначала хешируем ОБЕ стороны, потом сравниваем дайджесты XOR-аккумулятором
+// по всей длине. Фиксированная длина (32 байта) убирает ранний выход по длине
+// — старая версия возвращала false сразу при a.length !== b.length и
+// утекала ДЛИНУ секрета по времени ответа 401. crypto.subtle доступен в
+// Workers-рантайме из коробки.
+async function secretEquals(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const enc = new TextEncoder();
+  const [da, db] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(a)),
+    crypto.subtle.digest("SHA-256", enc.encode(b)),
+  ]);
+  const x = new Uint8Array(da);
+  const y = new Uint8Array(db);
   let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
   return diff === 0;
 }
 
@@ -111,8 +136,22 @@ function extractTableNames(sql) {
   return names;
 }
 
+// v2.38.2 (ревью F33): опциональный READ-ONLY режим (env-биндинг воркера
+// GATEWAY_READ_ONLY="true"/"1", читается из env ВЫЗОВА как
+// GATEWAY_RATE_LIMIT_MAX — process.env в Workers-рантайме недоступен).
+// Поверх вайтлиста операций: пропускаются ТОЛЬКО SELECT и два
+// read-only PRAGMA (page_count/page_size) — INSERT/UPDATE/DELETE/CREATE
+// отклоняются 403 ДО исполнения. Зачем: при компрометации единственного
+// секрета зона поражения сужается с «вся БД» до «чтение»; полезно для
+// страховочных реплик/отладочных инсталляций. Дефолт ВЫКЛ: приложение
+// легитимно пишет через /query (execute() шлёт все DML — db-d1.ts),
+// включение режима требует перевода приложения на read-only-потребление.
+function isReadOnly(env) {
+  return env.GATEWAY_READ_ONLY === "true" || env.GATEWAY_READ_ONLY === "1";
+}
+
 // Валидация ОДНОГО стейтмента. null = разрешено; строка = причина отказа (403).
-function validateStatement(sql) {
+function validateStatement(sql, readOnly) {
   // Мульти-стейтменты через «;» запрещены (D1 prepare их и так отверг бы —
   // валидируем ДО исполнения, включая попытку «SELECT 1; DROP TABLE Session»).
   const noTrailing = sql.replace(/;\s*$/, "");
@@ -124,6 +163,23 @@ function validateStatement(sql) {
   const verbMatch = clean.match(/^([A-Za-z]+)/);
   if (!verbMatch) return "unrecognized statement";
   const verb = verbMatch[1].toUpperCase();
+
+  // v2.38.2 (ревью F33): опциональный READ-ONLY режим — см. isReadOnly().
+  if (readOnly) {
+    if (verb === "SELECT") {
+      const tables = extractTableNames(clean);
+      if (tables.size > 0) {
+        for (const t of tables) {
+          if (!ALLOWED_TABLES.has(t)) return `forbidden table: ${t}`;
+        }
+      }
+      return null;
+    }
+    if (verb === "PRAGMA") {
+      return PRAGMA_RE.test(clean) ? null : "read-only mode: forbidden operation: PRAGMA";
+    }
+    return `read-only mode: forbidden operation: ${verb}`;
+  }
 
   if (verb === "SELECT" || verb === "INSERT" || verb === "UPDATE" || verb === "DELETE") {
     const tables = extractTableNames(clean);
@@ -140,7 +196,11 @@ function validateStatement(sql) {
     return PRAGMA_RE.test(clean) ? null : "forbidden operation: PRAGMA";
   }
   if (verb === "CREATE") {
-    return CREATE_ALERTSTATE_RE.test(clean) ? null : "forbidden operation: CREATE";
+    if (CREATE_ALERTSTATE_RE.test(clean)) return null;
+    // v2.38.2 (F50): CREATE [UNIQUE] INDEX IF NOT EXISTS <idx> ON <allowed-table>
+    const idxMatch = clean.match(CREATE_INDEX_RE);
+    if (idxMatch && ALLOWED_TABLES.has(idxMatch[3].toLowerCase())) return null;
+    return "forbidden operation: CREATE";
   }
   // DROP / ALTER / ATTACH / DETACH / VACUUM / EXPLAIN / BEGIN / COMMIT /
   // ROLLBACK / REPLACE / TRUNCATE / ANALYZE / REINDEX / SAVEPOINT / WITH (CTE)...
@@ -225,7 +285,9 @@ function normParam(p) {
   return p;
 }
 
-export default {
+// v2.38.2 (линт): воркер вынесен в именованную переменную ДО export default
+// (import/no-anonymous-default-export) — поведение идентично module-syntax.
+const worker = {
   async fetch(request, env) {
     const url = new URL(request.url);
 
@@ -236,7 +298,8 @@ export default {
 
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
     const secret = request.headers.get("x-gateway-secret") ?? "";
-    if (!env.GATEWAY_SECRET || !secretEquals(secret, env.GATEWAY_SECRET)) {
+    // v2.38.2 (ревью F33): await — сравнение теперь по SHA-256-дайджестам (async)
+    if (!env.GATEWAY_SECRET || !(await secretEquals(secret, env.GATEWAY_SECRET))) {
       return json({ error: "unauthorized" }, 401);
     }
 
@@ -274,7 +337,7 @@ export default {
         const { sql, params } = body ?? {};
         if (typeof sql !== "string" || sql.length === 0) return json({ error: "sql required" }, 400);
         // v2.38.1 (ревью F1): вайтлист операций ДО prepare/exec
-        const violation = validateStatement(sql);
+        const violation = validateStatement(sql, isReadOnly(env));
         if (violation) return json({ error: "forbidden", reason: violation }, 403);
         let stmt = env.DB.prepare(sql);
         if (Array.isArray(params) && params.length > 0) stmt = stmt.bind(...params.map(normParam));
@@ -300,11 +363,13 @@ export default {
         }
         // v2.38.1 (ревью F1): вайтлист операций — ВСЕ стейтменты батча ДО
         // построения prepare-объектов (атомарный batch не начинает исполняться)
+        // v2.38.2 (ревью F33): + read-only флаг (один вызов isReadOnly на батч)
+        const batchReadOnly = isReadOnly(env);
         for (const s of statements) {
           if (typeof s?.sql !== "string" || s.sql.length === 0) {
             return json({ error: "each statement requires non-empty sql" }, 400);
           }
-          const violation = validateStatement(s.sql);
+          const violation = validateStatement(s.sql, batchReadOnly);
           if (violation) {
             return json({ error: "forbidden", reason: violation }, 403);
           }
@@ -335,3 +400,5 @@ export default {
     }
   },
 };
+
+export default worker;

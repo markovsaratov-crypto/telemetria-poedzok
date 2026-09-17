@@ -25,7 +25,8 @@ import {
 } from "lucide-react";
 import { useV4Tipbox, bindTips } from "./use-v4-tipbox";
 import { type PeriodKey } from "@/lib/v4-utils";
-import { useSessions, useSessionsStatsBatch, useReverseGeocode } from "@/lib/hooks";
+import { useSessions, useSessionsStatsBatch, useReverseGeocode, type SessionsQuery } from "@/lib/hooks";
+import { fmtMonthShort } from "@/lib/format";
 import type { SessionListItem } from "@/lib/api-client";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
@@ -34,6 +35,14 @@ import { useQueryClient } from "@tanstack/react-query";
 
 export type V4Tab = "analytics" | "trips" | "admin";
 export type Period = PeriodKey;
+
+// v2.38.2 · F83 (кодревью): единые параметры списка записей для queryKey
+// ["sessions", params]. Лейаут (dropdown фильтра) и analytics-view (метаданные
+// записи) ОБЯЗАНЫ использовать один объект параметров: {limit:50} vs
+// {limit:50,minPoints:10} давали разные ключи → два параллельных
+// GET /api/sessions и два независимых 30с-поллинга (app-root использует
+// те же параметры — его вызов также попадает в общий кэш-ключ).
+export const SESSIONS_LIST_QUERY: SessionsQuery = { limit: 50, minPoints: 10 };
 
 interface LayoutProps {
   tab: V4Tab;
@@ -66,12 +75,13 @@ const PERIOD_LIST: { id: Period; label: string }[] = [
 ];
 
 // Форматирование даты/времени из ISO timestamp строки (из API sessions).
+// v2.38.2 · F82: массив капс-месяцев — общий MONTHS_RU из lib/format.ts
+// (была 4-я локальная копия «ЯНВ…ДЕК»).
 function fmtSessionLabel(startTime: string | number | Date): string {
   try {
     const d = new Date(startTime);
     const dd = String(d.getDate()).padStart(2, "0");
-    const months = ["ЯНВ", "ФЕВ", "МАР", "АПР", "МАЙ", "ИЮН", "ИЮЛ", "АВГ", "СЕН", "ОКТ", "НОЯ", "ДЕК"];
-    const mo = months[d.getMonth()];
+    const mo = fmtMonthShort(d.getMonth());
     const hh = String(d.getHours()).padStart(2, "0");
     const mm = String(d.getMinutes()).padStart(2, "0");
     return `${dd} ${mo} ${hh}:${mm}`;
@@ -168,7 +178,9 @@ export function TelematikaLayout(props: LayoutProps) {
   // и мусорили селектор девятью пунктами за день; их данные живут в составе
   // поездок (вкладка «Поездки», §4.6а METHODOLOGY). Период-агрегат и счётчики
   // продолжают видеть все записи (без фильтра) — статистика не теряется.
-  const sessions = useSessions({ limit: 50, minPoints: 10 });
+  // v2.38.2 · F83: параметры — из константы SESSIONS_LIST_QUERY (общий queryKey
+  // с analytics-view и app-root: один HTTP-запрос и один 30с-поллинг).
+  const sessions = useSessions(SESSIONS_LIST_QUERY);
   const sessionsList = sessions.data?.sessions ?? [];
 
   // v2.17.2 (батч-статс): префетч статов всех записей на КОРНЕ лейаута —
@@ -218,10 +230,23 @@ export function TelematikaLayout(props: LayoutProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onCmdOpen, onSearchOpen, onHelpOpen, onTabChange]);
 
-  // Re-bind tips after every render (for newly-mounted [data-tip] elements).
+  // v2.38.2 · F88 (кодревью): bindTips вызывался после КАЖДОГО рендера —
+  // querySelectorAll по всему поддереву (десятки карточек × data-tip) на каждый
+  // keystroke фильтра/поиска. Теперь: один скан при монтировании + MutationObserver
+  // (добавление узлов / появление data-tip) — поведение идентично: новые
+  // [data-tip]-элементы биндятся в тот же момент, что и раньше; bindTips
+  // идемпотентен (__v4TipBound). Атрибуты, которые пишет сам bindTips
+  // (tabindex/role), не входят в attributeFilter — циклов нет.
   React.useEffect(() => {
-    if (layoutRef.current) bindTips(layoutRef.current);
-  });
+    const root = layoutRef.current;
+    if (!root) return;
+    bindTips(root);
+    const mo = new MutationObserver((muts) => {
+      if (muts.some((m) => m.addedNodes.length > 0)) bindTips(root);
+    });
+    mo.observe(root, { childList: true, subtree: true, attributeFilter: ["data-tip"] });
+    return () => mo.disconnect();
+  }, []);
 
   async function handleLogout() {
     try {

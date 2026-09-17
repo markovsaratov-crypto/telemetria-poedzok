@@ -1789,7 +1789,7 @@ html.dark .v4-app .t-del-go { border-color: #5A2424; }
   max-height: 132px;
   overflow-y: auto;
 }
-/* v2.10.8: кнопка «полный дамп» + раскрытый дамп (до 64 КБ, скролл) */
+/* v2.10.8: кнопка «полный дамп» + раскрытый дамп (до 8 КБ с v2.38.2/F32, скролл) */
 .v4-app .ingest-raw-btn {
   margin-top: 6px;
   font-size: 10.5px;

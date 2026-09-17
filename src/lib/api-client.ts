@@ -99,6 +99,23 @@ function releaseGetSlot(): void {
   if (next) next();
 }
 
+// v2.38.2 · F87 (кодревью): дедуп/троттлинг тостов fetch-слоя. При outage
+// (или 5xx-шторме) каждый из параллельных запросов + 30с-поллинги
+// (useSessions/useTrips, retry:1) порождал свой тост — стек одинаковых
+// «Сеть недоступа» на каждый цикл опроса. Одинаковое сообщение (ключ Map)
+// показывается не чаще раза в TOAST_DEDUPE_MS; ошибка вызывающему коду
+// пробрасывается как раньше — меняется только частота тостов.
+const TOAST_DEDUPE_MS = 30_000;
+const lastToastAt = new Map<string, number>();
+
+function toastErrorThrottled(message: string, opts?: { description?: string }) {
+  const now = Date.now();
+  const last = lastToastAt.get(message) ?? 0;
+  if (now - last < TOAST_DEDUPE_MS) return;
+  lastToastAt.set(message, now);
+  toast.error(message, opts);
+}
+
 async function apiFetch<T = unknown>(
   path: string,
   opts: FetchOpts = {}
@@ -122,7 +139,7 @@ async function apiFetch<T = unknown>(
       credentials: "include",
     });
   } catch (err) {
-    toast.error("Сеть недоступна", {
+    toastErrorThrottled("Сеть недоступна", {
       description: err instanceof Error ? err.message : "Не удалось связаться с сервером",
     });
     throw new ApiError("Network error", 0);
@@ -145,7 +162,7 @@ async function apiFetch<T = unknown>(
   if (res.status === 429) {
     const body = (await parseBody(res, expect)) as { error?: string; retryAfter?: number } | null;
     const retryAfter = body?.retryAfter || Number(res.headers.get("retry-after")) || 60;
-    toast.error("Слишком много запросов", {
+    toastErrorThrottled("Слишком много запросов", {
       description: `Повторите через ${humanizeRetryAfter(retryAfter)}.`,
     });
     throw new ApiError(body?.error || "Rate limit exceeded", 429, requestId, body);
@@ -154,7 +171,7 @@ async function apiFetch<T = unknown>(
   // 5xx
   if (res.status >= 500) {
     const body = (await parseBody(res, expect)) as { error?: string } | null;
-    toast.error("Ошибка сервера", {
+    toastErrorThrottled("Ошибка сервера", {
       description: requestId ? `Request ID: ${requestId}` : body?.error || "Внутренняя ошибка",
     });
     throw new ApiError(body?.error || "Internal Server Error", res.status, requestId, body);

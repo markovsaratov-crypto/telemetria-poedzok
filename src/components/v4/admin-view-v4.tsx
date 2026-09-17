@@ -1069,7 +1069,7 @@ function IngestChannelDiag({
   const recent = trace?.recent ?? [];
 
   // v2.10.8: полный дамп последнего нераспознанного батча — ленивая загрузка
-  // по кнопке (/api/stats?ingestRaw=1): до 64 КБ, не тянем в каждом запросе.
+  // по кнопке (/api/stats?ingestRaw=1): до 8 КБ (v2.38.2, F32), не тянем в каждом запросе.
   // v2.11.0 (U-3): ошибки загрузки больше не маскируются под «нераспознанных
   // батчей не сохранилось» — различаем ошибку и честное «дампа нет».
   const [raw, setRaw] = React.useState<StatsResponse["ingestRaw"] | null>(null);
@@ -1211,7 +1211,7 @@ function IngestChannelDiag({
               </div>
             ) : raw ? (
               <pre className="ingest-sample ingest-raw">
-                {`${new Date(raw.at).toLocaleString("ru-RU")} · ${raw.deviceId ?? "—"} · ${raw.outcome} · ${fmtNumber(raw.bytes)} Б${raw.truncated ? " · дамп обрезан до 64 КБ" : ""}\n\n${raw.body}`}
+                {`${new Date(raw.at).toLocaleString("ru-RU")} · ${raw.deviceId ?? "—"} · ${raw.outcome} · ${fmtNumber(raw.bytes)} Б${raw.truncated ? " · дамп обрезан до 8 КБ" : ""}\n\n${raw.body}`}
               </pre>
             ) : (
               <div className="ingest-hint">

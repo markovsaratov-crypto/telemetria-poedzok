@@ -6,6 +6,7 @@
 import * as React from "react";
 import { ThemeProvider as NextThemesProvider } from "next-themes";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MotionConfig } from "framer-motion";
 import { Toaster } from "@/components/ui/sonner";
 
 export function Providers({ children }: { children: React.ReactNode }) {
@@ -31,8 +32,16 @@ export function Providers({ children }: { children: React.ReactNode }) {
       disableTransitionOnChange
     >
       <QueryClientProvider client={queryClient}>
-        {children}
-        <Toaster position="top-right" richColors closeButton />
+        {/* v2.38.2 · F85 (кодревью): framer-motion игнорировал
+            prefers-reduced-motion — CSS-анимации гасятся (globals.css,
+            telematika-v4.css), а JS-спринги/AnimatePresence (шейк логина,
+            тосты, вкладки) шли всегда. reducedMotion="user": при системной
+            настройке отключаются transform/layout-анимации, прозрачность
+            остаётся; раскладка не меняется. */}
+        <MotionConfig reducedMotion="user">
+          {children}
+          <Toaster position="top-right" richColors closeButton />
+        </MotionConfig>
       </QueryClientProvider>
     </NextThemesProvider>
   );

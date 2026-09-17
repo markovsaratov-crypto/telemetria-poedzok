@@ -20,13 +20,12 @@ import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
 import {
   BUCKETS,
-  mulberry32,
   ecoZone,
   effZone,
   heatColor,
   type PeriodKey,
 } from "@/lib/v4-utils";
-import { fmtSecShort, fmtSecFull, fmtDurMin, fmtNumber, pluralRu } from "@/lib/format";
+import { fmtSecShort, fmtSecFull, fmtDurMin, fmtNumber, fmtNum, fmtDistKm, pluralRu } from "@/lib/format";
 import {
   useSessionStats,
   useRouteComparison,
@@ -43,8 +42,11 @@ import {
   type RouteTrendData,
 } from "@/lib/hooks";
 import { useV4Track, useV4Events, usePeriodStats, useSpeedRecord, type PeriodAggregate } from "@/lib/v4-hooks";
+// v2.38.2 · F75: ?screen= при запуске (PWA-ярлык «Все поездки» → /m?screen=trips)
+import { useLaunchScreen } from "@/hooks/use-launch-screen";
 import type { TrackResponse, EventsResponse } from "@/lib/api-client";
 import { bindTips } from "./use-v4-tipbox";
+import { SESSIONS_LIST_QUERY } from "./telematika-layout";
 import { BulletChart } from "./widgets/bullet-chart";
 
 // v2.10.0 R2: Leaflet MapTrack — dynamic import с ssr: false (Leaflet требует window).
@@ -86,9 +88,15 @@ export function AnalyticsView({ period, sessionId }: Props) {
   // v2.12.0 (D-8): блоки 09/10 уважают выбранный период (?period= на сервере)
   const groups = useRouteGroups(period);
   const heavy = useHeavySegments(period);
-  // v2.11.0 (U-13): источник поездки (deviceName/deviceId) — из общего кэша
-  // сессий (limit 50 — тот же queryKey, что у layout/app-root, без лишнего запроса).
-  const sessions = useSessions({ limit: 50 });
+  // v2.11.0 (U-13): источник записи (deviceName/deviceId) — из общего кэша
+  // сессий без лишнего запроса.
+  // v2.38.2 · F83 (кодревью): раньше {limit:50} ≠ layout-ному
+  // {limit:50, minPoints:10} — комментарий про «тот же queryKey» был ложным:
+  // два параллельных GET /api/sessions и два независимых 30с-поллинга.
+  // Теперь общий SESSIONS_LIST_QUERY — один запрос/поллинг с layout и app-root.
+  // Побочный эффект фильтра блипов: у записи <10 точек (не выбрать из dropdown)
+  // источник покажет «сессия» вместо deviceName — равноценный fallback.
+  const sessions = useSessions(SESSIONS_LIST_QUERY);
 
   // v2.10.2: период-режим — метрики по ВСЕМ поездкам выбранного периода.
   // Активен, когда конкретная поездка не выбрана (клик по period-pill).
@@ -100,11 +108,28 @@ export function AnalyticsView({ period, sessionId }: Props) {
     ? { kmh: speedRecord.data.maxSpeedAllTimeKmh, date: speedRecord.data.date }
     : undefined;
 
+  // v2.38.2 · F75: чтение ?screen= на маунте дефолтной вкладки — переключает
+  // раздел штатным Alt-N keydown-роутером telematika-layout (гварды ролей те же).
+  useLaunchScreen();
+
   const rootRef = React.useRef<HTMLDivElement>(null);
 
+  // v2.38.2 · F88 (кодревью): bindTips после КАЖДОГО рендера → один скан при
+  // монтировании + MutationObserver на поддереве (добавление узлов / появление
+  // data-tip): блоков с data-tip здесь десятки, а рендеров — на каждый keystroke
+  // и каждое прилётие данных. Поведение идентично (bindTips идемпотентен,
+  // новые элементы биндятся в тот же момент); атрибуты tabindex/role, которые
+  // пишет сам bindTips, не входят в attributeFilter — циклов нет.
   React.useEffect(() => {
-    if (rootRef.current) bindTips(rootRef.current);
-  });
+    const root = rootRef.current;
+    if (!root) return;
+    bindTips(root);
+    const mo = new MutationObserver((muts) => {
+      if (muts.some((m) => m.addedNodes.length > 0)) bindTips(root);
+    });
+    mo.observe(root, { childList: true, subtree: true, attributeFilter: ["data-tip"] });
+    return () => mo.disconnect();
+  }, []);
 
   // === Период-режим: все метрики по поездкам за выбранный период ===
   if (!sessionId) {
@@ -269,28 +294,28 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
           {PERIOD_LABELS[period]} · {fmt(d1)}–{fmt(d2)}
         </b>
         <span>
-          {fmtInt(agg.trips)} {tripsWord}
+          {fmtNumber(agg.trips)} {tripsWord}
           {agg.sessionsCount > agg.trips ? (
             <span className="muted">
-              {" "}· {fmtInt(agg.sessionsCount)} {sessionsWord}
+              {" "}· {fmtNumber(agg.sessionsCount)} {sessionsWord}
             </span>
           ) : null}
         </span>
         <span className="muted">
           · всего <b>{fmtDurMin(totalMin)}</b> · в поездках <b>{fmtDurMin(activeMin)}</b> ·{" "}
-          {fmtInt(agg.stats.pointCount)} {pluralRu(agg.stats.pointCount, ["точка", "точки", "точек"])}
+          {fmtNumber(agg.stats.pointCount)} {pluralRu(agg.stats.pointCount, ["точка", "точки", "точек"])}
         </span>
       </div>
       <div className="mline">
         <i
           className="ml-move"
           style={{ width: `${movePct}%` }}
-          data-tip={`В движении | ${fmtInt(moveMin)} мин за весь период`}
+          data-tip={`В движении | ${fmtNumber(moveMin)} мин за весь период`}
         />
         <i
           className="ml-idle"
           style={{ width: `${idlePct}%` }}
-          data-tip={`На стоянках | ${fmtInt(idleMin)} мин за весь период`}
+          data-tip={`На стоянках | ${fmtNumber(idleMin)} мин за весь период`}
         />
         <i
           className="ml-gap"
@@ -301,11 +326,11 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
       <div className="mline-cap">
         <span>
           <i className="ml-move" style={{ background: "var(--plum)" }} />
-          движение · {fmtInt(moveMin)} мин
+          движение · {fmtNumber(moveMin)} мин
         </span>
         <span>
           <i style={{ background: "#DCC9D3" }} />
-          стоянки · {fmtInt(idleMin)} мин
+          стоянки · {fmtNumber(idleMin)} мин
         </span>
         <span>
           <i style={{ background: "repeating-linear-gradient(90deg,#C99A2E 0 3px,#F3E3C9 3px 6px)" }} />
@@ -317,22 +342,17 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
 }
 
 // === Helpers для конвертации единиц ===
-function fmtNum(n: number | null | undefined, decimals = 1): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return n.toFixed(decimals).replace(".", ",");
-}
+// v2.38.2 · F82 (кодревью): локальные fmtNum/fmtInt удалены — вместо них
+// канонические fmtNum/fmtNumber из lib/format.ts (Intl ru-RU: та же
+// десятичная запятая, плюс разделители тысяч «15 148» по v2.12.0 D-1 —
+// локальные версии ≥1000 выводили без группировки).
 // v2.34.0: штрафы EcoScore — в % шкалы (0–100), а не «баллах»: «−14,8%",
 // как в подписи плашки «до 45 / 30 / 25 %» (ТЗ владельца, п.4).
+// v2.38.2 · F82: тело — на общем fmtNum.
 function fmtPctRu(p: number): string {
   if (!Number.isFinite(p)) return "—";
   if (Math.abs(p) < 0.05) return "0%";
-  return `${p < 0 ? "−" : "+"}${Math.abs(p).toFixed(1).replace(".", ",")}%`;
-}
-// v2.12.0 (D-1): разделители тысяч — «15 148», а не «15148».
-const intFmt = new Intl.NumberFormat("ru-RU");
-function fmtInt(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return intFmt.format(Math.round(n));
+  return `${p < 0 ? "−" : "+"}${fmtNum(Math.abs(p))}%`;
 }
 function msToKmh(ms: number | null | undefined): number | null {
   if (ms == null || !Number.isFinite(ms)) return null;
@@ -437,39 +457,39 @@ function SessionHeader({
           <b>{fmtDurMin(activeMin)}</b>
           {legCount && legCount > 1 ? (
             <span
-              data-tip={`Одна запись — ${legCount} ${pluralRu(legCount, ["поездка", "поездки", "поездок"])} | Стоянка ${fmtDurMin(secToMin(longestStop))} между ними длинная — поездки считаются раздельно | Порог — 15 минут | В движении: ${fmtInt(moveMin)} мин`}
+              data-tip={`Одна запись — ${legCount} ${pluralRu(legCount, ["поездка", "поездки", "поездок"])} | Стоянка ${fmtDurMin(secToMin(longestStop))} между ними длинная — поездки считаются раздельно | Порог — 15 минут | В движении: ${fmtNumber(moveMin)} мин`}
             >
               {" "}· {legCount} {pluralRu(legCount, ["поездка", "поездки", "поездок"])} · пауза {fmtDurMin(secToMin(longestStop))}
             </span>
           ) : null}{" "}
-          · {fmtInt(stats.pointCount)} {pluralRu(stats.pointCount, ["точка", "точки", "точек"])}
+          · {fmtNumber(stats.pointCount)} {pluralRu(stats.pointCount, ["точка", "точки", "точек"])}
         </span>
       </div>
       <div className="mline">
         <i
           className="ml-move"
           style={{ width: `${movePct}%` }}
-          data-tip={`В движении | ${fmtInt(moveMin)} мин — всё время в движении: старт — от 5 км/ч, остановка — ниже 2 км/ч`}
+          data-tip={`В движении | ${fmtNumber(moveMin)} мин — всё время в движении: старт — от 5 км/ч, остановка — ниже 2 км/ч`}
         />
         <i
           className="ml-idle"
           style={{ width: `${idlePct}%` }}
-          data-tip={`На стоянках | ${fmtInt(idleMin)} мин — скорость ниже 2 км/ч, включая паузы до старта и после финиша`}
+          data-tip={`На стоянках | ${fmtNumber(idleMin)} мин — скорость ниже 2 км/ч, включая паузы до старта и после финиша`}
         />
         <i
           className="ml-gap"
           style={{ width: `${gapPct}%`, minWidth: gapSec > 0 ? "3px" : "0" }}
-          data-tip={`Без сигнала GPS | ${fmtInt(stats.methodology?.gapCount ?? 0)} пауз суммарно ${fmtSecFull(gapSec)} — интервалы длиннее 30 секунд без данных`}
+          data-tip={`Без сигнала GPS | ${fmtNumber(stats.methodology?.gapCount ?? 0)} пауз суммарно ${fmtSecFull(gapSec)} — интервалы длиннее 30 секунд без данных`}
         />
       </div>
       <div className="mline-cap">
         <span>
           <i className="ml-move" style={{ background: "var(--plum)" }} />
-          движение · {fmtInt(moveMin)} мин
+          движение · {fmtNumber(moveMin)} мин
         </span>
         <span>
           <i style={{ background: "#DCC9D3" }} />
-          стоянки · {fmtInt(idleMin)} мин
+          стоянки · {fmtNumber(idleMin)} мин
         </span>
         <span>
           <i style={{ background: "repeating-linear-gradient(90deg,#C99A2E 0 3px,#F3E3C9 3px 6px)" }} />
@@ -532,8 +552,8 @@ function KpiBlock({
         <span className="sec-sub">
           {stats
             ? aggregated
-              ? `${fmtInt(stats.pointCount)} ${pluralRu(stats.pointCount, ["точка", "точки", "точек"])} · все поездки периода${at?.hasActiveTrip ? ` · активных ${fmtDurMin(secToMin(at.activeDuration))}` : ""}`
-              : `${fmtInt(stats.pointCount)} ${pluralRu(stats.pointCount, ["точка", "точки", "точек"])} · запись ${fmtDurMin(dur)}${tailsSec > 30 ? ` · хвосты ${fmtDurMin(secToMin(tailsSec))} вне аналитики` : ""}`
+              ? `${fmtNumber(stats.pointCount)} ${pluralRu(stats.pointCount, ["точка", "точки", "точек"])} · все поездки периода${at?.hasActiveTrip ? ` · активных ${fmtDurMin(secToMin(at.activeDuration))}` : ""}`
+              : `${fmtNumber(stats.pointCount)} ${pluralRu(stats.pointCount, ["точка", "точки", "точек"])} · запись ${fmtDurMin(dur)}${tailsSec > 30 ? ` · хвосты ${fmtDurMin(secToMin(tailsSec))} вне аналитики` : ""}`
             : "загрузка статистики…"}
         </span>
       </div>
@@ -644,32 +664,38 @@ function KpiCard({
 
 function Sparkline({ data, color }: { data: number[]; color: string }) {
   // v2.10.0 R1: sparkline from real speedProfile data (last 14 points).
-  // Если данных мало — fallback к seeded-плейсхолдеру (визуально непустая линия).
+  // v2.38.2 · F81: пока данных нет (загрузка / пустой speedProfile) — честный
+  // плейсхолдер «нет динамики» (пунктирная базовая линия в muted-цвете), а НЕ
+  // seeded-случайная ломаная (mulberry32): псевдодинамика выдавала себя за
+  // реальные измерения и была одинаковой во всех 7 KPI-карточках.
   const pts = React.useMemo(() => {
-    if (data && data.length >= 2) {
-      const mn = Math.min(...data);
-      const mx = Math.max(...data);
-      const rg = mx - mn + 0.001;
-      return data.map((p, i) => {
-        const x = 2 + i * (96 / (data.length - 1));
-        const y = 24 - ((p - mn) / rg) * 18 - 3;
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      });
-    }
-    // Fallback: 14 seeded-точек
-    const r = mulberry32(31 * 48271 + 17);
-    const arr: number[] = [];
-    let v = 10 + r() * 8;
-    for (let i = 0; i < 14; i++) {
-      v += (r() - 0.5) * 5;
-      v = Math.max(2, Math.min(26, v));
-      arr.push(v);
-    }
-    const mn = Math.min(...arr);
-    const mx = Math.max(...arr);
+    if (!data || data.length < 2) return [];
+    const mn = Math.min(...data);
+    const mx = Math.max(...data);
     const rg = mx - mn + 0.001;
-    return arr.map((p, i) => `${(2 + i * (96 / 13)).toFixed(1)},${(24 - ((p - mn) / rg) * 18 - 3).toFixed(1)}`);
+    return data.map((p, i) => {
+      const x = 2 + i * (96 / (data.length - 1));
+      const y = 24 - ((p - mn) / rg) * 18 - 3;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
   }, [data]);
+
+  // Нет реальных точек → пустое состояние (svg сохранён: слот спарклайна в
+  // макете KPI-карточки остаётся на месте, но не изображает динамику).
+  if (pts.length === 0) {
+    return (
+      <svg className="spark" viewBox="0 0 100 26" preserveAspectRatio="none" aria-hidden="true">
+        <line
+          x1="2"
+          y1="13"
+          x2="98"
+          y2="13"
+          opacity="0.4"
+          style={{ stroke: "var(--muted)", strokeWidth: 1, strokeDasharray: "2 4" }}
+        />
+      </svg>
+    );
+  }
 
   const last = pts[pts.length - 1].split(",");
   return (
@@ -797,7 +823,7 @@ function DrivingScoreBlock({
   // при план/факт «—» выглядело как нулевая экономия)
   // v2.25.0 (П.5): не сопоставимый план — отдельная подпись с покрытием
   const effBigValue = hasPlan
-    ? `${eff > 0 ? "+" : "−"}${Math.abs(eff).toFixed(1).replace(".", ",")}`
+    ? `${eff > 0 ? "+" : "−"}${fmtNum(Math.abs(eff))}`
     : "—";
   // v2.34.0 (ТЗ владельца, п.5): бейдж плашки — отклонение в % вместо словесной
   // зоны «экономия · ≤−1 мин» (минуты не читались). Источник — §6.3
@@ -813,7 +839,7 @@ function DrivingScoreBlock({
   }, [hasPlan, stats, planDurationSec, actualDuration]);
   const effBand = hasPlan
     ? effPct != null
-      ? `${effPct > 0 ? "+" : "−"}${Math.abs(effPct).toFixed(1).replace(".", ",")}%`
+      ? `${effPct > 0 ? "+" : "−"}${fmtNum(Math.abs(effPct))}%`
       : "нет данных о плане"
     : planNotComparable
       ? "план не сопоставим"
@@ -919,7 +945,7 @@ function DrivingScoreBlock({
                   from: 0,
                   to: Math.max(-5, Math.min(5, eff)),
                   color: effMeasureColor,
-                  tip: `Отклонение от плана: ${eff > 0 ? "+" : "−"}${Math.abs(eff).toFixed(1).replace(".", ",")} мин/поездку`,
+                  tip: `Отклонение от плана: ${eff > 0 ? "+" : "−"}${fmtNum(Math.abs(eff))} мин/поездку`,
                 }
               : null
           }
@@ -961,12 +987,12 @@ function DrivingScoreBlock({
               label: aggregated ? "отклонение (всего)" : "отклонение",
               tip: hasPlan
                 ? aggregated
-                  ? `Суммарное отклонение факта от плана за период: ${effTotalMin != null ? (effTotalMin > 0 ? "перерасход" : "экономия") + " " + Math.abs(effTotalMin).toFixed(1).replace(".", ",") + " мин" : "—"}; в среднем ${Math.abs(eff).toFixed(1).replace(".", ",")} мин/поездку (${stats?.route?.durationDeviationPct ?? 0}%)`
-                  : `Отклонение факта от плана: ${eff > 0 ? "перерасход" : "экономия"} ${Math.abs(eff).toFixed(1)} мин (${stats?.route?.durationDeviationPct ?? 0}%)`
+                  ? `Суммарное отклонение факта от плана за период: ${effTotalMin != null ? (effTotalMin > 0 ? "перерасход" : "экономия") + " " + fmtNum(Math.abs(effTotalMin)) + " мин" : "—"}; в среднем ${fmtNum(Math.abs(eff))} мин/поездку (${stats?.route?.durationDeviationPct ?? 0}%)`
+                  : `Отклонение факта от плана: ${eff > 0 ? "перерасход" : "экономия"} ${fmtNum(Math.abs(eff))} мин (${stats?.route?.durationDeviationPct ?? 0}%)`
                 : "План маршрута не рассчитан — отклонение недоступно",
               barPct: hasPlan ? Math.min(100, Math.abs(effTotalMin ?? eff) * 20) : 0,
               barColor: eff > 0 ? "var(--red)" : "var(--plum)",
-              value: hasPlan ? `${effTotalMin != null ? (effTotalMin > 0 ? "+" : "−") + Math.abs(effTotalMin).toFixed(1).replace(".", ",") : effBigValue} мин` : "—",
+              value: hasPlan ? `${effTotalMin != null ? (effTotalMin > 0 ? "+" : "−") + fmtNum(Math.abs(effTotalMin)) : effBigValue} мин` : "—",
               valueColor: hasPlan ? (eff > 0 ? "var(--red)" : "var(--plum)") : "var(--faint)",
             },
           ]}
@@ -1047,10 +1073,10 @@ function SpeedProfileBlock({
     return {
       p50: p50Kmh != null ? fmtNum(p50Kmh, 0) : "—",
       std: stdKmh != null ? fmtNum(stdKmh, 0) : "—",
-      vr: vrCount != null ? fmtInt(vrCount) : "—",
+      vr: vrCount != null ? fmtNumber(vrCount) : "—",
       cv: cvPct,
-      jam: jamSec != null ? `${fmtInt(jamSec / 60)} мин · ${sharePct(jamSec)}%` : "—",
-      cruise: cruiseSec != null ? `${fmtInt(cruiseSec / 60)} мин · ${sharePct(cruiseSec)}%` : "—",
+      jam: jamSec != null ? `${fmtNumber(jamSec / 60)} мин · ${sharePct(jamSec)}%` : "—",
+      cruise: cruiseSec != null ? `${fmtNumber(cruiseSec / 60)} мин · ${sharePct(cruiseSec)}%` : "—",
     };
   }, [stats]);
 
@@ -1065,7 +1091,7 @@ function SpeedProfileBlock({
         <span className="sec-title">Скоростной профиль{aggregated ? " · все поездки" : ""}</span>
         <span className="sec-sub">
           {stats?.speedProfile
-            ? `${fmtInt(stats.speedProfile.length)} ${pluralRu(stats.speedProfile.length, ["точка", "точки", "точек"])}${aggregated ? " (все поездки периода)" : " активной части"} · ${sp.p50} км/ч медиана`
+            ? `${fmtNumber(stats.speedProfile.length)} ${pluralRu(stats.speedProfile.length, ["точка", "точки", "точек"])}${aggregated ? " (все поездки периода)" : " активной части"} · ${sp.p50} км/ч медиана`
             : isLoading
               ? "загрузка скоростного профиля…"
               : "нет данных о скоростном профиле"}
@@ -1234,7 +1260,7 @@ function PlanFactBlock({
   }
   const heroCls = dtMin == null ? "c-amber" : dtMin <= 0 ? "c-plum" : dtMin <= 2 ? "c-amber" : "c-red";
   const heroSign = dtMin == null ? "" : dtMin > 0 ? "+" : "−";
-  const heroVal = dtMin == null ? "—" : Math.abs(dtMin).toFixed(0).replace(".", ",");
+  const heroVal = dtMin == null ? "—" : fmtNum(Math.abs(dtMin), 0);
   const dtPct = planNotComparable
     ? null
     : route?.durationDeviationPct != null
@@ -1330,7 +1356,7 @@ function PlanFactBlock({
         <span className="sec-sub">
           {provider ? `план: ${provider}` : "плана нет"}
           {trafficFetched ? " · трафик 2ГИС учтён" : " · трафик не получен"}
-          {cmpGroupSize > 0 ? ` · сравнение с ${fmtInt(cmpGroupSize)} ${pluralRu(cmpGroupSize, ["ваша поездка", "вашими поездками", "вашими поездками"])} по этому же маршруту` : ""}
+          {cmpGroupSize > 0 ? ` · сравнение с ${fmtNumber(cmpGroupSize)} ${pluralRu(cmpGroupSize, ["ваша поездка", "вашими поездками", "вашими поездками"])} по этому же маршруту` : ""}
         </span>
       </div>
       <div className="card">
@@ -1367,7 +1393,7 @@ function PlanFactBlock({
           <div className="pf-side">
             <div className="pf-mini">
               <span
-                data-tip={`Отклонение по дистанции | Проехали ${(stats.distance / 1000).toFixed(1).replace(".", ",")} км против ${route?.planDistanceM ? (route.planDistanceM / 1000).toFixed(1).replace(".", ",") : "—"} км по плану | Короче плана — слива, длиннее — алый`}
+                data-tip={`Отклонение по дистанции | Проехали ${fmtDistKm(stats.distance)} против ${route?.planDistanceM ? fmtDistKm(route.planDistanceM) : "—"} по плану | Короче плана — слива, длиннее — алый`}
               >
                 Откл. по дистанции
               </span>
@@ -1394,7 +1420,7 @@ function PlanFactBlock({
                 Потери в пробках
               </span>
               <b className={timeLostMin > 0 ? "c-red" : "c-plum"}>
-                {fmtInt(timeLostMin)} мин
+                {fmtNumber(timeLostMin)} мин
               </b>
             </div>
           </div>
@@ -1421,7 +1447,7 @@ function PlanFactBlock({
               <div className="seg-row" key={i}>
                 <div className="seg-name">
                   {s.name}
-                  <small>{s.type} · {(s.factDistM / 1000).toFixed(1).replace(".", ",")} км</small>
+                  <small>{s.type} · {fmtDistKm(s.factDistM)}</small>
                 </div>
                 <div className="bullet">
                   <div className={`fill ${sCls}`} style={{ width: `${(s.factDurSec / maxSegDur) * 100}%` }} />
@@ -1430,11 +1456,11 @@ function PlanFactBlock({
                 <div className="seg-delta">
                   <b className={sCc}>
                     {sdt > 0 ? "+" : "−"}
-                    {Math.abs(sdtMin).toFixed(0)} мин
+                    {fmtNum(Math.abs(sdtMin), 0)} мин
                   </b>
-                  <span className="p">факт {fmtInt(factMin)} · план {fmtInt(planMin)}</span>
+                  <span className="p">факт {fmtNumber(factMin)} · план {fmtNumber(planMin)}</span>
                   <span className="spd">
-                    {s.factSpeedKmh.toFixed(1).replace(".", ",")} км/ч{" "}
+                    {fmtNum(s.factSpeedKmh)} км/ч{" "}
                     <span className={`chip ${scc}`}>
                       {dv > 0 ? "+" : ""}
                       {dv}%
@@ -1449,20 +1475,20 @@ function PlanFactBlock({
         <div className="seg-total">
           <span>Итог:</span>
           <span>
-            план <b>{planDurSec != null ? fmtInt(planDurSec / 60) + " мин" : "—"}</b>
+            план <b>{planDurSec != null ? fmtNumber(planDurSec / 60) + " мин" : "—"}</b>
           </span>
           <span>
-            факт <b>{fmtInt(actualDurSec / 60)} мин</b>
+            факт <b>{fmtNumber(actualDurSec / 60)} мин</b>
           </span>
           <b className={heroCls}>
-            {dtMin == null ? "—" : `${dtMin > 0 ? "+" : "−"}${Math.abs(dtMin).toFixed(0)} мин`}
+            {dtMin == null ? "—" : `${dtMin > 0 ? "+" : "−"}${fmtNum(Math.abs(dtMin), 0)} мин`}
           </b>
         </div>
 
         {/* v2.10.1: vs route-группа из route-comparison */}
         {comparison ? (
           <div className="pf-cmp">
-            <div className="pf-segs-head">Ваши поездки по этому же маршруту ({fmtInt(cmpGroupSize)} {pluralRu(cmpGroupSize, ["поездка", "поездки", "поездок"])})</div>
+            <div className="pf-segs-head">Ваши поездки по этому же маршруту ({fmtNumber(cmpGroupSize)} {pluralRu(cmpGroupSize, ["поездка", "поездки", "поездок"])})</div>
             <div className="stats-grid" style={{ marginTop: 0 }}>
               <Stat
                 value={cmpRank != null ? `#${cmpRank}` : "—"}
@@ -1482,13 +1508,13 @@ function PlanFactBlock({
                 label="vs среднего"
               />
               <Stat
-                value={cmpStats?.best != null ? `${fmtInt(cmpStats.best / 60)} мин` : "—"}
+                value={cmpStats?.best != null ? `${fmtNumber(cmpStats.best / 60)} мин` : "—"}
                 cls="c-plum"
                 tip="Ваше лучшее время на этом маршруте | Самая быстрая из надёжно записанных поездок"
                 label="Лучшее в группе"
               />
               <Stat
-                value={cmpStats?.worst != null ? `${fmtInt(cmpStats.worst / 60)} мин` : "—"}
+                value={cmpStats?.worst != null ? `${fmtNumber(cmpStats.worst / 60)} мин` : "—"}
                 cls="c-red"
                 tip="Самое медленное время на этом маршруте"
                 label="Худшее в группе"
@@ -1496,7 +1522,7 @@ function PlanFactBlock({
               <Stat
                 value={cmpTrend?.slope != null ? `${trendSlopeWord} сек/день` : "—"}
                 cls={cmpTrend?.slope == null ? "c-faint" : cmpTrend.slope < 0 ? "c-plum" : cmpTrend.slope > 0 ? "c-red" : "c-amber"}
-                tip={`Тренд времени | Изменение времени поездки по дням, в секундах в день | Минус — поездки становятся быстрее, плюс — медленнее | Точность (95%): ${cmpTrend?.ci95 ? `[${cmpTrend.ci95[0].toFixed(2)}, ${cmpTrend.ci95[1].toFixed(2)}]` : "—"} | ${trendWord}`}
+                tip={`Тренд времени | Изменение времени поездки по дням, в секундах в день | Минус — поездки становятся быстрее, плюс — медленнее | Точность (95%): ${cmpTrend?.ci95 ? `[${fmtNum(cmpTrend.ci95[0], 2)}, ${fmtNum(cmpTrend.ci95[1], 2)}]` : "—"} | ${trendWord}`}
                 label="Тренд времени"
               />
             </div>
@@ -1504,8 +1530,8 @@ function PlanFactBlock({
         ) : null}
 
         <p className="pf-note">
-          Сегменты — по фактической скорости (городской поток / магистраль / шоссе / трасса), план для каждого — {planSpeedKmh.toFixed(1).replace(".", ",")} км/ч (средняя плановая скорость).
-          {" "}Сравнение — со всеми вашими поездками по этому же маршруту ({cmpGroupSize > 0 ? `${fmtInt(cmpGroupSize)} ${pluralRu(cmpGroupSize, ["поездка", "поездки", "поездок"])}` : "пока единственная поездка — сравнивать не с чем"}).
+          Сегменты — по фактической скорости (городской поток / магистраль / шоссе / трасса), план для каждого — {fmtNum(planSpeedKmh)} км/ч (средняя плановая скорость).
+          {" "}Сравнение — со всеми вашими поездками по этому же маршруту ({cmpGroupSize > 0 ? `${fmtNumber(cmpGroupSize)} ${pluralRu(cmpGroupSize, ["поездка", "поездки", "поездок"])}` : "пока единственная поездка — сравнивать не с чем"}).
         </p>
       </div>
     </section>
@@ -1531,7 +1557,7 @@ function MapBlock({
         <span className="sec-title">{aggregated ? "Карта поездок за период" : "Карта поездки"}</span>
         <span className="sec-sub">
           {track
-            ? `${fmtInt(track.points.length)} ${pluralRu(track.points.length, ["точка", "точки", "точек"])} · ${fmtInt(track.segments.length)} ${pluralRu(track.segments.length, ["сегмент", "сегмента", "сегментов"])} · слой ${track.defaultLayer}`
+            ? `${fmtNumber(track.points.length)} ${pluralRu(track.points.length, ["точка", "точки", "точек"])} · ${fmtNumber(track.segments.length)} ${pluralRu(track.segments.length, ["сегмент", "сегмента", "сегментов"])} · слой ${track.defaultLayer}`
             : isLoading
               ? "загрузка трека…"
               : "сегменты по скорости"}
@@ -1601,7 +1627,7 @@ function BehaviorBlock({
         <span className="sec-sub">
           {/* v2.12.0 (D-9): плюрализация «1 манёвр / 2 манёвра / 5 манёвров» */}
           {events
-            ? `${fmtNumber(maneuversCount)} ${pluralRu(maneuversCount, ["манёвр", "манёвра", "манёвров"])} · ${fmtInt(ggPointsCount)} ${pluralRu(ggPointsCount, ["точка", "точки", "точек"])} G-G · accelerationRMS ${fmtNum(accelRMS, 2)} м/с²`
+            ? `${fmtNumber(maneuversCount)} ${pluralRu(maneuversCount, ["манёвр", "манёвра", "манёвров"])} · ${fmtNumber(ggPointsCount)} ${pluralRu(ggPointsCount, ["точка", "точки", "точек"])} G-G · accelerationRMS ${fmtNum(accelRMS, 2)} м/с²`
             : "загрузка событий…"}
         </span>
       </div>
@@ -1621,7 +1647,7 @@ function BehaviorBlock({
             {/* v2.31.0 (MIN-18): честная легенда — резкий порог 0,28g, а не 0,4g;
                 кольца на диаграмме — события events-конвейера (визуализация) */}
             {events
-              ? `${fmtInt(ggPointsCount)} ${pluralRu(ggPointsCount, ["манёвр", "манёвра", "манёвров"])} · ${fmtInt(hb + ha)} ${pluralRu(hb + ha, ["резкий", "резких", "резких"])} (порог 0,28g) · пунктир — 0,4g`
+              ? `${fmtNumber(ggPointsCount)} ${pluralRu(ggPointsCount, ["манёвр", "манёвра", "манёвров"])} · ${fmtNumber(hb + ha)} ${pluralRu(hb + ha, ["резкий", "резких", "резких"])} (порог 0,28g) · пунктир — 0,4g`
               : "загрузка…"}
           </div>
         </div>
@@ -1665,7 +1691,7 @@ function BehaviorBlock({
               <Stat
                 value={`${accelPct}%`}
                 cls={accelPct > 60 ? "c-red" : accelPct > 20 ? "c-amber" : "c-plum"}
-                tip={`Резкость | Насколько энергичны разгоны и торможения | ${accelRMS > 0 ? `${(accelRMS * 3.6).toFixed(1).replace(".", ",")} км/ч за секунду · ${(accelRMS / 9.81).toFixed(2).replace(".", ",")} g | ` : ""}До 20% — плавно · 20–40% — умеренно · 40–60% — рвано · выше 60% — агрессивно | 100% — уровень резкого события (0,28g)`}
+                tip={`Резкость | Насколько энергичны разгоны и торможения | ${accelRMS > 0 ? `${fmtNum(accelRMS * 3.6)} км/ч за секунду · ${fmtNum(accelRMS / 9.81, 2)} g | ` : ""}До 20% — плавно · 20–40% — умеренно · 40–60% — рвано · выше 60% — агрессивно | 100% — уровень резкого события (0,28g)`}
                 label="Резкость"
               />
               <Stat
@@ -1700,13 +1726,13 @@ function BehaviorBlock({
                 label="Прямолинейность"
               />
               <Stat
-                value={fmtInt(stats?.methodology?.uTurnCount ?? 0)}
+                value={fmtNumber(stats?.methodology?.uTurnCount ?? 0)}
                 cls="c-amber"
                 tip="Развороты | Поворот на 150–210° с пересечением встречной полосы | 0 — норма · 1 — внимание · 2+ — опасно"
                 label="Развороты"
               />
               <Stat
-                value={fmtInt(stats?.methodology?.turnCount ?? 0)}
+                value={fmtNumber(stats?.methodology?.turnCount ?? 0)}
                 tip="Повороты | Смены направления на 30–150° | Показывают сложность маршрута, а не стиль вождения"
                 label="Повороты"
               />
@@ -1901,7 +1927,7 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
         <span className="sec-num">07</span>
         <span className="sec-title">Пробки и заторы</span>
         <span className="sec-sub">
-          активная часть · {fmtInt(activeDurSec / 60)} мин ·{" "}
+          активная часть · {fmtNumber(activeDurSec / 60)} мин ·{" "}
           {trafficFetched ? `данные 2ГИС учтены` : "по скорости GPS"}
         </span>
       </div>
@@ -1910,40 +1936,40 @@ function TrafficBlock({ stats, aggregated = false }: { stats: SessionStats | nul
           <div
             className="jb jb-move"
             style={{ width: `${movePct}%` }}
-            data-tip={`Движение вне пробок | ${fmtInt(moveNoJamMin)} мин из ${fmtInt(activeDurSec / 60)} мин в поездке`}
+            data-tip={`Движение вне пробок | ${fmtNumber(moveNoJamMin)} мин из ${fmtNumber(activeDurSec / 60)} мин в поездке`}
           />
           <div
             className="jb jb-jam"
             style={{ width: `${jamPct}%` }}
-            data-tip={`В пробках | ${fmtInt(jamMin)} мин — движение медленнее 10 км/ч`}
+            data-tip={`В пробках | ${fmtNumber(jamMin)} мин — движение медленнее 10 км/ч`}
           />
           <div
             className="jb jb-idle"
             style={{ width: `${idlePct}%` }}
-            data-tip={`Остановки в поездке | ${fmtInt(idleMin)} мин — светофоры и ожидание внутри поездки, без пауз до старта и после финиша`}
+            data-tip={`Остановки в поездке | ${fmtNumber(idleMin)} мин — светофоры и ожидание внутри поездки, без пауз до старта и после финиша`}
           />
         </div>
         <div className="jbar-leg">
           <span>
             <i className="jb-move" />
-            движение · {fmtInt(moveNoJamMin)} мин
+            движение · {fmtNumber(moveNoJamMin)} мин
           </span>
           <span>
             <i className="jb-jam" />
-            Время в пробках · {fmtInt(jamMin)} мин
+            Время в пробках · {fmtNumber(jamMin)} мин
           </span>
           <span>
             <i className="jb-idle" />
-            остановки · {fmtInt(idleMin)} мин
+            остановки · {fmtNumber(idleMin)} мин
           </span>
         </div>
         <div className="stats-grid">
           <Stat
-            value={`${fmtInt(congMinVal)} мин`}
+            value={`${fmtNumber(congMinVal)} мин`}
             cls="c-red"
             tip={trafficFetched
-              ? `Время в заторах | ${(timeLostSec ?? 0) / 60 >= 0.05 ? `${fmtInt((timeLostSec ?? 0) / 60)} мин — на столько пробки удлинили поездку (по данным 2ГИС)` : "0 мин — по данным 2ГИС пробки поездку не удлинили"}`
-              : `Время в заторах | примерно ${fmtInt(jamMin / 2)} мин — оценка по медленным участкам GPS | Данных о пробках 2ГИС для маршрута нет`}
+              ? `Время в заторах | ${(timeLostSec ?? 0) / 60 >= 0.05 ? `${fmtNumber((timeLostSec ?? 0) / 60)} мин — на столько пробки удлинили поездку (по данным 2ГИС)` : "0 мин — по данным 2ГИС пробки поездку не удлинили"}`
+              : `Время в заторах | примерно ${fmtNumber(jamMin / 2)} мин — оценка по медленным участкам GPS | Данных о пробках 2ГИС для маршрута нет`}
             label="Время в заторах"
           />
           <Stat
@@ -2232,7 +2258,7 @@ function HeavySegmentsBlock({
           const groupLab = groupP75 != null ? dotLabel(groupP75) : "—";
           const groupCls = groupP75 != null ? dotCls(groupP75) : "c-faint";
           const groupChip = groupP75 != null ? dotChip(groupP75) : "";
-          const avgDistKm = g.avgDistanceM != null ? (g.avgDistanceM / 1000).toFixed(1).replace(".", ",") : "—";
+          const avgDistKm = g.avgDistanceM != null ? fmtNum(g.avgDistanceM / 1000) : "—";
           return (
             // v2.12.0 (Q3): заголовок группы — адрес финиша (идентификация по
             // конечной точке), routeHash уходит в подстроку/тип
@@ -2288,11 +2314,11 @@ function HeavyGroupRow({
             <>Маршрут {g.routeHash.slice(0, 8)}…</>
           )}
           {" · "}
-          {fmtInt(g.sessionCount)} {pluralRu(g.sessionCount, ["поездка", "поездки", "поездок"])}
+          {fmtNumber(g.sessionCount)} {pluralRu(g.sessionCount, ["поездка", "поездки", "поездок"])}
         </div>
         <div className="r-sub">
           {/* v2.12.0 (D-9): плюрализация «1 участок из 12» */}
-          {fmtInt(g.hotspotCount)} {pluralRu(g.hotspotCount, ["участок", "участка", "участков"])} из {fmtInt(g.totalSegments)} · ср. дистанция {avgDistKm} км
+          {fmtNumber(g.hotspotCount)} {pluralRu(g.hotspotCount, ["участок", "участка", "участков"])} из {fmtNumber(g.totalSegments)} · ср. дистанция {avgDistKm} км
           {destShort == null && !dest.isLoading ? ` · #${g.routeHash.slice(0, 8)}` : ""}
         </div>
         <div className="dots">
@@ -2345,7 +2371,7 @@ function RoutesBlock({ groups }: { groups: { groups: RouteGroupInfo[]; total: nu
         <span className="sec-title">Частые маршруты</span>
         <span className="sec-sub">
           {/* v2.12.0 (D-9): плюрализация «1 поездка / 2 поездки / 5 поездок» и «1 маршрут» */}
-          {firstDateStr} · {fmtInt(totalTrips)} {pluralRu(totalTrips, ["поездка", "поездки", "поездок"])} · {fmtInt(total)} {pluralRu(total, ["маршрут", "маршрута", "маршрутов"])} · нажмите для сравнения
+          {firstDateStr} · {fmtNumber(totalTrips)} {pluralRu(totalTrips, ["поездка", "поездки", "поездок"])} · {fmtNumber(total)} {pluralRu(total, ["маршрут", "маршрута", "маршрутов"])} · нажмите для сравнения
         </span>
       </div>
       {groupsList.length === 0 ? (
@@ -2419,7 +2445,7 @@ function RouteRow({
             {g.startCoord && g.endCoord
               ? `${g.startCoord.lat.toFixed(3)},${g.startCoord.lon.toFixed(3)} → ${g.endCoord.lat.toFixed(3)},${g.endCoord.lon.toFixed(3)}`
               : "координаты недоступны"}
-            {g.avgDistanceM != null ? ` · ср. ${(g.avgDistanceM / 1000).toFixed(1).replace(".", ",")} км` : ""}
+            {g.avgDistanceM != null ? ` · ср. ${fmtDistKm(g.avgDistanceM)}` : ""}
           </div>
           <div className="rbar">
             <div style={{ width: `${Math.round((g.sessionCount / maxSessionCount) * 100)}%` }} />
@@ -2493,28 +2519,28 @@ function RouteComparison({ routeGroup }: { routeGroup: RouteGroupInfo }) {
     <>
       <div className="cmp-grid">
         <div className="cmp-cell">
-          <b>{avgMin != null ? fmtInt(avgMin) : "—"} мин</b>
+          <b>{avgMin != null ? fmtNumber(avgMin) : "—"} мин</b>
           <span>среднее время</span>
         </div>
         <div className="cmp-cell">
-          <b className="c-plum">{bestMin != null ? fmtInt(bestMin) : "—"} мин</b>
+          <b className="c-plum">{bestMin != null ? fmtNumber(bestMin) : "—"} мин</b>
           <span>лучшее</span>
         </div>
         <div className="cmp-cell">
-          <b className="c-red">{worstMin != null ? fmtInt(worstMin) : "—"} мин</b>
+          <b className="c-red">{worstMin != null ? fmtNumber(worstMin) : "—"} мин</b>
           <span>худшее</span>
         </div>
       </div>
       <p className="acc-note" style={{ margin: "0 0 4px" }}>
-        Стабильность времени: <b>±{stdDevMin != null ? fmtInt(stdDevMin) : "—"} мин</b> —{" "}
+        Стабильность времени: <b>±{stdDevMin != null ? fmtNumber(stdDevMin) : "—"} мин</b> —{" "}
         {stdDevMin == null ? "—" : stdDevMin <= 5 ? "высокопредсказуемый" : stdDevMin <= 10 ? "предсказуемый" : "непостоянный"} маршрут ({routeGroup.sessionCount} поездок).
       </p>
       <div className="heat-title">Зависимость от времени суток</div>
       <div className="heat heat-4c">
         {hours4Agg.map((v, k) => {
           const col = heatColor(v, avgMin ?? 0);
-          const val = v == null ? "—" : `${fmtInt(v)} мин`;
-          const tip = `${periodLabels[k]}: ${v == null ? "нет поездок" : `${fmtInt(v)} мин в среднем`}`;
+          const val = v == null ? "—" : `${fmtNumber(v)} мин`;
+          const tip = `${periodLabels[k]}: ${v == null ? "нет поездок" : `${fmtNumber(v)} мин в среднем`}`;
           return (
             <i key={k} style={{ background: col }} data-tip={tip}>
               {val}
@@ -2531,9 +2557,9 @@ function RouteComparison({ routeGroup }: { routeGroup: RouteGroupInfo }) {
             <i
               key={k}
               style={{ background: col }}
-              data-tip={`${dlab[k]}: ${v == null ? "нет поездок" : `${fmtInt(v)} мин в среднем (среднее по маршруту ${avgMin != null ? fmtInt(avgMin) : "—"} мин)`}`}
+              data-tip={`${dlab[k]}: ${v == null ? "нет поездок" : `${fmtNumber(v)} мин в среднем (среднее по маршруту ${avgMin != null ? fmtNumber(avgMin) : "—"} мин)`}`}
             >
-              {v == null ? "—" : fmtInt(v)}
+              {v == null ? "—" : fmtNumber(v)}
               <small>{dlab[k]}</small>
             </i>
           );
@@ -2680,7 +2706,7 @@ function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats |
             label="Плотность точек"
           />
           <Stat
-            value={`${gapCount} · ${fmtInt(gapTotalSec)} сек`}
+            value={`${gapCount} · ${fmtNumber(gapTotalSec)} сек`}
             cls={gapCount === 0 ? "c-plum" : gapCount <= 3 ? "c-amber" : "c-red"}
             tip="Пропуски сигнала | Количество пауз в данных GPS и их суммарная длина | Пауза — интервал длиннее 30 секунд"
             label="Пропуски сигнала"
@@ -2709,7 +2735,7 @@ function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats |
           ) : null}
           {activeIdleTime != null ? (
             <Stat
-              value={`${fmtInt(activeIdleTime / 60)} мин`}
+              value={`${fmtNumber(activeIdleTime / 60)} мин`}
               tip="Остановки в поездке | Светофоры, ожидание, парковка — без пауз до старта и после финиша | Меньше — лучше"
               label="Активные стоянки"
             />

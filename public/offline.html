@@ -99,6 +99,16 @@
 
 <script>
 (function () {
+  // v2.38.2 · F84 (кодревью): значения из localStorage вставляются в HTML
+  // только через esc() — s.lastDevice (deviceName с логгера,
+  // пользователь-контролируемая строка; при общем аккаунте её может задать
+  // другой участник) раньше конкатенировался как есть (self-XSS).
+  // Тот же приём, что в use-v4-tipbox CR-1 (textContent вместо innerHTML).
+  function esc(v) {
+    return String(v).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
   try {
     var raw = localStorage.getItem("telem:offline-summary");
     if (!raw) return;
@@ -109,11 +119,12 @@
     // v2.31.0 (NIT-2): дистанция/длительность/скорости удалены — эти поля
     // никогда не записывались в снимок (useStats/useSessions пишут только
     // счётчики и последнюю запись), пустые ячейки не показывались вовсе.
+    // v2.38.2 · F84: значения ячеек — тоже через esc() (тот же недоверенный JSON).
     var cells = [];
     if (s.totalSessions != null)
-      cells.push(["" + s.totalSessions, "", "ПОЕЗДОК"]);
+      cells.push([esc("" + s.totalSessions), "", "ПОЕЗДОК"]);
     if (s.totalPoints != null)
-      cells.push([s.totalPoints.toLocaleString("ru-RU"), "", "GPS-ТОЧЕК"]);
+      cells.push([esc(s.totalPoints.toLocaleString("ru-RU")), "", "GPS-ТОЧЕК"]);
 
     var html = '<div class="grid">';
     for (var i = 0; i < Math.min(cells.length, 4); i++) {
@@ -133,7 +144,7 @@
       html += '<div class="last">Последняя поездка: <b>' +
         d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) +
         ", " + d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }) + "</b>" +
-        (s.lastDevice ? " · " + s.lastDevice : "") + "</div>";
+        (s.lastDevice ? " · " + esc(s.lastDevice) : "") + "</div>";
     }
     el.className = "";
     el.innerHTML = html;

@@ -8,6 +8,7 @@ import { Search, X, MapPin, Tag, StickyNote, Smartphone, Loader2 } from "lucide-
 import {
   Dialog,
   DialogContent,
+  DialogTitle,
 } from "@/components/ui/dialog";
 import { useSessionSearch } from "@/lib/hooks";
 import { fmtDate, fmtNumber } from "@/lib/format";
@@ -48,6 +49,9 @@ export function GlobalSearch({ open, onOpenChange, onSelect }: GlobalSearchProps
 
   const { data, isFetching } = useSessionSearch(debounced);
   const results = data?.sessions || [];
+  // v2.38.2 · F86 (кодревью): список виден только при непустом запросе и
+  // наличии результатов — состояние aria-expanded/activedescendant комбобокса.
+  const listVisible = debounced.trim().length > 0 && results.length > 0;
 
   React.useEffect(() => {
     if (open) {
@@ -84,6 +88,10 @@ export function GlobalSearch({ open, onOpenChange, onSelect }: GlobalSearchProps
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="p-0 gap-0 max-w-2xl overflow-hidden" onKeyDown={onKeyDown}>
+        {/* v2.38.2 · F86 (кодревью): sr-only DialogTitle — у окна появляется
+            доступное имя (Radix линтует отсутствие Title; скринридер озвучивал
+            безымянный диалог). */}
+        <DialogTitle className="sr-only">Поиск по сессиям</DialogTitle>
         <div className="flex items-center gap-2 border-b px-3 py-2.5">
           <Search className="h-4 w-4 text-muted-foreground shrink-0" />
           <input
@@ -92,10 +100,25 @@ export function GlobalSearch({ open, onOpenChange, onSelect }: GlobalSearchProps
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Поиск по сессиям: deviceId, заметки, теги…"
             className="flex-1 bg-transparent outline-none text-sm placeholder:text-muted-foreground"
+            // v2.38.2 · F86: combobox-семантика — фокус остаётся в поле,
+            // стрелочная навигация по aria-activedescendant (стрелки/Enter
+            // обрабатываются onKeyDown выше). aria-owns/controls замыкают
+            // listbox на поле, activedescendant указывает активный пункт.
+            role="combobox"
+            aria-haspopup="listbox"
+            aria-autocomplete="list"
+            aria-expanded={listVisible}
+            aria-controls={listVisible ? "gs-results-list" : undefined}
+            aria-owns={listVisible ? "gs-results-list" : undefined}
+            aria-activedescendant={listVisible ? `gs-opt-${selected}` : undefined}
           />
           {isFetching && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
           {query && (
-            <button onClick={() => setQuery("")} className="text-muted-foreground hover:text-foreground">
+            <button
+              onClick={() => setQuery("")}
+              aria-label="Очистить запрос"
+              className="text-muted-foreground hover:text-foreground"
+            >
               <X className="h-3.5 w-3.5" />
             </button>
           )}
@@ -117,16 +140,25 @@ export function GlobalSearch({ open, onOpenChange, onSelect }: GlobalSearchProps
               <div>Ничего не найдено по запросу «{debounced}»</div>
             </div>
           ) : (
-            <ul className="divide-y">
+            <ul
+              id="gs-results-list"
+              role="listbox"
+              aria-label="Результаты поиска"
+              className="divide-y"
+            >
               <AnimatePresence>
                 {results.map((s, idx) => (
                   <motion.li
                     key={s.id}
+                    role="none"
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     transition={{ delay: Math.min(idx * 0.02, 0.2) }}
                   >
                     <button
+                      id={`gs-opt-${idx}`}
+                      role="option"
+                      aria-selected={selected === idx}
                       onMouseEnter={() => setSelected(idx)}
                       onClick={() => handleSelect(s.id)}
                       className={cn(

@@ -1,6 +1,9 @@
 "use client";
 
 // src/components/zip-import.tsx — импорт GPS-данных из ZIP архива (SensorLogger)
+// v2.38.2 · F80: честный индикатор импорта (indeterminate «идёт загрузка и
+// обработка», без фейковых процентов 10→40→100) + клиентская проверка размера
+// архива до отправки (лимит сервера — 100 МБ).
 
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -16,9 +19,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+
+// v2.38.2 · F80: тот же лимит, что MAX_ZIP_BYTES в /api/import/zip (100 МБ) —
+// сервер отклонит архив только ПОСЛЕ полной загрузки, клиент проверяет сразу.
+const MAX_ZIP_BYTES = 100 * 1024 * 1024;
 
 interface ImportResult {
   imported: number;
@@ -34,7 +40,6 @@ export function ZipImport() {
   const [dragOver, setDragOver] = React.useState(false);
   const [file, setFile] = React.useState<File | null>(null);
   const [loading, setLoading] = React.useState(false);
-  const [progress, setProgress] = React.useState(0);
   const [result, setResult] = React.useState<ImportResult | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const qc = useQueryClient();
@@ -47,24 +52,32 @@ export function ZipImport() {
       toast.error("Поддерживаются только ZIP-архивы");
       return;
     }
+    // v2.38.2 · F80: не грузим заведомо отклоняемый архив целиком (100 МБ —
+    // весь трафик в пустоту): проверяем file.size до начала загрузки.
+    if (f.size > MAX_ZIP_BYTES) {
+      toast.error("ZIP-архив слишком большой", {
+        description: `${(f.size / 1024 / 1024).toFixed(1)} МБ — лимит 100 МБ, сервер его не примет`,
+      });
+      return;
+    }
     setFile(f);
     setResult(null);
   }
 
+  // v2.38.2 · F80: прогресс честный — api.upload (fetch) не сообщает ход
+  // отправки, поэтому проценты не показываем вообще (мгновенные 10→40→100%
+  // были выдумкой): indeterminate-анимация до готового результата.
   async function handleUpload() {
     if (!file) return;
     setLoading(true);
-    setProgress(10);
     try {
       const fd = new FormData();
       fd.append("file", file);
-      setProgress(40);
       // v2.38.1 (ревью F17): api.post прогонял FormData через JSON.stringify →
       // тело превращалось в "{}" + Content-Type: application/json — сервер ждал
       // multipart и падал 500 на любом архиве. Файл уходит через api.upload,
       // как в csv-import.tsx (multipart Content-Type с boundary ставит браузер).
       const res = await api.upload<ImportResult>("/api/import/zip", fd);
-      setProgress(100);
       setResult(res);
       toast.success("Импорт завершён", {
         description: `${res.deviceName} · ${res.pointCount} точек`,
@@ -82,7 +95,6 @@ export function ZipImport() {
   function reset() {
     setFile(null);
     setResult(null);
-    setProgress(0);
     if (inputRef.current) inputRef.current.value = "";
   }
 
@@ -160,16 +172,21 @@ export function ZipImport() {
           )}
         </AnimatePresence>
 
-        {/* Progress */}
-        {loading && (
-          <div className="space-y-2">
+        {/* Progress — v2.38.2 · F80: indeterminate без процентов (fetch не даёт
+            хода отправки — проценты были бы выдумкой); размер архива справа */}
+        {loading && file && (
+          <div className="space-y-2" role="status" aria-label="Импорт в процессе">
             <div className="flex items-center justify-between text-xs">
               <span className="inline-flex items-center gap-1.5">
-                <Loader2 className="h-3 w-3 animate-spin" /> Импорт...
+                <Loader2 className="h-3 w-3 animate-spin" /> Загрузка и обработка архива…
               </span>
-              <span className="text-muted-foreground">{progress}%</span>
+              <span className="text-muted-foreground">
+                {(file.size / 1024 / 1024).toFixed(1)} МБ
+              </span>
             </div>
-            <Progress value={progress} className="h-1.5" />
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-primary/20">
+              <div className="h-full w-full animate-pulse rounded-full bg-primary/70" />
+            </div>
           </div>
         )}
 

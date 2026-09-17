@@ -400,7 +400,14 @@ export function V4MapTrack({ track, isLoading, isError }: MapTrackProps) {
           </MapContainer>
 
           {/* Layer switcher (top-right) */}
+          {/* v2.38.2 · F88 (кодревью): семантика переключателя — role=group +
+              aria-pressed на кнопках слоёв (было: без aria-pressed скринридер
+              не озвучивал активный слой); подложка/theme-aware — белый
+              rgba(255,255,255,0.95) в тёмной теме выглядел белой плашкой
+              (проблема из ревью) — теперь тёмная полупрозрачная, как фон карты. */}
           <div
+            role="group"
+            aria-label="Слои карты"
             style={{
               position: "absolute",
               top: 10,
@@ -408,7 +415,7 @@ export function V4MapTrack({ track, isLoading, isError }: MapTrackProps) {
               zIndex: 1000,
               display: "flex",
               gap: 2,
-              background: "rgba(255,255,255,0.95)",
+              background: isDark ? "rgba(35,35,40,0.92)" : "rgba(255,255,255,0.95)",
               border: "1px solid var(--line)",
               borderRadius: 6,
               padding: 2,
@@ -424,6 +431,7 @@ export function V4MapTrack({ track, isLoading, isError }: MapTrackProps) {
                   setLayer(k);
                 }}
                 title={`Слой: ${LAYERS[k].label}`}
+                aria-pressed={layer === k}
                 style={{
                   padding: "4px 8px",
                   fontSize: 11,
@@ -443,6 +451,8 @@ export function V4MapTrack({ track, isLoading, isError }: MapTrackProps) {
           </div>
 
           {/* Legend (bottom-right) */}
+          {/* v2.38.2 · F88: легенда — та же theme-aware подложка (белая
+              плашка в тёмной теме). */}
           {track?.legend && track.legend.length > 0 && (
             <div
               style={{
@@ -450,7 +460,7 @@ export function V4MapTrack({ track, isLoading, isError }: MapTrackProps) {
                 bottom: 10,
                 right: 10,
                 zIndex: 1000,
-                background: "rgba(255,255,255,0.95)",
+                background: isDark ? "rgba(35,35,40,0.92)" : "rgba(255,255,255,0.95)",
                 border: "1px solid var(--line)",
                 borderRadius: 6,
                 padding: "6px 10px",

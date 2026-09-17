@@ -1,6 +1,9 @@
 "use client";
 
 // src/components/csv-import.tsx — drag & drop импорт GPS-сессий из CSV.
+// v2.38.2 · F80: честный индикатор импорта (indeterminate «идёт загрузка и
+// обработка», без фейковых процентов 10→40→100) + клиентская проверка размера
+// файла до отправки (лимит сервера — 20 МБ).
 
 import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -24,8 +27,11 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
+
+// v2.38.2 · F80: тот же лимит, что MAX_CSV_BYTES в /api/import/csv (20 МБ) —
+// сервер отклонит файл только ПОСЛЕ полной загрузки, клиент проверяет сразу.
+const MAX_CSV_BYTES = 20 * 1024 * 1024;
 
 interface ImportResult {
   imported: number;
@@ -37,7 +43,6 @@ export function CsvImport() {
   const [dragOver, setDragOver] = React.useState(false);
   const [file, setFile] = React.useState<File | null>(null);
   const [loading, setLoading] = React.useState(false);
-  const [progress, setProgress] = React.useState(0);
   const [result, setResult] = React.useState<ImportResult | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const qc = useQueryClient();
@@ -49,20 +54,28 @@ export function CsvImport() {
       toast.error("Поддерживаются только CSV-файлы");
       return;
     }
+    // v2.38.2 · F80: не грузим заведомо отклоняемый файл целиком (100% трафика —
+    // в пустоту): проверяем file.size до начала загрузки, а не после.
+    if (f.size > MAX_CSV_BYTES) {
+      toast.error("CSV-файл слишком большой", {
+        description: `${(f.size / 1024 / 1024).toFixed(1)} МБ — лимит 20 МБ, сервер его не примет`,
+      });
+      return;
+    }
     setFile(f);
     setResult(null);
   }
 
+  // v2.38.2 · F80: прогресс честный — api.upload (fetch) не сообщает ход
+  // отправки, поэтому проценты не показываем вообще (мгновенные 10→40→100%
+  // были выдумкой): indeterminate-анимация до готового результата.
   async function handleUpload() {
     if (!file) return;
     setLoading(true);
-    setProgress(10);
     try {
       const fd = new FormData();
       fd.append("file", file);
-      setProgress(40);
       const res = await api.upload<ImportResult>("/api/import/csv", fd);
-      setProgress(100);
       setResult(res);
       qc.invalidateQueries({ queryKey: ["sessions"] });
       if (res.imported > 0) {
@@ -86,7 +99,6 @@ export function CsvImport() {
   function reset() {
     setFile(null);
     setResult(null);
-    setProgress(0);
     if (inputRef.current) inputRef.current.value = "";
   }
 
@@ -197,16 +209,23 @@ export function CsvImport() {
           )}
         </AnimatePresence>
 
-        {/* Прогресс */}
-        {loading && (
-          <div className="space-y-2">
+        {/* Прогресс — v2.38.2 · F80: indeterminate без процентов (fetch не даёт
+            хода отправки — проценты были бы выдумкой); размер файла справа */}
+        {loading && file && (
+          <div className="space-y-2" role="status" aria-label="Импорт в процессе">
             <div className="flex items-center justify-between text-xs">
               <span className="inline-flex items-center gap-1.5">
-                <Loader2 className="h-3 w-3 animate-spin" /> Загрузка…
+                <Loader2 className="h-3 w-3 animate-spin" /> Загрузка и обработка файла…
               </span>
-              <span className="text-muted-foreground">{progress}%</span>
+              <span className="text-muted-foreground">
+                {file.size >= 1024 * 1024
+                  ? `${(file.size / 1024 / 1024).toFixed(1)} МБ`
+                  : `${(file.size / 1024).toFixed(0)} КБ`}
+              </span>
             </div>
-            <Progress value={progress} className="h-1.5" />
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-primary/20">
+              <div className="h-full w-full animate-pulse rounded-full bg-primary/70" />
+            </div>
           </div>
         )}
 

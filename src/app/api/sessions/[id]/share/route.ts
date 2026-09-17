@@ -1,9 +1,11 @@
 // POST /api/sessions/[id]/share — создать shareable token (§7 матрицы: Cookie/API_KEY).
-// GET  /api/sessions/[id]/share?token=xxx — публичный доступ к сессии по токену (спека: «Публичный доступ»).
 //
 // P1-9: токен STATELESS (HMAC sessionId+срок, ключ SESSION_SECRET) — переживает рестарт,
-// раньше in-memory Map умирал вместе с процессом. Опциональное тело POST { expiresInHours }
-// (1..8760, по умолчанию 168 = 7 дней) — срок уважается при проверке.
+// раньше in-memory Map умирал вместе с процессом. v2.38.1 (ревью F14): каждая
+// выдача регистрируется в реестре ShareToken (makeShareToken) — токен отзываем
+// (revokeShareToken / revokeSessionShares); TTL ≤ 720 ч (30 дней). Опциональное
+// тело POST { expiresInHours } (1..720, по умолчанию 168 = 7 дней) — срок
+// уважается при проверке.
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest, getUserIdFromRequest } from "@/lib/auth";
@@ -48,7 +50,7 @@ export async function POST(
       ? Math.min(Math.max(parsed.data.expiresInHours ?? SHARE_DEFAULT_TTL_HOURS, 1), SHARE_MAX_TTL_HOURS)
       : SHARE_DEFAULT_TTL_HOURS;
 
-    const { token, expiresAt } = makeShareToken(id, ttlHours);
+    const { token, expiresAt } = await makeShareToken(id, ttlHours); // v2.38.1 (F14): async — с регистрацией в реестре
 
     await writeAudit({
       action: "session.share",

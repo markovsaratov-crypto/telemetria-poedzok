@@ -77,11 +77,24 @@ export function metricsText(): string {
 inc("ingest_total", "Total ingest requests", 0);
 inc("ingest_duplicate_total", "Duplicate ingest (idempotency hit)", 0);
 inc("traffic_job_completed_total", "Traffic jobs completed", 0);
-inc("traffic_job_failed_total", "Traffic jobs failed", 0);
+inc("traffic_job_failed_total", "Traffic jobs failed (attempts, retried)", 0);
+// v2.38.1 (ревью F15): gauge терминальных dead-джобов. Раньше /api/metrics
+// делал set("traffic_job_failed_total", …) — КОЛЛИЗИЯ с одноимённым counter
+// выше: в Prometheus exposition попадали ДВА # TYPE для одного имени
+// (counter + gauge) → парсер scrape падает с ошибкой, весь мониторинг
+// (счётчики инжеста, джобов, rate-limit) деградирует до нуля сэмплов.
+// Gauge переименован в traffic_job_dead_total и считает status='dead'
+// (статуса 'failed' в TrafficJob не существует: pending/running/completed/dead
+// — старый gauge всегда показывал 0). Оба имени живут здесь — единственный
+// источник, роут импортирует константу.
+export const TRAFFIC_JOB_DEAD_GAUGE = "traffic_job_dead_total";
+set(TRAFFIC_JOB_DEAD_GAUGE, 0, "Traffic jobs dead (terminal, max attempts exceeded)");
 inc("routing_fallback_total", "Routing provider fallbacks", 0);
 inc("rate_limit_fallback_total", "Redis → in-memory rate limit fallbacks", 0);
 inc("export_completed_total", "Exports completed", 0);
 inc("export_failed_total", "Export jobs failed", 0);
+// v2.38.1 (ревью F9): реклейм застрявших running-экспортов (воркер, TTL 10 мин)
+inc("export_reclaimed_total", "Export jobs reclaimed from stuck running", 0);
 inc("retention_runs_total", "Retention cron runs", 0);
 inc("session_delete_total", "Session soft-deletes", 0);
 inc("trip_delete_total", "Trip deletes (user request)", 0); // v2.30.0: DELETE /api/trips/[id]

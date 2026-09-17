@@ -10,6 +10,7 @@ import { writeAudit } from "@/lib/audit";
 import { inc } from "@/lib/metrics";
 import { env } from "@/lib/env";
 import { recomputeAfterSessionDelete } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): пересчёт поездок при удалении записи
+import { revokeSessionShares } from "@/lib/share"; // v2.38.1 (ревью F14): отзыв share-ссылок при удалении записи
 
 export async function GET(
   request: NextRequest,
@@ -108,6 +109,18 @@ export async function DELETE(
       where: { id },
       data: { deletedAt: new Date(), status: "deleted" },
     });
+
+    // v2.38.1 (ревью F14): отзыв ВСЕХ share-токенов записи. Раньше единственный
+    // способ «отозвать ссылку» — удалить сессию, но и он не отзывал ТОКЕН:
+    // ссылка на soft-deleted сессию и так 404 в sharePayload, однако при
+    // grace-восстановлении (restore) токены оживали бы. Non-fatal: сбой отзыва
+    // не роняет удаление (404 по deletedAt остаётся первой линией защиты).
+    try {
+      const revoked = await revokeSessionShares(id);
+      if (revoked > 0) logger.info("share tokens revoked on session delete", { requestId, sessionId: id, count: revoked });
+    } catch (err) {
+      logger.warn("share token revocation failed (non-fatal)", { requestId, sessionId: id, error: err instanceof Error ? err.message : String(err) });
+    }
 
     // v2.26.0 (ТЗ §7): пересчёт поездок устройства после удаления записи —
     // соседние поездки могут склеиться (каноническое правило на потоке без

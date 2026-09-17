@@ -15,6 +15,18 @@
 // Точность: payload.maxSpeed округлён до 0,1 м/с (FIX-U2) → рекорд в км/ч
 // может отличаться от прямого пересчёта на ≤0,2 км/ч — несущественно для
 // витринного KPI. Паритет «сессии <5 точек не участвуют» сохранён.
+//
+// v2.38.1 (ревью F18): ДВА капа вместо полного скана:
+//   • окно выборки — 500 САМЫХ СВЕЖИХ записей (ORDER BY startTime DESC LIMIT):
+//     полный скан тянул statsCache (JSON до 1,5 МБ/строку) ВСЕХ живых сессий;
+//     «всё время» превращается в «окно рекорда» — осознанная цена (KPI витринный,
+//     протухшие старые сессии и так не прогреваются — warm только при финализации);
+//   • двухфазность: лёгкая фаза НЕ тянет statsCache вообще (только меты свежести),
+//     тяжёлая — statsCache только для СВЕЖИХ id из окна, ЧАНКАМИ ≤90;
+//   • протухшие id — прежний JOIN-конвейер чанками ≤90 (было: один IN — при
+//     >100 протухших сессий (типично после бампа SESSION_CACHE_VERSION)
+//     превышение лимита параметров D1 → 500 НАВСЕГДА: прогреть кэш этих сессий
+//     некому. Паттерн чанков batch-points.ts здесь был проигнорирован).
 import { NextRequest } from "next/server";
 import { libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
@@ -30,6 +42,9 @@ import {
 import type { SessionStatsResult } from "@/lib/session-stats";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
+// v2.38.1 (F18): окно рекорда + размер чанка IN-запросов (лимит параметров D1 ≤100)
+const RECORD_WINDOW = 500;
+const ID_CHUNK = 90;
 
 interface SpeedRecordValue {
   maxSpeedAllTimeKmh: number | null;
@@ -67,17 +82,20 @@ export async function GET(request: NextRequest) {
       }
     };
 
-    // ——— v2.27.0: живые сессии + кэш-поля (БЕЗ точек) одним запросом ———
+    // ——— v2.38.1 (F18): фаза А — лёгкие меты свежести (БЕЗ statsCache), окно 500 ———
     const sc = sessionScopeSql(scope, "s");
     const res = await libsql.execute({
       sql: `SELECT s.id AS sid, s.startTime AS startTime, s.pointCount AS pointCount,
-              s.cachePointCount AS cachePointCount, s.cacheVersion AS cacheVersion, s.statsCache AS statsCache
+              s.cachePointCount AS cachePointCount, s.cacheVersion AS cacheVersion
             FROM Session s
             WHERE s.deletedAt IS NULL${sc.clause}
-            ORDER BY s.startTime ASC`,
+            ORDER BY s.startTime DESC
+            LIMIT ${RECORD_WINDOW}`,
       args: sc.args as never[],
     });
 
+    const freshIds: string[] = [];
+    const freshMetaById = new Map<string, { id: string; startTime: string; pointCount: number | null }>();
     const staleIds: string[] = [];
     for (const row of res.rows as Record<string, unknown>[]) {
       const meta: SessionCacheMeta = {
@@ -91,32 +109,51 @@ export async function GET(request: NextRequest) {
         pointCount: row.pointCount == null ? null : Number(row.pointCount),
         cachePointCount: row.cachePointCount == null ? null : Number(row.cachePointCount),
         cacheVersion: row.cacheVersion == null ? null : Number(row.cacheVersion),
-        statsCache: row.statsCache == null ? null : String(row.statsCache),
+        statsCache: null,
         eventsCache: null,
         trackCache: null,
       };
 
       if (isSessionCacheFresh(meta)) {
         // из кэша: §4.4 MaxSpeed сессии (паритет: сессии <5 точек не участвуют)
-        const result = parseCachedJson<SessionStatsResult>(meta.statsCache);
+        freshIds.push(meta.id);
+        freshMetaById.set(meta.id, { id: meta.id, startTime: meta.startTime, pointCount: meta.pointCount });
+      } else {
+        staleIds.push(meta.id); // JOIN-конвейер ТОЛЬКО по id (ниже)
+      }
+    }
+
+    // ——— v2.38.1 (F18): фаза Б — statsCache только свежих, ЧАНКАМИ ≤90 ———
+    for (let i = 0; i < freshIds.length; i += ID_CHUNK) {
+      const chunk = freshIds.slice(i, i + ID_CHUNK);
+      const ph = chunk.map(() => "?").join(", ");
+      const cacheRes = await libsql.execute({
+        sql: `SELECT id, statsCache FROM Session WHERE id IN (${ph})`,
+        args: chunk as never[],
+      });
+      for (const row of cacheRes.rows as Record<string, unknown>[]) {
+        const meta = freshMetaById.get(String(row.id));
+        if (!meta) continue;
+        const result = parseCachedJson<SessionStatsResult>(row.statsCache == null ? null : String(row.statsCache));
         const payloadMax = result && result.kind === "full" ? result.payload.maxSpeed : null;
         if (payloadMax != null && (result?.payload.pointCount ?? 0) >= 5) {
           consider(payloadMax, meta.id, meta.startTime);
         }
-        continue; // точки этой сессии не нужны
       }
-      staleIds.push(meta.id);
     }
 
-    // ——— протухшие/некэшированные: прежний JOIN-конвейер ТОЛЬКО по их id ———
-    if (staleIds.length > 0) {
-      const ph = staleIds.map(() => "?").join(", ");
+    // ——— протухшие/некэшированные: прежний JOIN-конвейер ТОЛЬКО по их id.
+    // v2.38.1 (F18): чанки ≤90 (было: один IN — >100 протухших → «too many SQL
+    // variables» D1 → 500 навсегда) ———
+    for (let ci = 0; ci < staleIds.length; ci += ID_CHUNK) {
+      const staleChunk = staleIds.slice(ci, ci + ID_CHUNK);
+      const ph = staleChunk.map(() => "?").join(", ");
       const liveRes = await libsql.execute({
         sql: `SELECT s.id AS sid, s.startTime AS startTime, g.lat, g.lon, g.timestamp, g.speed, g.bearing, g.accuracy
               FROM Session s JOIN GpsPoint g ON g.sessionId = s.id
               WHERE s.deletedAt IS NULL AND s.id IN (${ph})
               ORDER BY s.startTime ASC, g.timestamp ASC`,
-        args: staleIds as never[],
+        args: staleChunk as never[],
       });
 
       // Группировка точек по сессиям (строки уже в хронологическом порядке).

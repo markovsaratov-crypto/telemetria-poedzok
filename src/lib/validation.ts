@@ -68,8 +68,13 @@ export const zAuditQuery = z.object({
 });
 
 export const zShareBody = z.object({
-  // P1-9: срок действия share-ссылки в часах (по умолчанию 168 = 7 дней, максимум 1 год)
-  expiresInHours: z.coerce.number().int().min(1).max(8760).optional(),
+  // P1-9: срок действия share-ссылки в часах (по умолчанию 168 = 7 дней)
+  // v2.38.1 (ревью F14): максимум 720 ч = 30 дней (было 8760 = 1 год):
+  // stateless-ссылку с точным GPS-треком нельзя было отозвать (F14), годовой
+  // срок умножал цену утечки; UI предлагает 7/30 дней — 720 не ломает ничего.
+  // Ввод выше — честный 400 (AUDIT B-19-стиль), SHARE_MAX_TTL_HOURS — тот же
+  // предел вторым слоем в роуте создания.
+  expiresInHours: z.coerce.number().int().min(1).max(720).optional(),
 });
 
 export type IngestBody = z.infer<typeof zIngestBody>;

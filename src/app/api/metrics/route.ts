@@ -3,7 +3,7 @@
 // иначе наружу утекают счётчики логинов/регистраций и трафика по путям.
 import { NextRequest } from "next/server";
 import { metricsText } from "@/lib/metrics";
-import { set } from "@/lib/metrics";
+import { set, TRAFFIC_JOB_DEAD_GAUGE } from "@/lib/metrics";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { getRateLimiterStats } from "@/lib/rate-limit";
@@ -23,16 +23,22 @@ export async function GET(request: NextRequest) {
   }
   try {
     // Обновляем gauge-метрики (v2.16.0 (I5): 4 счётчика — параллельно)
-    const [sessionCount, trafficJobPending, trafficJobRunning, trafficJobFailed] = await Promise.all([
+    // v2.38.1 (ревью F15): gauge dead-джобов вместо фиктивного 'failed'
+    // (такого статуса в TrafficJob нет) — и под другим ИМЕНЕМ
+    // (traffic_job_dead_total): прежний traffic_job_failed_total в виде gauge
+    // конфликтовал с одноимённым counter → двойной # TYPE в exposition →
+    // Prometheus-парсер падал, весь scrape — 0 сэмплов. Имя — константа из
+    // lib/metrics (единый источник, ревью F15).
+    const [sessionCount, trafficJobPending, trafficJobRunning, trafficJobDead] = await Promise.all([
       db.session.count({ where: { deletedAt: null } }),
       db.trafficJob.count({ where: { status: "pending" } }),
       db.trafficJob.count({ where: { status: "running" } }),
-      db.trafficJob.count({ where: { status: "failed" } }),
+      db.trafficJob.count({ where: { status: "dead" } }),
     ]);
     set("sessions_active_total", sessionCount, "Active sessions");
     set("traffic_job_pending_total", trafficJobPending, "Pending traffic jobs");
     set("traffic_job_running_total", trafficJobRunning, "Running traffic jobs");
-    set("traffic_job_failed_total", trafficJobFailed, "Failed traffic jobs");
+    set(TRAFFIC_JOB_DEAD_GAUGE, trafficJobDead, "Traffic jobs dead (terminal, max attempts exceeded)");
     set("rate_limiter_buckets", getRateLimiterStats().buckets, "Rate limiter buckets");
 
     const text = metricsText();

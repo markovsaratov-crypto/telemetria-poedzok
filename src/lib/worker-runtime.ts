@@ -10,6 +10,10 @@ import { finalizeSession } from "./session-finalize"; // v2.14.0 (Ф3): «жне
 import { computeMovingTime, computeActiveTrip } from "./active-trip"; // v2.16.0 (B-10): каноническое активное окно §4.11
 import { getCorpusEcoBaselines } from "./eco-corpus"; // v2.17.1: фоновый прогрев corpus-калибровки
 import { closeStaleTrips, tripsEnabled } from "./trip-grouping"; // v2.26.0 (ТЗ §7-п.4): «жнец» поездок
+// v2.38.1 (ревью F7): §10.0 routeHash/topologyHash — прод-порт из мини-сервиса
+// (раньше считал ТОЛЬКО недеплояемый mini-services/worker — 8 из 62 метрик §10
+// были мертвы для новых сессий). Считается в completeJob-пути и пишется в Session.
+import { computeRouteHash, type RouteHashCoord, type RouteHashResult } from "./route-hash";
 
 // P0-фикс v2.9.10 (Render build failure — финальная версия без костылей):
 //
@@ -77,6 +81,11 @@ interface JobWithPoints {
     legEnds?: Array<{ startLat: number; startLon: number; endLat: number; endLon: number; startMs?: number }>;
     // v2.33.0: время старта сессии/поездки (спан-фоллбек, если leg-границ нет).
     departAtMs?: number;
+    // v2.38.1 (ревью F7): границы АКТИВНОЙ части (§4.11) — вход для §10.0
+    // routeHash/topologyHash (computeRouteHash из route-hash.ts). null = нет
+    // активной поездки → хэши не считаются (parity с мини-сервисом).
+    activeStart?: RouteHashCoord | null;
+    activeEnd?: RouteHashCoord | null;
   };
 }
 
@@ -225,7 +234,14 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
       ).map((p) => ({ lat: p.lat, lon: p.lon }));
       jobs.push({
         id: c.id, sessionId: null, tripId: c.tripId, attempts: c.attempts,
-        session: { id: `trip:${c.tripId}`, deviceId: trip.deviceId, gpsPoints, departAtMs: trip.startTimeMs ?? undefined, ...(legEnds.length > 0 ? { legEnds } : {}) },
+        // v2.38.1 (F7): границы активной части поездки (для §10.0 routeHash;
+        // поездковые джобы хэш не персистят — нет Session-строки, поле заделом)
+        session: {
+          id: `trip:${c.tripId}`, deviceId: trip.deviceId, gpsPoints, departAtMs: trip.startTimeMs ?? undefined,
+          activeStart: active.hasActiveTrip ? { lat: active.activeStartCoord.lat, lon: active.activeStartCoord.lon } : null,
+          activeEnd: active.hasActiveTrip ? { lat: active.activeEndCoord.lat, lon: active.activeEndCoord.lon } : null,
+          ...(legEnds.length > 0 ? { legEnds } : {}),
+        },
       });
     }
   } else if (tripJobs.length > 0) {
@@ -304,13 +320,36 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
             }])
       : undefined;
 
-    jobs2.push({ id: c.id, sessionId: c.sessionId, tripId: null, attempts: c.attempts, session: { id: c.sessionId as string, deviceId, gpsPoints, departAtMs: sessionDepartMs.get(c.sessionId as string), ...(legEnds ? { legEnds } : {}) } });
+    jobs2.push({
+      id: c.id, sessionId: c.sessionId, tripId: null, attempts: c.attempts,
+      session: {
+        id: c.sessionId as string, deviceId, gpsPoints,
+        departAtMs: sessionDepartMs.get(c.sessionId as string),
+        // v2.38.1 (F7): границы активной части записи — вход computeRouteHash
+        // в processOneJob (персистится в Session.routeHash/topologyHash)
+        activeStart: active.hasActiveTrip ? { lat: active.activeStartCoord.lat, lon: active.activeStartCoord.lon } : null,
+        activeEnd: active.hasActiveTrip ? { lat: active.activeEndCoord.lat, lon: active.activeEndCoord.lon } : null,
+        ...(legEnds ? { legEnds } : {}),
+      },
+    });
   }
   return [...jobs, ...jobs2];
 }
 
-// v2.19.0: result — честный RouteResult из routing/chain (было `any`)
-async function completeJob(jobId: string, status: "completed" | "failed", result: RouteResult | null, errorMsg: string | null, attempts: number, requestId: string) {
+// v2.19.0: result — честный RouteResult из routing/chain (было `any`).
+// v2.38.1 (ревью F7): routeHashInfo — посчитанные в processOneJob §10.0-хэши;
+// при status="completed" персистятся в Session.routeHash/topologyHash ровно
+// там же, где их писал внешний протокол /api/worker/complete для мини-сервиса
+// (см. src/app/api/worker/complete/route.ts → «v2.9: персист routeHash…»).
+async function completeJob(
+  jobId: string,
+  status: "completed" | "failed",
+  result: RouteResult | null,
+  errorMsg: string | null,
+  attempts: number,
+  requestId: string,
+  routeHashInfo?: RouteHashResult | null,
+) {
   const now = new Date().toISOString();
   const newAttempts = attempts + 1;
   let finalStatus: string = status;
@@ -351,8 +390,57 @@ async function completeJob(jobId: string, status: "completed" | "failed", result
               AND id IS NOT NULL AND status IN ('recording', 'processing')`,
       args: [now, jobId],
     });
+    // v2.38.1 (ревью F7): персист §10.0 routeHash/topologyHash в Session — то,
+    // что раньше делал только внешний мини-сервис через /api/worker/complete.
+    // Оживает вся группа §10.0–§10.6 (routeId-группировка, RouteAvg/Best/
+    // Worst/StdDev, TrafficPattern, DayOfWeek, RouteTrend, HotspotSegments).
+    // Подзапрос sessionId — как выше: поездковые джобы (sessionId NULL) — no-op.
+    // Ошибка записи — non-fatal (джоб уже завершён; как в complete-роуте).
+    if (routeHashInfo && routeHashInfo.routeHash) {
+      try {
+        await libsql.execute({
+          sql: `UPDATE Session SET routeHash = ?, topologyHash = ?, updatedAt = ?
+                WHERE id = (SELECT sessionId FROM TrafficJob WHERE id = ?) AND id IS NOT NULL`,
+          args: [routeHashInfo.routeHash, routeHashInfo.topologyHash, now, jobId],
+        });
+        inc("route_id_assignments_total", "routeId (routeHash) assignments via worker", 1);
+      } catch (err) {
+        logger.warn("routeHash persist failed (non-fatal)", {
+          requestId, jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
   logger.info("job completed", { requestId, jobId, status: finalStatus, attempts: newAttempts, provider: result?.provider, distanceM: result?.distanceM, durationSec: result?.durationSec });
+}
+
+// v2.38.1 (ревью F7): вычисление §10.0 routeHash/topologyHash для ДЖОБА и
+// запись хэшей в result-JSON — паритет формы протокола мини-сервиса
+// (processor.ts возвращал их полями RouteResult.routeHash/topologyHash,
+// /api/worker/complete персистил в Session). Поездковые джобы хэш не считают
+// (sessionId NULL — нет Session-строки для персиста, §10-группировка — по записям).
+// Активные границы (activeStart/activeEnd) готовит pollJobs каноническим окном
+// §4.11 (active-trip.ts) — тем же, что все метрики/UI.
+async function withRouteHash(
+  job: JobWithPoints,
+  result: RouteResult | null,
+): Promise<{ result: RouteResult | null; routeHashInfo: RouteHashResult | null }> {
+  if (job.sessionId == null || result == null) return { result, routeHashInfo: null };
+  const routeHashInfo = await computeRouteHash(
+    job.session.activeStart ?? null,
+    job.session.activeEnd ?? null,
+    result.segments,
+  );
+  if (!routeHashInfo.routeHash) return { result, routeHashInfo }; // нет активной поездки — parity: NULL
+  // Хэши внутрь result-JSON (форма мини-сервиса): canonicalGroupPolyline и
+  // админ-инструменты читают TrafficJob.result единообразно.
+  const enriched = {
+    ...result,
+    routeHash: routeHashInfo.routeHash,
+    topologyHash: routeHashInfo.topologyHash,
+  } as RouteResult;
+  return { result: enriched, routeHashInfo };
 }
 
 async function processOneJob(job: JobWithPoints, parentRequestId: string) {
@@ -436,7 +524,9 @@ async function processOneJob(job: JobWithPoints, parentRequestId: string) {
         routeAllLegs(),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error("routeRequest multi-leg timeout 45s")), MULTI_TIMEOUT_MS)),
       ]);
-      await completeJob(job.id, "completed", result, null, job.attempts, requestId);
+      // v2.38.1 (ревью F7): §10.0 routeHash/topologyHash для сессионного джоба
+      const applied = await withRouteHash(job, result);
+      await completeJob(job.id, "completed", applied.result, null, job.attempts, requestId, applied.routeHashInfo);
       return;
     }
     // Одиночная поездка: активные (leg) границы вместо сырых первой/последней точки.
@@ -448,7 +538,9 @@ async function processOneJob(job: JobWithPoints, parentRequestId: string) {
       routeRequest(routeStart.lat, routeStart.lon, routeEnd.lat, routeEnd.lon, departAtMs),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error("routeRequest timeout 15s")), 15000)),
     ]);
-    await completeJob(job.id, "completed", result, null, job.attempts, requestId);
+    // v2.38.1 (ревью F7): §10.0 routeHash/topologyHash для сессионного джоба
+    const applied = await withRouteHash(job, result);
+    await completeJob(job.id, "completed", applied.result, null, job.attempts, requestId, applied.routeHashInfo);
   } catch (err) {
     await completeJob(job.id, "failed", null, err instanceof Error ? err.message : String(err), job.attempts, requestId);
   }
@@ -547,19 +639,98 @@ async function pollOnce(rt: WorkerRuntime) {
 // v2.9.10: запись файла на диск убрана (download-роут регенерирует контент
 // на лету через generateExport). Worker только генерирует контент, считает
 // размер и обновляет метаданные в БД (fileSize, expiresAt).
+//
+// v2.38.1 (ревью F9): РЕКЛЕЙМ зависших running-джобов — зеркало механизма
+// TrafficJob R5/R6 (TTL + attempts → dead). До этого claim ставил
+// status='running' БЕЗ отметки времени: сбой процесса между claim и completed
+// (деплой с autoDeploy, OOM на 512 МБ) → джоб навсегда running → poll-роут
+// вечно отдаёт 202 — P1-8 «вечные 202» вернулся третьим путём.
+//
+// МЕХАНИКА: в ExportJob НЕТ колонки lockedAt (prisma/schema.prisma — только
+// lockedBy/createdAt/completedAt), а даты создаются при claim-е. Помечать
+// время блокировки в СВОЕЙ таблице _ExportJobLock (jobId → lockedAt, ISO):
+//   • паттерн ensure-on-boot — как _AlertState в alerts.ts: CREATE TABLE IF
+//     NOT EXISTS при первом использовании, НЕ через prisma-схему;
+//   • без ALTER TABLE ExportJob: DDL над prisma-управляемой таблицей — дрейф
+//     (находка F26), и операция не из «санкционированного» набора шлюза D1;
+//   • изоляция порядка: СНАЧАЛА строка блокировки (INSERT OR REPLACE…SELECT
+//     LIMIT 2), ЗАТЕМ claim «pending + свежая блокировка» (UPDATE…RETURNING).
+//     Смерть процесса между стейтментами не оставляет running-без-блокировки:
+//     pending с осиротевшей блокировкой перезахватывается следующим циклом
+//     (OR REPLACE), а running с блокировкой старше TTL — реклеймится.
+const EXPORT_LOCK_TTL_MS = 10 * 60_000; // = STALE_RECORDING_TTL_MS жнеца: деплой/рестарт укладывается
+let exportLockTableEnsured = false;
+
+async function ensureExportLockTable(): Promise<void> {
+  if (exportLockTableEnsured) return;
+  // Идемпотентно; сбой — next-попытка на следующем цикле (реклейм просто не
+  // сработает до появления таблицы, старое поведение — не хуже сегодняшнего).
+  await libsql.execute(
+    "CREATE TABLE IF NOT EXISTS _ExportJobLock (jobId TEXT PRIMARY KEY, lockedAt TEXT NOT NULL)"
+  );
+  exportLockTableEnsured = true;
+}
+
+/** Реклейм ExportJob: running дольше TTL → pending (attempts+1), после 3-й
+ *  попытки — dead (зеркало TrafficJob: 60 с / dead после 10 → здесь 10 мин / dead после 3). */
+async function reclaimStuckExportJobs(): Promise<number> {
+  try {
+    await ensureExportLockTable();
+    const cutoff = new Date(Date.now() - EXPORT_LOCK_TTL_MS).toISOString();
+    const res = await libsql.execute({
+      sql: `UPDATE ExportJob
+            SET status = CASE WHEN attempts >= 2 THEN 'dead' ELSE 'pending' END,
+                attempts = attempts + 1,
+                error = 'reclaimed: stuck running > 10 min (F9)',
+                lockedBy = NULL
+            WHERE status = 'running'
+              AND id IN (SELECT jobId FROM _ExportJobLock WHERE lockedAt < ?)`,
+      args: [cutoff],
+    });
+    // Чистка блокировок джобов, которые больше не running (completed/dead/
+    // реклеймнутые) — таблица не растёт бесконечно.
+    await libsql.execute({
+      sql: `DELETE FROM _ExportJobLock WHERE jobId NOT IN (SELECT id FROM ExportJob WHERE status = 'running')`,
+      args: [],
+    });
+    const n = Number(res.rowsAffected ?? 0);
+    if (n > 0) inc("export_reclaimed_total", "Export jobs reclaimed from stuck running", n);
+    return n;
+  } catch (err) {
+    // Реклейм — страховка: сбой не должен ломать poll-цикл (лучшая деградация —
+    // прежнее поведение без реклейма).
+    logger.warn("export reclaim failed (non-fatal)", { error: err instanceof Error ? err.message : String(err) });
+    return 0;
+  }
+}
+
 async function pollExportJobs(): Promise<void> {
   const now = new Date().toISOString();
+  // v2.38.1 (ревью F9): сначала реклейм зависших running (см. блок выше)
+  const reclaimed = await reclaimStuckExportJobs();
+  if (reclaimed > 0) {
+    logger.warn("reclaimed stuck export jobs", { count: reclaimed, ttlMs: EXPORT_LOCK_TTL_MS });
+  }
   // v2.16.0 (R1, КРИТИЧНО): в таблице ExportJob НЕТ колонки updatedAt (см.
-  // prisma/schema.prisma — только createdAt/completedAt). Все три SQL ниже
-  // писали `updatedAt = ?` → «no such column» → claim НАВСЕГДА падал →
-  // экспорт-джобы (>5000 точек) застревали pending до бесконечности — те самые
-  // «вечные 202» из P1-8, только теперь по другой причине. Колонка убрана
-  // из всех трёх statements (даты меняются через completedAt).
+  // prisma/schema.prisma — только createdAt/completedAt). Все SQL ниже
+  // НЕ пишут updatedAt (даты меняются через completedAt) — иначе «no such
+  // column» → claim падал навсегда → «вечные 202» (P1-8).
+  await ensureExportLockTable();
+  // Шаг 1 (F9): резервируем строки блокировки под будущий claim — INSERT
+  // OR REPLACE перезатирает осиротевшие блокировки прошлых циклов.
+  await libsql.execute({
+    sql: `INSERT OR REPLACE INTO _ExportJobLock (jobId, lockedAt)
+          SELECT id, ? FROM ExportJob WHERE status = 'pending' ORDER BY createdAt ASC LIMIT 2`,
+    args: [now],
+  });
+  // Шаг 2 (F9): claim только ТОГО, что мы только что заблокировали и что ещё
+  // pending (WHERE lockedAt = ? — временная метка этого цикла; poll-циклы
+  // строго последовательны в одном процессе, коллизий меток нет).
   const claim = await libsql.execute({
-    sql: `UPDATE ExportJob SET status = 'running'
-          WHERE id IN (SELECT id FROM ExportJob WHERE status = 'pending' ORDER BY createdAt ASC LIMIT 2)
+    sql: `UPDATE ExportJob SET status = 'running', lockedBy = ?
+          WHERE status = 'pending' AND id IN (SELECT jobId FROM _ExportJobLock WHERE lockedAt = ?)
           RETURNING id, sessionId, format, attempts`,
-    args: [],
+    args: [env().WORKER_ID, now],
   });
   if (claim.rows.length === 0) return;
 
@@ -601,6 +772,8 @@ async function pollExportJobs(): Promise<void> {
       });
       inc("export_completed_total", "Exports completed", 1, format);
       logger.info("export job completed", { jobId, sessionId, format, bytes: Buffer.byteLength(content) });
+      // v2.38.1 (F9): блокировка снята — строка _ExportJobLock больше не нужна
+      await libsql.execute({ sql: `DELETE FROM _ExportJobLock WHERE jobId = ?`, args: [jobId] }).catch(() => {});
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const newAttempts = attempts + 1;
@@ -609,6 +782,9 @@ async function pollExportJobs(): Promise<void> {
         sql: `UPDATE ExportJob SET status = ?, attempts = ?, error = ? WHERE id = ?`,
         args: [nextStatus, newAttempts, msg.slice(0, 500), jobId],
       });
+      // v2.38.1 (F9): блокировка снята и в неудачной ветви (джоб вернулся в
+      // pending/dead — реклейм-кандидатом быть не должен)
+      await libsql.execute({ sql: `DELETE FROM _ExportJobLock WHERE jobId = ?`, args: [jobId] }).catch(() => {});
       inc("export_failed_total", "Export jobs failed", 1);
       logger.error("export job failed", { jobId, error: msg, attempts: newAttempts });
     }

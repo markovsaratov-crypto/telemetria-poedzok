@@ -2,6 +2,10 @@
 // Группировка концептуально одинаковых поездок по детерминированному routeHash (§10.0),
 // агрегаты по ActiveDuration (§4.11), фильтр SessionReliability ≥ 0.6 (§10.1),
 // Theil-Sen-тренд (§10.5), HotspotSegments P75 < 0.5 (§10.6).
+// v2.38.1 (ревью F16/F19): производительность — чанковый добор точек (чанки по 8,
+// конкурентность 4), caps на IN-списки ≤90, прореживание полилайна/точек + grid-индекс
+// в computeGroupHotspots, LRU-кэш канонических полилайнов (см. локальные комментарии).
+import pLimit from "p-limit";
 import { libsql } from "./db";
 import { sessionScopeSql, type DataScope } from "./scope";
 import { pluralRu } from "./format"; // v2.16.0 (D-12): единая плюрализация
@@ -49,6 +53,52 @@ export interface RouteGroupInfo {
 }
 
 const RELIABILITY_FLOOR = 0.6; // §10.1: в агрегат входят только сессии с SessionReliability ≥ 0.6
+
+// ——— v2.38.1 (ревью F19): константы чанков/лимитов ———
+// IN-списки D1 ≤100 параметров → чанки по 90 (запас); точки — мелкими чанками
+// по 8 id (паттерн batch-points.ts: ~4–5k строк на прод-данных на чанк);
+// конкурентность 4 — 8 групп heavy-segments × 4 запроса не выжигают пул шлюза.
+const ID_CHUNK = 90;
+const POINTS_CHUNK = 8;
+const POINTS_CONCURRENCY = 4;
+
+/** Точки сессий одним набором чанков (F19): map sessionId → точки (timestamp ASC).
+ *  Каждая сессия входит ровно в один чанк → хронология внутри сессии сохраняется
+ *  (тот же контракт, что loadSessionsForBatch из batch-points.ts). */
+async function loadGroupPointsChunked(sessionIds: string[]): Promise<Map<string, MethodologyPoint[]>> {
+  const out = new Map<string, MethodologyPoint[]>();
+  if (sessionIds.length === 0) return out;
+  const limit = pLimit(POINTS_CONCURRENCY);
+  const chunks: string[][] = [];
+  for (let i = 0; i < sessionIds.length; i += POINTS_CHUNK) chunks.push(sessionIds.slice(i, i + POINTS_CHUNK));
+  await Promise.all(
+    chunks.map((chunk) =>
+      limit(async () => {
+        const ph = chunk.map(() => "?").join(", ");
+        const ptsRes = await libsql.execute({
+          sql: `SELECT sessionId, lat, lon, speed, altitude, accuracy, bearing, timestamp
+                FROM GpsPoint WHERE sessionId IN (${ph}) ORDER BY timestamp ASC`,
+          args: chunk as never[],
+        });
+        for (const p of ptsRes.rows as Record<string, unknown>[]) {
+          const sid = String(p.sessionId);
+          const list = out.get(sid) ?? [];
+          list.push({
+            lat: Number(p.lat),
+            lon: Number(p.lon),
+            speed: p.speed == null ? null : Number(p.speed),
+            altitude: p.altitude == null ? null : Number(p.altitude),
+            accuracy: p.accuracy == null ? null : Number(p.accuracy),
+            bearing: p.bearing == null ? null : Number(p.bearing),
+            timestamp: Number(p.timestamp),
+          });
+          out.set(sid, list);
+        }
+      })
+    )
+  );
+  return out;
+}
 
 // v2.12.0 (D-8): период-фильтр для route-агрегатов. «Месяца» больше нет —
 // 4 периода согласованы с PeriodKey на клиенте.
@@ -112,26 +162,18 @@ export async function loadGroupSessions(
   });
   if (sessRes.rows.length === 0) return [];
 
+  // v2.38.1 (ревью F19): точки — ОДНИМ набором чанков (по 8 id, конкурентность 4)
+  // вместо N+1 последовательных SELECT (commuter-маршрут за год = сотни сессий
+  // × ~200 мс RTT к D1-шлюзу = минуты; анти-паттерн, побеждённый batch-points.ts).
+  // CPU-конвейер (ActiveTrip/SessionReliability) по каждой сессии — как раньше.
+  const sessionIds = (sessRes.rows as Record<string, unknown>[]).map((s) => String(s.id));
+  const pointsBySession = await loadGroupPointsChunked(sessionIds);
+
   const out: GroupSession[] = [];
   for (const row of sessRes.rows) {
     const s = row as unknown as Record<string, unknown>;
     const sessionId = String(s.id);
-    const ptsRes = await libsql.execute({
-      sql: "SELECT lat, lon, speed, altitude, accuracy, bearing, timestamp FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC",
-      args: [sessionId],
-    });
-    const points: MethodologyPoint[] = ptsRes.rows.map((r) => {
-      const p = r as unknown as Record<string, unknown>;
-      return {
-        lat: Number(p.lat),
-        lon: Number(p.lon),
-        speed: p.speed == null ? null : Number(p.speed),
-        altitude: p.altitude == null ? null : Number(p.altitude),
-        accuracy: p.accuracy == null ? null : Number(p.accuracy),
-        bearing: p.bearing == null ? null : Number(p.bearing),
-        timestamp: Number(p.timestamp),
-      };
-    });
+    const points: MethodologyPoint[] = pointsBySession.get(sessionId) ?? [];
     if (points.length < 2) continue;
 
     const motion = computeMovingTime(points);
@@ -262,27 +304,58 @@ const PLAN_BASELINE_KMH = 40; // §3.2: базовая линия гаверси
 
 // Канонический полилайн группы: из последнего completed TrafficJob (сегменты маршрута),
 // fallback — активная часть первой сессии (прорежено до ~40 точек).
+// v2.38.1 (ревью F19): опциональный cacheKey (routeHash) — LRU-кэш: SELECT result
+// + JSON.parse — самый тяжёлый шаг §10.6, а heavy-segments зовёт его ×8 групп
+// каждые N секунд; ключ включает sessionCount (инвалидация при изменении состава
+// группы), TTL страхует от дрейфа данных между запросами. Маленький (16 записей).
+const POLYLINE_CACHE_MAX = 16;
+const POLYLINE_CACHE_TTL_MS = 60_000;
+const polylineCache = new Map<string, { polyline: { lat: number; lon: number }[]; planDurationSec: number | null; ts: number }>();
+
 export async function canonicalGroupPolyline(
-  sessions: GroupSession[]
+  sessions: GroupSession[],
+  cacheKey?: string
 ): Promise<{ polyline: { lat: number; lon: number }[]; planDurationSec: number | null }> {
+  // v2.38.1 (F19): кэш — только с явным ключом (иначе поведение как раньше)
+  if (cacheKey) {
+    const key = `${cacheKey}:${sessions.length}`;
+    const hit = polylineCache.get(key);
+    if (hit && Date.now() - hit.ts < POLYLINE_CACHE_TTL_MS) {
+      // LRU-обновление позиции (Map хранит порядок вставки)
+      polylineCache.delete(key);
+      polylineCache.set(key, hit);
+      return { polyline: hit.polyline, planDurationSec: hit.planDurationSec };
+    }
+  }
   let polyline: { lat: number; lon: number }[] = [];
   let planDurationSec: number | null = null;
   if (sessions.length > 0) {
     const ids = sessions.map((s) => s.sessionId);
-    const placeholders = ids.map(() => "?").join(",");
-    const jobRes = await libsql.execute({
-      sql: `SELECT result FROM TrafficJob WHERE status = 'completed' AND result IS NOT NULL AND sessionId IN (${placeholders}) ORDER BY updatedAt DESC LIMIT 1`,
-      args: ids as never[],
-    });
-    if (jobRes.rows.length > 0) {
+    // v2.38.1 (ревью F19): IN-список чанками ≤90 (лимит параметров D1 ≤100:
+    // >100 сессий группы → 500 всего роута). «Последний completed» выбирается
+    // по updatedAt МАКСИМУМОМ по всем чанкам (прежний LIMIT 1 + глобальный
+    // ORDER BY на >100 id и не исполнялся бы вовсе).
+    let bestRow: { result: string | null; updatedAt: string } | null = null;
+    for (let i = 0; i < ids.length; i += ID_CHUNK) {
+      const chunk = ids.slice(i, i + ID_CHUNK);
+      const ph = chunk.map(() => "?").join(",");
+      const jobRes = await libsql.execute({
+        sql: `SELECT result, updatedAt FROM TrafficJob WHERE status = 'completed' AND result IS NOT NULL AND sessionId IN (${ph}) ORDER BY updatedAt DESC`,
+        args: chunk as never[],
+      });
+      for (const r of jobRes.rows as Record<string, unknown>[]) {
+        const updatedAt = String(r.updatedAt ?? "");
+        if (bestRow == null || updatedAt > bestRow.updatedAt) {
+          bestRow = { result: r.result == null ? null : String(r.result), updatedAt };
+        }
+      }
+    }
+    if (bestRow != null && bestRow.result != null) {
       try {
-        // v2.18.0 (P1): парсим ПОЛЕ result, а не объект Row. `String(row)` для
+        // v2.18.0 (P1): парсим ПОЛЕ result, а не объект Row (`String(row)` для
         // объекта libsql-строки = "[object Object]" → JSON.parse всегда бросал
-        // → catch → канонический полилайн ВСЕГДА брался из fallback-геометрии
-        // первой сессии: §10.6-дизайн (TrafficJob-сегменты + планная скорость по
-        // сегментам) был мёртвым кодом с момента написания.
-        const raw = (jobRes.rows[0] as Record<string, unknown>).result;
-        const parsed = JSON.parse(String(raw));
+        // → §10.6-дизайн TrafficJob-сегментов был мёртвым кодом до v2.18).
+        const parsed = JSON.parse(bestRow.result);
         if (Array.isArray(parsed.segments)) {
           polyline = parsed.segments.map((sg: { lat: number; lon: number }) => ({ lat: Number(sg.lat), lon: Number(sg.lon) }));
         }
@@ -305,6 +378,16 @@ export async function canonicalGroupPolyline(
     if (polyline.length > 40) {
       const step = Math.ceil(polyline.length / 40);
       polyline = polyline.filter((_, i) => i % step === 0 || i === polyline.length - 1);
+    }
+  }
+  // v2.38.1 (F19): запись в LRU-кэш (только с ключом)
+  if (cacheKey) {
+    const key = `${cacheKey}:${sessions.length}`;
+    polylineCache.set(key, { polyline, planDurationSec, ts: Date.now() });
+    while (polylineCache.size > POLYLINE_CACHE_MAX) {
+      const oldest = polylineCache.keys().next().value;
+      if (oldest == null) break;
+      polylineCache.delete(oldest);
     }
   }
   return { polyline, planDurationSec };
@@ -339,13 +422,73 @@ export interface HotspotWithGeometry extends HotspotSegment {
   b: { lat: number; lon: number } | null;
 }
 
+// ——— v2.38.1 (ревью F16): производительность §10.6 ———
+// Проблема: на каждую GPS-точку — ЛИНЕЙНЫЙ скан всех сегментов полилайна 2ГИС
+// (тысячи координат ~ каждые 10 м), 3 гаверсинуса на пару: 5000 точек ×
+// 2000 сегментов ≈ 30М триг-вызовов ≈ десятки секунд блокировки event loop на
+// 0.1-CPU Render — инжест в том же процессе замирал, api_latency_p95 firing.
+// Решение (результаты ПРИБЛИЖИТЕЛЬНО равны, см. ниже):
+//   • полилайн прореживается равномерным шагом ~50 м (сегментов в ~5 раз меньше;
+//     снап-радиус 55 м больше шага — точность привязки сохраняется);
+//   • точки сессий прореживаются до ≤1 Гц (SensorLogger и так 1 Гц; режутся
+//     только дубли офлайн-буфера SensorLogger);
+//   • grid-индекс ~111×64 м: клетка → индексы сегментов (концы + середина);
+//     точка проверяет свою клетку + 8 соседей. Инвариант: SNAP_RADIUS(55) <
+//     минимальной стороны клетки (64 м по долготе на широте 55°) → любой
+//     сегмент с вершиной ≤ 55 м гарантированно в 9 клетках точки → ФИЛЬТР НЕ
+//     МЕНЯЕТ результат линейного скана (та же метрика min(a,b,mid));
+//   • общий бюджет точек на группу (MAX_HOTSPOT_POINTS): экстремально большие
+//     группы считают самые свежие сессии (хотспоты — витрина «здесь медленно
+//     сейчас», свежесть важнее полноты истории).
+const HOTSPOT_POLYLINE_STEP_M = 50;
+const HOTSPOT_MAX_POINTS = 20_000;
+const GRID_CELL_DEG = 0.001; // ~111×64 м — инвариант SNAP_RADIUS_M < сторона клетки
+
+/** Равномерное прореживание полилайна: точка оставляется, когда удалилась
+ *  ≥ stepM от последней оставленной; первая/последняя — всегда. */
+function downsamplePolyline(polyline: { lat: number; lon: number }[], stepM: number): { lat: number; lon: number }[] {
+  if (polyline.length <= 2) return polyline;
+  const out: { lat: number; lon: number }[] = [polyline[0]];
+  let last = polyline[0];
+  for (let i = 1; i < polyline.length - 1; i++) {
+    if (haversineM(last.lat, last.lon, polyline[i].lat, polyline[i].lon) >= stepM) {
+      out.push(polyline[i]);
+      last = polyline[i];
+    }
+  }
+  out.push(polyline[polyline.length - 1]);
+  return out;
+}
+
+/** Прореживание точек до ≤1 Гц (первая точка каждой секундной корзины; вход — timestamp ASC). */
+function thinTo1Hz<T extends { timestamp: number }>(points: T[]): T[] {
+  if (points.length <= 2) return points;
+  const out: T[] = [points[0]];
+  let lastTs = points[0].timestamp;
+  for (let i = 1; i < points.length; i++) {
+    if (points[i].timestamp - lastTs >= 1000) {
+      out.push(points[i]);
+      lastTs = points[i].timestamp;
+    }
+  }
+  return out;
+}
+
+/** Ключ grid-клетки ~100 м (lat/lon независимо). */
+function cellKey(lat: number, lon: number): string {
+  return `${Math.floor(lat / GRID_CELL_DEG)},${Math.floor(lon / GRID_CELL_DEG)}`;
+}
+
 export async function computeGroupHotspots(routeHash: string, sessions: GroupSession[]): Promise<{
   hotspots: HotspotWithGeometry[];
   totalSegments: number;
   polyline: { lat: number; lon: number }[];
 }> {
-  // 1. Канонический полилайн — из последнего completed TrafficJob сессий группы
-  const { polyline, planDurationSec } = await canonicalGroupPolyline(sessions);
+  // 1. Канонический полилайн — из последнего completed TrafficJob сессий группы.
+  // v2.38.1 (F19): LRU-кэш по routeHash (см. canonicalGroupPolyline);
+  // v2.38.1 (F16): равномерное прореживание ~50 м (сегментов в ~5 раз меньше).
+  const { polyline: rawPolyline, planDurationSec } = await canonicalGroupPolyline(sessions, routeHash);
+  const polyline = downsamplePolyline(rawPolyline, HOTSPOT_POLYLINE_STEP_M);
   if (polyline.length < 2) return { hotspots: [], totalSegments: 0, polyline: [] };
 
   // 2. Сегменты канонического полилайна: дистанция + плановая скорость
@@ -363,25 +506,68 @@ export async function computeGroupHotspots(routeHash: string, sessions: GroupSes
     for (const sg of segs) sg.planSpeedKmh = Math.max(5, avgPlanKmh);
   }
 
+  // v2.38.1 (F16): grid-индекс — клетка → индексы сегментов (концы + середина).
+  // Сегменты после прореживания ~50 м → концы+середина покрывают клетки сегмента.
+  const grid = new Map<string, number[]>();
+  segs.forEach((sg, si) => {
+    const mid = { lat: (sg.a.lat + sg.b.lat) / 2, lon: (sg.a.lon + sg.b.lon) / 2 };
+    const keys = new Set([cellKey(sg.a.lat, sg.a.lon), cellKey(sg.b.lat, sg.b.lon), cellKey(mid.lat, mid.lon)]);
+    for (const key of keys) {
+      const arr = grid.get(key) || [];
+      arr.push(si);
+      grid.set(key, arr);
+    }
+  });
+  // Клетки-соседи точки: своя + 8 вокруг (±1 по каждой оси). Кандидаты —
+  // ОТСОРТИРОВАННЫЕ по возрастанию индекса и дедуплицированные: соседние
+  // сегменты делят общую вершину → у точки бывают РАВНЫЕ метрики дистанции
+  // (тай) — линейный скан (возрастание + строгий «<») разрешает тай в меньший
+  // индекс; тот же порядок здесь делает результат побайтово идентичным.
+  const neighborhood = (lat: number, lon: number): number[] => {
+    const cLat = Math.floor(lat / GRID_CELL_DEG);
+    const cLon = Math.floor(lon / GRID_CELL_DEG);
+    const out = new Set<number>();
+    for (let dLat = -1; dLat <= 1; dLat++) {
+      for (let dLon = -1; dLon <= 1; dLon++) {
+        const arr = grid.get(`${cLat + dLat},${cLon + dLon}`);
+        if (arr) for (const si of arr) out.add(si);
+      }
+    }
+    return [...out].sort((a, b) => a - b);
+  };
+
+  // v2.38.1 (F19): точки всех сессий — чанковым добором (как loadGroupSessions),
+  // а НЕ N+1 последовательных SELECT (тот же анти-паттерн, ×N сессий).
+  const pointsBySession = await loadGroupPointsChunked(sessions.map((s) => s.sessionId));
+
   // 3. Фактические скорости: GPS-точки сессий → ближайшие сегменты
   const severityHist = new Map<string, number[]>();
-  for (const s of sessions) {
-    const ptsRes = await libsql.execute({
-      sql: "SELECT lat, lon, speed, timestamp FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC",
-      args: [s.sessionId],
-    });
-    const points = ptsRes.rows.map((r) => {
-      const p = r as unknown as Record<string, unknown>;
-      return { lat: Number(p.lat), lon: Number(p.lon), speed: p.speed == null ? null : Number(p.speed), timestamp: Number(p.timestamp) };
-    });
+  let pointsBudget = HOTSPOT_MAX_POINTS; // v2.38.1 (F16): общий кап точек на группу
+  // Бюджет тратится от СВЕЖИХ к старым (sessions — startTime ASC): хотспоты —
+  // витрина «здесь медленно сейчас», свежесть важнее полноты истории.
+  for (let si = sessions.length - 1; si >= 0; si--) {
+    const s = sessions[si];
+    if (pointsBudget <= 0) break;
+    const points = thinTo1Hz(
+      (pointsBySession.get(s.sessionId) ?? []).map((p) => ({
+        lat: p.lat,
+        lon: p.lon,
+        speed: p.speed,
+        timestamp: p.timestamp,
+      }))
+    );
     if (points.length < 2) continue;
+    pointsBudget -= points.length;
 
-    // Раскладываем точки по сегментам (ближайший в радиусе снапа)
+    // Раскладываем точки по сегментам (ближайший в радиусе снапа).
+    // v2.38.1 (F16): кандидаты — только сегменты 9 соседних клеток (инвариант
+    // см. выше: результат идентичен линейному скану при том же наборе сегментов);
+    // метрика расстояния ДОСЛОВНО прежняя (min из a/b/mid).
     const segPoints = new Map<number, { lat: number; lon: number; timestamp: number }[]>();
     for (const p of points) {
       let bestIdx = -1;
       let bestDist = Infinity;
-      for (let si = 0; si < segs.length; si++) {
+      for (const si of neighborhood(p.lat, p.lon)) {
         const sg = segs[si];
         // расстояние точки до сегмента (приближение: до середины + до концов)
         const mid = { lat: (sg.a.lat + sg.b.lat) / 2, lon: (sg.a.lon + sg.b.lon) / 2 };

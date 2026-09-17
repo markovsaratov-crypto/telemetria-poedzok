@@ -20,6 +20,11 @@ export const dynamic = "force-dynamic";
 
 const MAX_GROUPS = 8; // защита от деградации при росте числа маршрутов
 const TOP_PER_GROUP = 3;
+// v2.38.1 (ревью F16): лимит сессий на группу в хотспот-расчёте — 50 САМЫХ
+// СВЕЖИХ (loadGroupSessions возвращает startTime ASC → slice(-50)). Полный год
+// commuter-группы (сотни сессий) не меняет картину «тяжёлых участков сейчас»,
+// но умножал и CPU (хотспот-конвейер), и число чанков к D1-шлюзу ×8 групп.
+const HOTSPOT_SESSION_LIMIT = 50;
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -43,7 +48,9 @@ export async function GET(request: NextRequest) {
     // цикл с двумя await на группу, ~1 с × 8 групп).
     const groupResults = await Promise.all(
       groupsInfo.slice(0, MAX_GROUPS).map(async (g) => {
-        const sessions = await loadGroupSessions(g.routeHash, sinceIso, scope);
+        // v2.38.1 (F16): в хотспот-расчёт — только свежие HOTSPOT_SESSION_LIMIT
+        // сессий группы (см. константу выше; sessionCount в ответе — по всей группе)
+        const sessions = (await loadGroupSessions(g.routeHash, sinceIso, scope)).slice(-HOTSPOT_SESSION_LIMIT);
         if (sessions.length === 0) return null;
         const { hotspots, totalSegments, polyline } = await computeGroupHotspots(g.routeHash, sessions);
         if (totalSegments === 0) return null;

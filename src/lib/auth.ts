@@ -20,6 +20,8 @@ interface OwnerPayload {
   sub: "owner";
   iat: number;
   exp: number;
+  // v2.38.2 (ревью F29): отпечаток пароля владельца — см. pwdFingerprint().
+  pwdFp: string;
 }
 interface UserPayload {
   userId: string;
@@ -27,6 +29,8 @@ interface UserPayload {
   role: string;
   iat: number;
   exp: number;
+  // v2.38.2 (ревью F29): отпечаток passwordHash пользователя — см. pwdFingerprint().
+  pwdFp: string;
 }
 type CookiePayload = OwnerPayload | UserPayload;
 
@@ -61,9 +65,37 @@ function safeEqual(a: string, b: string): boolean {
   return nodeTimingSafeEqual(bufA, bufB);
 }
 
+// === v2.38.2 (ревью F29): отпечаток пароля в cookie — отзыв сессий ===
+// Проблема: сессия — stateless HMAC-cookie; украденная cookie валидна до exp
+// (24 ч), а sliding-renewal в /api/auth/me продлевает её бесконечно. Удаление
+// пользователя убивало сессию (findById → null), но СМЕНА ПАРОЛЯ — нет: претендующий
+// на аккаунт с копией cookie сохранял доступ бессрочно. Схему/таблицы не трогаем:
+// в payload пишется pwdFp — первые 16 hex-символов SHA-256 от ключевого
+// префикса SESSION_SECRET + секрета; при каждой проверке отпечаток
+// пересчитывается по СВЕЖЕЙ строке (User.passwordHash / env.LOGIN_PASSWORD) и
+// расхождение → 401. Смена пароля (сброс админом, правка БД) автоматически
+// убивает ВСЕ выданные ранее cookie, включая украденные. Ключ SESSION_SECRET
+// в хеше — чтобы по украденной cookie нельзя было офлайн перебирать слабый
+// пароль владельца (проверка догадки требует SESSION_SECRET).
+// Cookie, выданные ДО v2.38.2, поля pwdFp не имеют → отбрасываются: один
+// разовый разлогин всех при деплое (осознанный trade-off, обратная
+// совместимость публичного API не затронута).
+async function pwdFingerprint(kind: "user" | "owner", secretMaterial: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(`pwdFp:${env().SESSION_SECRET}:${kind}:${secretMaterial}`)
+  );
+  return Buffer.from(new Uint8Array(digest)).toString("hex").slice(0, 16);
+}
+
 // === Multi-user: bcrypt password helpers ===
 export async function hashPassword(plain: string): Promise<string> {
-  return bcrypt.hash(plain, 10);
+  // v2.38.2 (ревью F28): cost 10 → 12 (рекомендация 2026 для bcrypt ≥ 12;
+  // bcryptjs pure-JS ≈ 250–300 мс на cost 12 — осознанно против брутфорса
+  // при открытой регистрации). Существующие хеши НЕ ломаются: bcrypt
+  // хранит cost в префиксе «$2a$10$…» и верифицируется им же (verifyPasswordHash
+  // читает cost из хеша) — перехеширование не нужно, новые пароли получают 12.
+  return bcrypt.hash(plain, 12);
 }
 
 export async function verifyPasswordHash(plain: string, hash: string): Promise<boolean> {
@@ -103,6 +135,9 @@ export async function issueSessionCookie(): Promise<{
     sub: "owner",
     iat: now,
     exp: now + COOKIE_TTL_SEC,
+    // v2.38.2 (ревью F29): отпечаток LOGIN_PASSWORD — смена пароля владельца
+    // инвалидирует все owner-cookie (проверяется в verifySessionCookieFromRequest)
+    pwdFp: await pwdFingerprint("owner", env().LOGIN_PASSWORD),
   };
   const payloadStr = b64urlEncode(JSON.stringify(payload));
   const sig = await hmacSign(payloadStr);
@@ -129,6 +164,10 @@ export async function issueUserCookie(user: UserRow): Promise<{
     role: user.role,
     iat: now,
     exp: now + COOKIE_TTL_SEC,
+    // v2.38.2 (ревью F29): отпечаток passwordHash на момент ВЫДАЧИ; при каждой
+    // проверке пересчитывается по свежей строке User — смена пароля/сброс
+    // админом убивает все ранее выданные cookie этого пользователя.
+    pwdFp: await pwdFingerprint("user", user.passwordHash),
   };
   const payloadStr = b64urlEncode(JSON.stringify(payload));
   const sig = await hmacSign(payloadStr);
@@ -173,11 +212,24 @@ export async function verifySessionCookieFromRequest(
   if ("userId" in payload) {
     const user = await userDb.findById(payload.userId);
     if (!user) return { ok: false };
+    // v2.38.2 (ревью F29): сверка отпечатка пароля с СВЕЖЕЙ строкой User —
+    // смена passwordHash после выдачи cookie (сброс пароля, правка БД)
+    // инвалидирует сессию, включая украденные копии cookie. Cookie без pwdFp
+    // (выданные до v2.38.2) отбрасываются — один разовый разлогин на деплое.
+    if (typeof payload.pwdFp !== "string") return { ok: false };
+    const expectedFp = await pwdFingerprint("user", user.passwordHash);
+    if (!safeEqual(payload.pwdFp, expectedFp)) return { ok: false };
     return { ok: true, payload, needsRenewal, user };
   }
 
   // Legacy owner payload
   if (payload.sub !== "owner") return { ok: false };
+  // v2.38.2 (ревью F29): тот же механизм для owner-cookie — отпечаток
+  // LOGIN_PASSWORD, пересчитанный при проверке. Смена пароля владельца (env)
+  // + редеплой убивает все украденные owner-cookie.
+  if (typeof payload.pwdFp !== "string") return { ok: false };
+  const expectedOwnerFp = await pwdFingerprint("owner", env().LOGIN_PASSWORD);
+  if (!safeEqual(payload.pwdFp, expectedOwnerFp)) return { ok: false };
   return { ok: true, payload, needsRenewal };
 }
 

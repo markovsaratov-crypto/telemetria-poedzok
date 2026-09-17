@@ -61,15 +61,27 @@ export function setSecurityHeaders(response: NextResponse) {
   // else. frame-ancestors 'none' = clickjacking hard-block.
   // v2.29.0: *.cartocdn.com удалён — CARTO-тайлы больше не используются
   // (провайдер требует API-ключ с авг 2026).
+  //
+  // v2.38.2 (ревью F27, partial): 'unsafe-eval' удалён — в коде нет ни eval,
+  // ни new Function (проверено ревью), прод-бандлу он не нужен. Добавлены
+  // object-src 'none' (плагины/<object>) и base-uri 'self' (анти-<base href>
+  // инъекция). 'unsafe-inline' в script-src ОСТАЁТСЯ осознанно (honest trade-off):
+  // Next.js App Router гидрируется инлайн-скриптами (self.__next_f.push с RSC-
+  // payload), которые не имеют nonce — полноценный nonce-CSP требует прокидывать
+  // nonce в request-headers в src/proxy.ts (вне зоны этого фикса) и перестройки
+  // гидрации; честно фиксируем: XSS-фильтрация по CSP сегодня частичная,
+  // основной барьер — React-escaping + nosniff. Полный план — ревью F27.
   response.headers.set(
     "Content-Security-Policy",
     [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+      "script-src 'self' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
       "img-src 'self' data: https:",
       "connect-src 'self' https://*.tile.openstreetmap.org https://*.tile.opentopomap.org https://server.arcgisonline.com",
       "font-src 'self' https://fonts.gstatic.com",
+      "object-src 'none'",
+      "base-uri 'self'",
       "frame-ancestors 'none'",
     ].join("; ")
   );
@@ -102,7 +114,39 @@ export function getClientIP(request: NextRequest): string {
       return parts[idx];
     }
   }
-  const xreal = request.headers.get("x-real-ip");
-  if (xreal) return xreal;
-  return request.headers.get("x-client-ip") || "unknown";
+  // v2.38.2 (ревью F35): фолбэки на x-real-ip / x-client-ip УДАЛЕНЫ — оба
+  // заголовка ставит (или подделывает) сам КЛИЕНТ: при отсутствии XFF лимиты
+  // ключились бы по полностью контролируемому отправителем значению —
+  // синтетические уникальные IP = обход rate-limit. Без XFF честный
+  // консервативный ответ "unknown" (общий бакет: fail-closed для лимитов,
+  // спуфинг невозможен). Доверенный x-real-ip требует списка прокси в конфиге —
+  // такого списка нет, поэтому заголовок не используется вовсе.
+  return "unknown";
+}
+
+// v2.38.2 (ревью F31): маскировка PII в логах. Email/IP пользователей —
+// персональные данные (GDPR-линза ревью): в JSON-логах Render адреса неудачных
+// логинов и IP регистраций остаются навсегда. Логи НЕ удаляем (разбор
+// brute-force-инцидентов важнее), но пишем замаскированными.
+
+// Email → «a***@d***.ru»: локальная часть и домен по 1-му символу + tld.
+export function maskEmail(email: string): string {
+  const at = email.indexOf("@");
+  if (at <= 0) return "…";
+  const local = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  const dot = domain.lastIndexOf(".");
+  const dom = dot > 0 ? domain.slice(0, dot) : domain;
+  const tld = dot > 0 ? domain.slice(dot) : "";
+  return `${local.slice(0, 1)}***@${dom.slice(0, 1)}***${tld}`;
+}
+
+// IP → «203.0.113.x» (IPv4, /24 достаточно для разбора инцидентов) или
+// усечённый префикс для IPv6/прочего.
+export function maskIp(ip: string): string {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+    const o = ip.split(".");
+    return `${o[0]}.${o[1]}.${o[2]}.x`;
+  }
+  return ip.length > 12 ? `${ip.slice(0, 8)}…` : ip;
 }

@@ -14,7 +14,8 @@ import { inc } from "@/lib/metrics";
 import { logger } from "@/lib/logger";
 // v2.38.1 (ревью F10): лимит логина по паре логин+IP + реальный IP клиента
 import { checkLoginRateLimit } from "@/lib/rate-limit";
-import { getClientIP } from "@/lib/http-utils";
+// v2.38.2 (ревью F31): маскировка PII в логах
+import { getClientIP, maskEmail } from "@/lib/http-utils";
 
 export const dynamic = "force-dynamic";
 
@@ -64,11 +65,19 @@ export async function POST(request: NextRequest) {
     if (email) {
       const user = await userDb.findByEmail(email);
       // Always run bcrypt to keep timing consistent (mitigate user-enumeration).
-      const dummyHash = "$2a$10$CwTycUXWue0Thq9StjUM0uJ8eVjP3wW5PbP8bVqQkPbVbNfQ2JyQC";
+      // v2.38.2 (ревью F28): dummy-hash поднят до cost 12 — консистентно с
+      // hashPassword (v2.38.2): время сравнения с пустым результатом должно
+      // совпадать с реальным хешем cost 12, иначе user-enumeration по таймингу
+      // (cost 10 ≈ 70–100 мс против 250–300 мс — разница видна без замеров).
+      // Хеш случайного 64-hex секрета, пароль не известен никому.
+      const dummyHash = "$2b$12$4kN1EYANz/eZ8sb0SzF0zeLNkC5/b.6VHXL.YFGm1mapYKo6EaxBe";
       const ok = await verifyPasswordHash(password, user?.passwordHash ?? dummyHash);
       if (!user || !ok) {
         inc("auth_login_failed_total", "Auth login failures", 1);
-        logger.warn("Login failed (multi-user bad creds)", { requestId, email });
+        // v2.38.2 (ревью F31): email в логе неудачного логина — замаскирован
+        // (a***@d***.ru): полный адрес — PII, JSON-логи Render хранятся долго.
+        // Лог НЕ удаляем — счётчик попыток нужен для разбора brute-force.
+        logger.warn("Login failed (multi-user bad creds)", { requestId, email: maskEmail(email) });
         return NextResponse.json(
           { error: "Неверный email или пароль" },
           { status: 401, headers: { "X-Request-Id": requestId } }

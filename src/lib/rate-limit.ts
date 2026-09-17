@@ -65,6 +65,13 @@ class MemoryRateLimiter implements IRateLimiter {
 // работала как memory при RATE_LIMIT_BACKEND=redis + REDIS_URL: оператор,
 // включивший Redis в конфиге, получал memory-лимиты, счётчик
 // rate_limit_fallback_total не инкрементировался никогда.
+// v2.38.2 (ревью F34, doc): реализация Redis НЕ добавлена осознанно (текущий
+// деплой — ОДИН инстанс, external Redis = новая внешняя зависимость и секрет);
+// ограничение задокументировано в docs/OPERATIONS.md §3: при ≥2 инстансах
+// (Render horizontal scaling) ВСЕ бакеты — per-instance, brute-force через
+// разные инстансы умножает эффективный лимит на число инстансов. Общие бакеты
+// вводить только при фактическом появлении второго инстанса: Upstash Redis
+// или внешний rate-limit на прокси/CDN (WAF-правило).
 class RedisRateLimiter implements IRateLimiter {
   private warned = false;
   async check(key: string, limit: number, windowSec: number) {

@@ -8,7 +8,8 @@ import { hashPassword, issueUserCookie, setSessionCookie } from "@/lib/auth";
 import { userDb } from "@/lib/user-db";
 import { createRateLimiter, rlKey } from "@/lib/rate-limit";
 import { env } from "@/lib/env";
-import { getClientIP } from "@/lib/http-utils";
+// v2.38.2 (ревью F31): маскировка IP в логах регистрации
+import { getClientIP, maskIp } from "@/lib/http-utils";
 import { inc } from "@/lib/metrics";
 import { logger } from "@/lib/logger";
 
@@ -75,7 +76,10 @@ export async function POST(request: NextRequest) {
     );
     setSessionCookie(response, cookieValue);
     inc("auth_register_total", "Auth registrations", 1);
-    logger.info("Register success", { requestId, ip, userId: user.id, role });
+    // v2.38.2 (ревью F31): IP регистрации в логе — замаскирован (/24 для IPv4,
+    // префикс для IPv6): полный IP — PII, для разбора инцидентов достаточно
+    // подсети. userId остаётся — идентификатор аккаунта, не персональные данные.
+    logger.info("Register success", { requestId, ip: maskIp(ip), userId: user.id, role });
     return response;
   } catch (err) {
     logger.error("Register error", { requestId, error: err instanceof Error ? err.message : String(err) });

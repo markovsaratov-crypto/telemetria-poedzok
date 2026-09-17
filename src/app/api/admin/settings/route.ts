@@ -21,6 +21,19 @@ const zUpdateBody = z.object({
 const SETTING_KEY_ALLOWLIST = ["TWO_GIS_API_KEY", "TWO_GIS_PROXY_URL", "OSRM_BASE_URL"] as const;
 export const _SETTING_KEY_ALLOWLIST = SETTING_KEY_ALLOWLIST;
 
+// v2.38.2 (ревью F30): ЕДИНАЯ маска чувствительных значений для GET и PUT —
+// тот же формат «****xx» (последние 2 символа), что исторически строил GET
+// (AUDIT B-14). PUT/POST раньше возвращал введённый секрет эхом целиком
+// ({ok, key, value}) — значение оседало в HTTP-трейсах/девтулах/логах прокси.
+// Чувствительность ключа — из listOverridableSettings (единый источник, как в GET).
+function maskSensitiveValue(
+  value: string,
+  isSensitive: boolean
+): { value: string; masked: boolean } {
+  if (isSensitive && value) return { value: `****${value.slice(-2)}`, masked: true };
+  return { value, masked: false };
+}
+
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   try {
@@ -31,11 +44,11 @@ export async function GET(request: NextRequest) {
     // AUDIT B-14: чувствительные значения не отдаются наружу целиком — маска
     // «****xx» (последние 2 символа, как в /api/test-2gis). UI показывает
     // маску как плейсхолдер; новое значение вводится только при изменении.
-    const masked = settings.map((s) =>
-      s.isSensitive && s.value
-        ? { ...s, value: `****${s.value.slice(-2)}`, masked: true }
-        : { ...s, masked: false }
-    );
+    // v2.38.2 (ревью F30): маскирование через общий helper (см. maskSensitiveValue).
+    const masked = settings.map((s) => {
+      const m = maskSensitiveValue(s.value, s.isSensitive);
+      return { ...s, value: m.value, masked: m.masked };
+    });
     return json({ settings: masked }, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Settings list error", {
@@ -70,7 +83,15 @@ export async function PUT(request: NextRequest) {
       );
     }
     await setSetting(key, value, userId ?? auth.role);
-    return json({ ok: true, key, value }, 200, { "X-Request-Id": requestId });
+    // v2.38.2 (ревью F30): ответ возвращает МАСКУ, а не введённое значение —
+    // секрет (TWO_GIS_API_KEY) больше не покидает сервер эхом (HTTP-трейсы,
+    // девтулы); UI после мутации всё равно перечитывает GET (useUpdateSetting
+    // → invalidateQueries). listOverridableSettings читает кэш, который
+    // setSetting только что обновил (write-through) — лишнего SQL нет.
+    const isSensitive =
+      (await listOverridableSettings()).find((s) => s.key === key)?.isSensitive ?? false;
+    const masked = maskSensitiveValue(value, isSensitive);
+    return json({ ok: true, key, value: masked.value, masked: masked.masked }, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Settings update error", {
       requestId,

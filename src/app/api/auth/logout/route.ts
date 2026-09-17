@@ -1,4 +1,11 @@
 // POST /api/auth/logout — очистка cookie
+// v2.38.2 (ревью F29, note): этот роут чистит cookie ТОЛЬКО в браузере, откуда
+// пришёл запрос. Сессия stateless (HMAC-cookie, БД-стороны нет) — украденная
+// КОПИЯ cookie после «логина-аута» жертвы остаётся валидной до exp (24 ч,
+// продлевается sliding-renewal). Полный отзыв невозможен без серверного сторa
+// (denylist) — основной риск закрыт отпечатком пароля pwdFp (src/lib/auth.ts):
+// смена пароля жертвы мгновенно убивает и украденную cookie. Ограничение
+// задокументировано в ревью F29 как осознанное.
 import { NextRequest, NextResponse } from "next/server";
 import { clearSessionCookie } from "@/lib/auth";
 import { inc } from "@/lib/metrics";

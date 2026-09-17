@@ -18,6 +18,8 @@ import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import { recordIngestAttempt, recordIngestRaw } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток; v2.10.8: сырой дамп
+import { recordIngestOutcome } from "@/lib/alerts"; // v2.38.2 · F40: исходы канала в правило ingest_error_rate (§14.4)
+import { trackLatency } from "@/lib/latency"; // v2.38.2 · F40: замер api_latency_p95
 import { finalizeSession } from "@/lib/session-finalize"; // v2.14.0 (Ф3): shared с воркером-«жнецом»
 import { joinNewSessionToTrip, extendTripOnPoints } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): живое вливание записи в поездку
 import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.16.0 (D-6): единый парсер времени
@@ -314,6 +316,8 @@ export async function POST(request: NextRequest) {
     const ingestAuth = await resolveIngestToken(bearer, queryToken);
     const ingestUserId = ingestAuth.ok ? ingestAuth.userId : null;
     if (!ingestAuth.ok) {
+      // v2.38.2 · F40: по образцу canonical-роута — 401 НЕ полнит знаменатель
+      // ingest_error_rate (только счётчик ingest_unauthorized_total в гейте)
       return json(
         { error: `Unauthorized: ${ingestAuth.reason}` },
         401,
@@ -324,6 +328,7 @@ export async function POST(request: NextRequest) {
     // 2. deviceId из query (обязательный) + валидация (C-21)
     const deviceId = url.searchParams.get("deviceId");
     if (!deviceId) {
+      recordIngestOutcome(false); // v2.38.2 · F40: 400 валидации зажигает ingest_error_rate
       return json(
         { error: "deviceId query param required. Example: ?deviceId=iphone-15-pro" },
         400,
@@ -331,6 +336,7 @@ export async function POST(request: NextRequest) {
       );
     }
     if (!DEVICE_ID_RE.test(deviceId)) {
+      recordIngestOutcome(false); // v2.38.2 · F40: 400 валидации зажигает ingest_error_rate
       return json(
         { error: "Invalid deviceId: 1-64 chars, letters/digits/dots/dashes/colons/spaces only" },
         400,
@@ -348,6 +354,7 @@ export async function POST(request: NextRequest) {
     const rawBody = await request.text().catch(() => "");
     const payloadBytes = Buffer.byteLength(rawBody);
     if (isPayloadTooLarge(payloadBytes)) {
+      recordIngestOutcome(false); // v2.38.2 · F40: 413 участвует в ingest_error_rate (как в canonical-роуте)
       return json({ error: "Payload too large", limit: payloadLimitBytes() }, 413, { "X-Request-Id": requestId });
     }
     // v2.38.1 (F20): диагностические дампы пишут СЫРОЕ тело (точнее
@@ -360,6 +367,7 @@ export async function POST(request: NextRequest) {
       body = null;
     }
     if (!body) {
+      recordIngestOutcome(false); // v2.38.2 · F40: 400 невалидного JSON зажигает ingest_error_rate
       return json({ error: "Invalid JSON body" }, 400, { "X-Request-Id": requestId });
     }
 
@@ -386,7 +394,17 @@ export async function POST(request: NextRequest) {
       }
     }
     if (duplicate) {
+      // v2.38.2 · F40: дубль — успешный исход для ingest_error_rate + трейс
+      // (как в canonical-роуте): раньше этот return-путь был невидим для алерта
+      // и не попадал в ingest-трейс админки. Счётчик ingest_duplicate_total
+      // (scope="sensorlogger") уже существовал — сохранён.
       inc("ingest_duplicate_total", "Duplicate ingest (messageId idempotency)", 1, "sensorlogger");
+      recordIngestOutcome(true);
+      recordIngestAttempt({
+        at: new Date().toISOString(), route: "sensorlogger", deviceId,
+        outcome: "duplicate", points: 0, dropped: 0, bytes: null,
+      });
+      trackLatency(request);
       return json(
         { ok: true, duplicate: true, message: "Batch already processed (messageId seen)", deviceId, deviceName },
         200,
@@ -413,6 +431,9 @@ export async function POST(request: NextRequest) {
         { at: new Date().toISOString(), route: "sensorlogger", deviceId, outcome: "empty" },
         bodyStr,
       );
+      // v2.38.2 · F40: Test Push — успешный 2xx исход (виден в знаменателе rate)
+      recordIngestOutcome(true);
+      trackLatency(request);
       return json({ ok: true, test: true, message: "SensorLogger push test passed. Ready to receive GPS data.", deviceId, deviceName }, 200, { "X-Request-Id": requestId });
     }
 
@@ -427,6 +448,7 @@ export async function POST(request: NextRequest) {
         outcome: "invalid", points: items.length, dropped: 0,
         bytes: payloadBytes,
       });
+      recordIngestOutcome(false); // v2.38.2 · F40: 413 валидации участвует в ingest_error_rate
       return json(
         { error: "Too many points in batch", limit: MAX_BATCH_ITEMS, received: items.length },
         413,
@@ -477,6 +499,9 @@ export async function POST(request: NextRequest) {
           bodyStr,
         );
       }
+      // v2.38.2 · F40: валидный батч без GPS — 2xx успех для rate (как HTTP-исход)
+      recordIngestOutcome(true);
+      trackLatency(request);
       return json(
         {
           ok: true,
@@ -619,7 +644,14 @@ export async function POST(request: NextRequest) {
     const { sessionId, isNewSession } = outcome;
     if (outcome.duplicate) {
       // Дубль, замеченный под lock (гонка двух ретраев) — точки НЕ вставлены.
+      // v2.38.2 · F40: второй return-путь дубля — тоже в ingest_error_rate/трейс
       inc("ingest_duplicate_total", "Duplicate ingest (messageId idempotency)", 1, "sensorlogger");
+      recordIngestOutcome(true);
+      recordIngestAttempt({
+        at: new Date().toISOString(), route: "sensorlogger", deviceId,
+        outcome: "duplicate", points: 0, dropped: 0, bytes: null,
+      });
+      trackLatency(request);
       return json(
         { ok: true, duplicate: true, message: "Batch already processed (messageId seen)", deviceId, deviceName },
         200,
@@ -633,6 +665,8 @@ export async function POST(request: NextRequest) {
       outcome: "accepted", points: points.length, dropped: droppedInaccurate,
       bytes: payloadBytes,
     });
+    recordIngestOutcome(true); // v2.38.2 · F40: успех в знаменателе ingest_error_rate
+    trackLatency(request); // v2.38.2 · F40: p95 инжест-канала (§14.4)
     logger.info("SensorLogger ingest", {
       requestId,
       sessionId,
@@ -657,6 +691,7 @@ export async function POST(request: NextRequest) {
       { "X-Request-Id": requestId }
     );
   } catch (err) {
+    recordIngestOutcome(false); // v2.38.2 · F40: 5xx зажигает ingest_error_rate (как в canonical-роуте)
     logger.error("SensorLogger ingest error", {
       requestId,
       error: err instanceof Error ? err.message : String(err),

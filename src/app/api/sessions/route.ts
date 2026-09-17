@@ -10,6 +10,7 @@ import { authorizeRequest } from "@/lib/auth";
 import { dataScopeFor, sessionScopeWhere } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
+import { trackLatency } from "@/lib/latency"; // v2.38.2 · F43: p95 дашбордных роутов
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -116,6 +117,7 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    trackLatency(request); // v2.38.2 · F43: список сессий в api_latency_p95 (§14.4)
     return json({ sessions: items, nextCursor }, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Sessions list error", { requestId, error: err instanceof Error ? err.message : String(err) });

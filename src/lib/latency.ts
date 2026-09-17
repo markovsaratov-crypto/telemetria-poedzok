@@ -1,9 +1,14 @@
 // src/lib/latency.ts — P2-16: кольцевой буфер длительностей API-запросов (Node-изолят).
-// Middleware (edge-изолят) прокидывает время старта запроса в заголовке
-// x-start-epoch-ms (см. src/middleware.ts); роуты вызывают trackLatency(request)
-// после формирования ответа. Покрытие — основные API-роуты (ingest, sessions,
-// stats, batch-stats, speed-distribution, metrics); ограничение документировано
+// Proxy (Next 16, бывший middleware) прокидывает время старта запроса в заголовке
+// x-start-epoch-ms (см. src/proxy.ts); роуты вызывают trackLatency(request)
+// после формирования ответа. Ограничение документировано
 // в docs/OPERATIONS.md (правило api_latency_p95, §14.4 спеки).
+// v2.38.2 · F43: покрытие расширено на дашбордные GET-роуты — p95 больше не
+// «слеп» к ним (раньше комментарий обещал stats/sessions, а вызовов не было).
+// Фактический охват: инжест (POST /api/ingest, /api/ingest/sensorlogger),
+// /api/stats, /api/sessions (список), /api/sessions/[id] (детали),
+// /api/sessions/[id]/stats, батчи (stats/events/track), поездки
+// (/api/trips, /api/trips/batch, /api/trips/[id]).
 
 const WINDOW_MS = 5 * 60 * 1000; // 5 минут — окно правила §14.4
 const MAX_SAMPLES = 2000;

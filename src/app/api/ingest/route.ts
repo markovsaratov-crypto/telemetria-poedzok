@@ -12,8 +12,15 @@ import { inc } from "@/lib/metrics";
 import { recordIngestAttempt } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток
 import { recordIngestOutcome } from "@/lib/alerts"; // P2-16: правило ingest_error_rate
 import { trackLatency } from "@/lib/latency"; // P2-16: api_latency_p95
+import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.38.2 (ревью F39): единый парсер времени (с/мс/мкс/нс/ISO)
+import { MAX_TRUSTED_ACCURACY_M } from "@/lib/kpi"; // v2.38.2 (ревью F38): единый порог точности точек (100 м, AUDIT B-5)
 // v2.38.1 (ревью F11): extractBearer + resolveIngestToken — единая проверка инжест-токенов
 import { extractBearer, resolveIngestToken } from "@/lib/auth";
+
+// v2.38.2 (ревью F38): окно правдоподобия времени точки (±24 ч от серверного
+// now) — зеркально sensorlogger-каналу (R7): таймстемы 1970/будущего больше
+// не пишутся в БД и метрики (двухканальная симметрия B-5/R7).
+const TS_PLAUSIBILITY_MS = 24 * 60 * 60 * 1000;
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -93,24 +100,67 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. Нормализация таймстемпов: нс → мс → с, фильтрация gap > 30 с
-    const normalized = points
-      .map((p) => ({
+    // 2. Нормализация таймстемпов + входные фильтры — v2.38.2 (ревью F38/F39):
+    // паритет с sensorlogger-каналом. Раньше здесь была ТРЕТЬЯ реализация
+    // магнитуда-эвристики (инлайн, без ISO и µs) рядом с «единым» парсером
+    // parse-timestamp.ts (F39), НЕ было окна ±24 ч (R7 — таймстемы 1970/будущего
+    // писались в БД) и accuracy-фильтра (B-5 — мусор 400–585 м портил метрики).
+    const now = Date.now();
+    let droppedTimestamp = 0; // непарсящееся/неправдоподобное (±24 ч) время
+    let droppedInaccurate = 0; // accuracy > 100 м (AUDIT B-5)
+    const normalized: {
+      lat: number; lon: number; speed: number | null; altitude: number | null;
+      accuracy: number | null; bearing: number | null; timestampMs: number;
+    }[] = [];
+    for (const p of points) {
+      // v2.38.2 (ревью F39): единый parseTimestamp — с/мс/мкс/нс/ISO (µs — F74);
+      // null → точка отброшена, «фальшивое сейчас» НЕ подставляется (D-6)
+      const ts = parseTimestamp(String(p.timestamp));
+      if (ts == null || Math.abs(now - ts) > TS_PLAUSIBILITY_MS) {
+        droppedTimestamp++;
+        continue;
+      }
+      if (p.accuracy != null && p.accuracy > MAX_TRUSTED_ACCURACY_M) {
+        droppedInaccurate++;
+        continue;
+      }
+      normalized.push({
         lat: p.lat,
         lon: p.lon,
         speed: p.speed ?? null,
         altitude: p.altitude ?? null,
         accuracy: p.accuracy ?? null,
         bearing: p.bearing ?? null,
-        // v2.11.0 (АУДИТ C-29): три диапазона — нс (> 1e15 → /1e6), мс (> 1e12),
-        // СЕКУНДЫ (> 1e9 → ×1000; раньше секунды оставались как мс → даты 1970)
-        timestampMs:
-          Number(p.timestamp) > 1e15 ? Math.floor(Number(p.timestamp) / 1e6)
-          : Number(p.timestamp) > 1e12 ? Number(p.timestamp)
-          : Number(p.timestamp) > 1e9 ? Number(p.timestamp) * 1000
-          : Number(p.timestamp),
-      }))
-      .sort((a, b) => a.timestampMs - b.timestampMs);
+        timestampMs: ts,
+      });
+    }
+    if (droppedTimestamp > 0 || droppedInaccurate > 0) {
+      logger.warn("Ingest: dropped points on input filters", {
+        requestId, deviceId,
+        droppedTimestamp, droppedInaccurate, received: points.length,
+      });
+    }
+    if (normalized.length === 0) {
+      // v2.38.2 (ревью F38): пустую сессию не создаём; трейс-исход dropped_all
+      // (как в sensorlogger) — приложение не увидит ложного успеха молча
+      recordIngestOutcome(false); // P2-16: 400 — валидационная ошибка
+      recordIngestAttempt({
+        at: new Date().toISOString(), route: "ingest", deviceId,
+        outcome: "dropped_all", points: 0, dropped: droppedTimestamp + droppedInaccurate,
+        bytes: Buffer.byteLength(rawBody),
+      }); // DIAG-1
+      return json(
+        {
+          error: "All points rejected by input filters",
+          dropped: { timestamp: droppedTimestamp, accuracy: droppedInaccurate },
+          plausibilityWindowHours: TS_PLAUSIBILITY_MS / (60 * 60 * 1000),
+          maxAccuracyM: MAX_TRUSTED_ACCURACY_M,
+        },
+        400,
+        { "X-Request-Id": requestId }
+      );
+    }
+    normalized.sort((a, b) => a.timestampMs - b.timestampMs);
 
     // v2.11.0 (АУДИТ C-10): gap сравнивается между СОСЕДНИМИ исходными точками.
     // v2.16.0 (R9): точка-возобновление ПОСЛЕ паузы СОХРАНЯЕТСЯ (раньше —
@@ -124,7 +174,7 @@ export async function POST(request: NextRequest) {
     let lastTs: number | null = null;
     for (const p of normalized) {
       if (lastTs !== null && p.timestampMs - lastTs > 30000) {
-        gapMarkers++; // gap > 30 с — маркер разрыва, точка сохраняется
+        gapMarkers++; // gap > 30 с — маркер разрыва, точка СОХРАНЯЕТСЯ (не «отброшена»!)
       }
       lastTs = p.timestampMs;
     }
@@ -198,7 +248,10 @@ export async function POST(request: NextRequest) {
     inc("ingest_total", "Total ingest requests", 1);
     recordIngestAttempt({
       at: new Date().toISOString(), route: "ingest", deviceId,
-      outcome: "accepted", points: filtered.length, dropped: gapMarkers,
+      // v2.38.2 (ревью F38): dropped — ЧЕСТНЫЙ счётчик отброшенных точек
+      // (битое время + accuracy), а НЕ gap-маркеры, как раньше — диагностика
+      // «точка-сохранена-но-разрыв» ≠ «точка-отброшена», поле вводило в заблуждение
+      outcome: "accepted", points: filtered.length, dropped: droppedTimestamp + droppedInaccurate,
       bytes: payloadBytes,
     }); // DIAG-1
     recordIngestOutcome(true); // P2-16
@@ -207,6 +260,9 @@ export async function POST(request: NextRequest) {
       requestId,
       sessionId: String(session.session.id),
       points: filtered.length,
+      droppedTimestamp,
+      droppedInaccurate,
+      gapMarkers,
       deviceId,
       durationMs: Date.now() - start,
     });
@@ -215,6 +271,9 @@ export async function POST(request: NextRequest) {
       {
         sessionId: String(session.session.id),
         pointsAccepted: filtered.length,
+        // v2.38.2 (ревью F38): прозрачность частичного отбрака в ответе
+        dropped: { timestamp: droppedTimestamp, accuracy: droppedInaccurate },
+        gapMarkers,
         trafficJobId: String(session.job.id),
         duplicate: false,
       },

@@ -6,14 +6,32 @@
 // v2.17.0: весь расчёт ВЫНЕСЕН в src/lib/session-stats.ts (единый конвейер с
 // GET /api/stats/batch — код один, цифры одинаковые). Роут остаётся тонкой
 // обёрткой: auth → выборка сессии с точками → конвейер → план-факт.
+//
+// v2.38.2 · F41: роут читает ПЕРСИСТЕНТНЫЙ кэш предрасчёта Session.statsCache
+// (src/lib/session-cache.ts) — детальная страница поллит этот роут каждые 15 с
+// для живых записей, и раньше КАЖДЫЙ вызов грузил все точки + полный CPU-конвейер,
+// а EcoScore деталей мог расходиться с батч-роутом (базлайны на момент записи
+// vs текущий корпус). Теперь: свежий кэш → готовый payload без точек (как
+// /api/stats/batch с v2.27.0); протухший/отсутствующий — прежний live-расчёт
+// с write-through перезаписью кэша. route (план-факт) — по-прежнему из живого
+// TrafficJob (воркер завершает джобы после финализации — кэшировать нельзя).
+// Свежесть — тот же критерий, что у батча: isSessionCacheFresh (версия схемы +
+// cachePointCount === pointCount; инжест инкрементит pointCount → живая запись
+// автоматически пересчитывается).
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
-import { dataScopeFor, sessionVisibleTo } from "@/lib/scope";
+import { dataScopeFor } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { getCorpusEcoBaselines } from "@/lib/eco-corpus"; // v2.16.0 (I1): общая corpus-калибровка (один JOIN вместо N+1)
-import { computeSessionStats, loadPlanFacts, composeRoute } from "@/lib/session-stats"; // v2.17.0: единый конвейер
+import { computeSessionStats, loadPlanFacts, composeRoute, type SessionStatsResult } from "@/lib/session-stats"; // v2.17.0: единый конвейер
+import {
+  loadSessionMetasWithCache,
+  isSessionCacheFresh,
+  parseCachedJson,
+  persistSessionCaches,
+} from "@/lib/session-cache"; // v2.38.2 · F41: персистентный кэш предрасчёта
 import { trackLatency } from "@/lib/latency"; // P2-16: замер api_latency_p95
 
 export async function GET(
@@ -26,29 +44,44 @@ export async function GET(
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
     const { id } = await params;
+
+    // v2.38.2 · F41: мета с кэш-колонками вместо findUnique с точками — один
+    // лёгкий запрос. Чужая сессия не попадает в Map (scope-предикат) → 404,
+    // как раньше («неотличима от отсутствующей»); deletedAt → тоже 404.
+    const scope = dataScopeFor(auth);
+    const metas = await loadSessionMetasWithCache([id], scope, { stats: true });
+    const meta = metas.get(id);
+    if (!meta || meta.deleted) {
+      return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
+    }
+
+    // ——— свежий персистентный кэш: готовый payload, БЕЗ точек и конвейера ———
+    const fresh = isSessionCacheFresh(meta) ? parseCachedJson<SessionStatsResult>(meta.statsCache) : null;
+    if (fresh) {
+      if (fresh.kind === "empty") {
+        trackLatency(request); // P2-16
+        return json(fresh.payload, 200, { "X-Request-Id": requestId });
+      }
+      const facts = await loadPlanFacts([id]);
+      const route = composeRoute(facts.get(id), fresh.activeDistanceM, fresh.actualDurationSec, fresh.avgSpeedRawMs);
+      trackLatency(request); // P2-16
+      return json({ ...fresh.payload, route }, 200, { "X-Request-Id": requestId });
+    }
+
+    // ——— протухший/отсутствующий кэш: live-расчёт (прежний путь) ———
+    // Точки — отдельным запросом только здесь: мета уже закрыла вопросы
+    // существования/видимости/удаления, тянуть их при свежем кэше незачем.
+    // Гонка (сессию удалили между двумя запросами) → null → 404, как раньше.
     const session = await db.session.findUnique({
       where: { id },
       select: {
-        id: true,
-        userId: true,
-        startTime: true,
-        endTime: true,
-        pointCount: true,
-        deletedAt: true,
-        routeHash: true,    // v2.9 §10.0: детерминированный хэш маршрута
-        topologyHash: true, // v2.9 §10.0: 8-char хэш топологии
         gpsPoints: {
           orderBy: { timestamp: "asc" },
           select: { lat: true, lon: true, speed: true, altitude: true, accuracy: true, bearing: true, timestamp: true },
         },
       },
     });
-
-    if (!session || session.deletedAt) {
-      return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
-    }
-    // v2.23.0: изоляция данных — чужая сессия неотличима от отсутствующей (404)
-    if (!sessionVisibleTo(dataScopeFor(auth), session.userId)) {
+    if (!session) {
       return json({ error: "Not found" }, 404, { "X-Request-Id": requestId });
     }
 
@@ -77,10 +110,10 @@ export async function GET(
     const result = computeSessionStats(
       {
         id,
-        startTime: String(session.startTime ?? ""),
-        endTime: session.endTime == null ? null : String(session.endTime),
-        routeHash: session.routeHash == null ? null : String(session.routeHash),
-        topologyHash: session.topologyHash == null ? null : String(session.topologyHash),
+        startTime: meta.startTime,
+        endTime: meta.endTime,
+        routeHash: meta.routeHash,
+        topologyHash: meta.topologyHash,
       },
       rawPoints,
       ecoBaselines
@@ -90,6 +123,16 @@ export async function GET(
       // нормализация скоростей обнулила ряд — форма прежнего early-return
       return json(result.payload, 200, { "X-Request-Id": requestId });
     }
+
+    // v2.38.2 · F41: write-through — перезапись протухшего кэша (как в
+    // /api/stats/batch): следующий полл детали уже читает кэш. cachePointCount
+    // = pointCount меты НА МОМЕНТ SELECT (см. persistSessionCaches): инжест
+    // инкрементит мету → новые точки инвалидируют кэш. Сбой записи — не роняет
+    // ответ (warn внутри persistSessionCaches).
+    await persistSessionCaches(
+      [{ id, cachePointCount: meta.pointCount ?? 0, statsJson: JSON.stringify(result) }],
+      ["stats"]
+    );
 
     // P1-7: план-факт из завершённого TrafficJob (FIX-C2: фактическое время = ActiveDuration)
     const facts = await loadPlanFacts([id]);

@@ -45,7 +45,12 @@ export async function GET(
     // КАЖДЫЕ 1,5 с ВЕЧНО (диалог экспорта зависал с «Опрос статуса…»).
     // Маппинг dead → failed (200) делает состояние честно терминальным.
     if (status === "dead") {
-      return json({ status: "failed", jobId, error: jobError ?? "Экспорт не удался (превышено число попыток)" }, 200, { "X-Request-Id": requestId });
+      // v2.38.2 · F48: job.error может содержать внутренние детали (SQL/пути
+      // воркера) — наружу НЕ отдаётся: клиенту общий текст, детали — в журнал.
+      if (jobError) {
+        logger.warn("Export job dead", { requestId, jobId, status, error: jobError });
+      }
+      return json({ status: "failed", jobId, error: "Экспорт не удался (превышено число попыток)" }, 200, { "X-Request-Id": requestId });
     }
 
     if (status !== "completed") {

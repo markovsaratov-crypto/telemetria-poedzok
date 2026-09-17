@@ -17,6 +17,23 @@ import { readIngestTrace, readIngestRaw } from "@/lib/ingest-trace"; // DIAG-1: 
 import { tripsEnabled } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §10): счётчики поездок
 import { libsql } from "@/lib/db";
 import type { DataScope } from "@/lib/scope";
+import { getTtlCache } from "@/lib/ttl-cache"; // v2.38.2 · F46: TTL-кэш тяжёлых агрегатов
+import { trackLatency } from "@/lib/latency"; // v2.38.2 · F43: p95 дашбордных роутов
+
+// v2.38.2 · F46: короткий TTL-кэш (60 с) ответа дашборда. Каждый вызов без кэша —
+// COUNT(*) по ВСЕМ GpsPoint живых сессий + heatmap до 5000 строк + 7 параллельных
+// счётчиков: на D1 это rows_read по всей таблице точек на каждый poll (поллинг
+// 60 с × 1440 = десятки млн rows_read/день — квота уже выгорала однажды).
+// Ключ = скоуп + «сегодня»-корзина клиента + параметры запроса (изоляция
+// per-user: own:{userId} — чужие данные не пересекаются) — паттерн батч-роутов
+// (getTtlCache на globalThis, «stats-dashboard»).
+// Инвалидация: только TTL (60 с ≤ интервал поллинга — единственное окно одного
+// зрителя всегда ревалидируется, а всплески рефетчей/несколько вкладок-устройств
+// поглощаются кэшем) + смена «сегодня»-корзины (полночь клиента) — счётчики дня
+// переворачиваются мгновенно, не через TTL. Рестарт/мультиинстанс — кэш холодный
+// (in-memory, как у батч-роутов). ingestTrace отдаётся с лагом ≤ 60 с —
+// приемлемо для дебаг-канала.
+const STATS_CACHE = getTtlCache<Record<string, unknown>>("stats-dashboard", 60_000, 64);
 
 // v2.26.0: число поездок в зоне видимости (опционально от fromMs — «сегодня»)
 async function countTripsForScope(scope: DataScope, from?: Date): Promise<number> {
@@ -95,6 +112,31 @@ export async function GET(request: NextRequest) {
 
     const url = new URL(request.url);
 
+    // v2.38.2 · F46: разбор параметров ДО агрегатов — по ним строится ключ кэша.
+    // v2.16.0 (B7): «сегодня» — в часовом поясе КЛИЕНТА (?tzOffsetMin, как
+    // Date#getTimezoneOffset; по умолчанию 0 = UTC). Раньше полночь бралась в
+    // СЕРВЕРНОМ поясе — на Render UTC «сегодня» начиналось в 03:00 МСК.
+    const tzRaw = Number(url.searchParams.get("tzOffsetMin"));
+    const tzOffsetMin = Number.isFinite(tzRaw) && Math.abs(tzRaw) <= 15 * 60 ? Math.round(tzRaw) : 0;
+    const tzMs = tzOffsetMin * 60_000;
+    const todayStartMs = Math.floor((Date.now() - tzMs) / 86_400_000) * 86_400_000 + tzMs;
+
+    // v2.10.8: полный дамп последнего нераспознанного батча — ТОЛЬКО по
+    // ?ingestRaw=1: до 64 КБ в теле ответа, не таскаем его в каждом запросе.
+    // v2.23.0: сырой дамп чужих батчей — только владелец/админ
+    const wantRaw = url.searchParams.get("ingestRaw") === "1" && scope.mode !== "own";
+
+    // v2.38.2 · F46: ключ = скоуп + «сегодня»-корзина клиента (переворот в
+    // полночь tz) + параметры. Попадание — готовый ответ без агрегатов.
+    const dayBucket = Math.floor((Date.now() - tzMs) / 86_400_000);
+    const scopeKey = scope.mode === "own" ? `own:${scope.userId}` : scope.mode === "unclaimed" ? "unclaimed" : "all";
+    const cacheKey = `${scopeKey}|day:${dayBucket}|tz:${tzOffsetMin}|raw:${wantRaw ? 1 : 0}`;
+    const cached = STATS_CACHE.get(cacheKey);
+    if (cached) {
+      trackLatency(request); // v2.38.2 · F43: кэшированный ответ тоже в p95
+      return json(cached, 200, { "X-Request-Id": requestId, "X-Cache": "ttl" });
+    }
+
     // All-time stats
     // v2.12.0 (D-1): totalPoints — только точки ЖИВЫХ сессий (deletedAt IS NULL).
     // Раньше считались все строки GpsPoint, включая осиротевшие точки
@@ -114,14 +156,6 @@ export async function GET(request: NextRequest) {
     ]);
 
     // Today
-    // v2.16.0 (B7): «сегодня» — в часовом поясе КЛИЕНТА (?tzOffsetMin, как
-    // Date#getTimezoneOffset; по умолчанию 0 = UTC). Раньше полночь бралась в
-    // СЕРВЕРНОМ поясе — на Render UTC «сегодня» начиналось в 03:00 МСК.
-    const tzRaw = Number(url.searchParams.get("tzOffsetMin"));
-    const tzOffsetMin = Number.isFinite(tzRaw) && Math.abs(tzRaw) <= 15 * 60 ? Math.round(tzRaw) : 0;
-    const tzMs = tzOffsetMin * 60_000;
-    const todayStartMs = Math.floor((Date.now() - tzMs) / 86_400_000) * 86_400_000 + tzMs;
-
     // v2.16.0 (I4): независимые запросы — параллельно (было 4
     // последовательных HTTPS-раундтрипа к Turso); v2.18.0: + todaySessions (5-й)
     const twelveWeeksAgo = new Date();
@@ -158,15 +192,12 @@ export async function GET(request: NextRequest) {
     ]);
 
     // v2.10.8: полный дамп последнего нераспознанного батча — ТОЛЬКО по
-    // ?ingestRaw=1: до 64 КБ в теле ответа, не таскаем его в каждом запросе.
-    // v2.23.0: сырой дамп чужих батчей — только владелец/админ
-    const wantRaw = url.searchParams.get("ingestRaw") === "1" && scope.mode !== "own";
+    // ?ingestRaw=1 (см. разбор параметров выше — v2.38.2 · F46)
     const ingestRaw = wantRaw
       ? await readIngestRaw().catch(() => null)
       : null;
 
-    return json(
-      {
+    const payload: Record<string, unknown> = {
         totalSessions,
         totalPoints,
         totalRoutes,
@@ -194,7 +225,13 @@ export async function GET(request: NextRequest) {
         ingestTrace,
         // v2.10.8: {at, deviceId, outcome, bytes, truncated, body} — только при ?ingestRaw=1
         ...(wantRaw ? { ingestRaw } : {}),
-      },
+      };
+
+    STATS_CACHE.set(cacheKey, payload); // v2.38.2 · F46: revalidate-on-miss — следующий запрос в окне уже из кэша
+    trackLatency(request); // v2.38.2 · F43: свежевычисленный ответ дашборда в p95
+
+    return json(
+      payload,
       200,
       { "X-Request-Id": requestId }
     );

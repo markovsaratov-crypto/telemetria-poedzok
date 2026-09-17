@@ -9,17 +9,25 @@ import { inc } from "@/lib/metrics";
 import { writeAudit } from "@/lib/audit";
 import { randomUUID } from "crypto";
 import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.11.0 (C-12): ISO-время в CSV
+import { parseCsvRecords } from "@/lib/csv-records"; // v2.38.2 (ревью F49): RFC-4180-парсер — кавычки, ""-экранирование, разделители внутри кавычек
+import { MAX_TRUSTED_ACCURACY_M } from "@/lib/kpi"; // v2.38.2 (ревью F45): единый порог точности точек (100 м)
+import { z } from "zod"; // v2.38.2 (ревью F45): валидация deviceId/deviceName из Metadata.csv
 import AdmZip from "adm-zip";
 import { assignTripOnSessionFinalize } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): поездки после импорта
 
-function parseCSV(text: string): { headers: string[]; rows: string[][] } {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return { headers: [], rows: [] };
-  const sep = (lines[0].match(/;/g) || []).length > (lines[0].match(/,/g) || []).length ? ";" : ",";
-  const headers = lines[0].split(sep).map((h) => h.trim().toLowerCase().replace(/["']/g, ""));
-  const rows = lines.slice(1).map((l) => l.split(sep).map((c) => c.trim().replace(/["']/g, "")));
-  return { headers, rows };
-}
+// v2.38.2 (ревью F49): наивный parseCSV (split(sep) без кавычек) заменён
+// общим RFC-4180-парсером csv-records.ts (паритет с CSV-импортом): запятые в
+// device name / кавычках больше не сдвигают колонки.
+
+// v2.38.2 (ревью F45): deviceId/deviceName из Metadata.csv валидируются
+// (раньше — первая строка CSV любой длины/символов прямиком в БД и UI).
+// Паттерны — паритет с инжестом: DEVICE_ID_RE/DEVICE_NAME_RE в
+// sensorlogger-роуте и zIngestBody (deviceId ≤64, deviceName ≤128).
+const DEVICE_ID_RE = /^[A-Za-z0-9_.:\- ]{1,64}$/;
+const zZipImportMeta = z.object({
+  deviceId: z.string().regex(DEVICE_ID_RE, "deviceId must be 1-64 chars of [A-Za-z0-9_.:- ] and space"),
+  deviceName: z.string().regex(/^[^\n\r]{1,128}$/, "deviceName must be 1-128 chars without line breaks"),
+});
 
 function findCol(headers: string[], names: string[]): number {
   for (const n of names) {
@@ -96,7 +104,7 @@ export async function POST(request: NextRequest) {
     let deviceName = "ZIP Import";
     let deviceId = "zip-" + randomUUID().slice(0, 8);
     if (metadataCsv) {
-      const meta = parseCSV(metadataCsv);
+      const meta = parseCsvRecords(metadataCsv);
       if (meta.headers.length > 0 && meta.rows.length > 0) {
         const dnIdx = findCol(meta.headers, ["device name", "device_name", "devicename"]);
         const diIdx = findCol(meta.headers, ["device id", "device_id", "deviceid"]);
@@ -104,9 +112,19 @@ export async function POST(request: NextRequest) {
         if (diIdx >= 0) deviceId = meta.rows[0][diIdx] || deviceId;
       }
     }
+    // v2.38.2 (ревью F45): zod-валидация значений из Metadata.csv (дефолты
+    // "zip-…"/"ZIP Import" проходят всегда; мусор из файла — честный 400)
+    const metaCheck = zZipImportMeta.safeParse({ deviceId, deviceName });
+    if (!metaCheck.success) {
+      return json(
+        { error: "Invalid deviceId/deviceName in Metadata.csv", details: metaCheck.error.flatten().fieldErrors },
+        400,
+        { "X-Request-Id": requestId }
+      );
+    }
 
     // Parse Location.csv
-    const csv = parseCSV(locationCsv);
+    const csv = parseCsvRecords(locationCsv);
     const iLat = findCol(csv.headers, ["latitude", "lat"]);
     const iLon = findCol(csv.headers, ["longitude", "lon", "lng"]);
     const iTime = findCol(csv.headers, ["time", "timestamp"]);
@@ -120,32 +138,51 @@ export async function POST(request: NextRequest) {
     }
 
     // Parse points
+    // v2.38.2 (ревью F45): фильтры паритета с инжестом (sensorlogger/канонич.):
+    // диапазон координат ±90/±180 (как CSV-импорт, MI-7) и accuracy ≤100 м
+    // (AUDIT B-5, MAX_TRUSTED_ACCURACY_M) — мусорные координаты и точки
+    // точностью 400–585 м больше не пишутся в БД; счётчик — в ответ.
+    let droppedInaccurate = 0;
     const points: { lat: number; lon: number; speed: number | null; altitude: number | null; accuracy: number | null; bearing: number | null; timestamp: number }[] = [];
     for (const row of csv.rows) {
       const lat = Number(row[iLat]);
       const lon = Number(row[iLon]);
       if (isNaN(lat) || isNaN(lon)) continue;
+      if (lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
       // v2.11.0 (АУДИТ C-12): parseTimestamp понимает и ISO-строки, и числа
       // (SensorLogger Location.csv шлёт ISO). NaN больше не роняет импорт 500-й.
-      const ts = iTime >= 0 ? parseTimestamp(row[iTime]) : Date.now();
+      // v2.38.2: рваная строка короче заголовка (нет ячейки) → skip, не 500
+      const ts = iTime >= 0 ? (row[iTime] != null ? parseTimestamp(row[iTime]) : null) : Date.now();
       if (ts == null) continue; // непарсящееся время — пропускаем точку
       const timestampMs = ts;
       const speed = iSpeed >= 0 ? Number(row[iSpeed]) : null;
       const altitude = iAlt >= 0 ? Number(row[iAlt]) : null;
       const accuracy = iAcc >= 0 ? Number(row[iAcc]) : null;
+      // v2.38.2 (ревью F45): точка с accuracy > 100 м отбрасывается (B-5)
+      if (accuracy !== null && accuracy > MAX_TRUSTED_ACCURACY_M) {
+        droppedInaccurate++;
+        continue;
+      }
       const bearing = iBearing >= 0 ? Number(row[iBearing]) : null;
       points.push({
         lat, lon,
         speed: speed !== null && speed >= 0 ? speed : null,
         altitude: altitude !== null && altitude >= -1000 ? altitude : null,
         accuracy: accuracy !== null && accuracy >= 0 ? accuracy : null,
-        bearing: bearing !== null && bearing >= 0 ? bearing : null,
+        // v2.38.2 (ревью F45): bearing ограничен [0, 360] — паритет с
+        // sensorlogger/zIngestBody (раньше >360 писался в БД как есть)
+        bearing: bearing !== null && bearing >= 0 && bearing <= 360 ? bearing : null,
         timestamp: timestampMs,
       });
     }
 
     if (points.length === 0) {
       return json({ error: "No valid GPS points found" }, 400, { "X-Request-Id": requestId });
+    }
+    if (droppedInaccurate > 0) {
+      logger.warn("ZIP import: dropped inaccurate points", {
+        requestId, dropped: droppedInaccurate, received: csv.rows.length,
+      });
     }
 
     // Sort. v2.16.0 (B13): «gap-фильтр» УДАЛЁН — раньше он выбрасывал РОВНО
@@ -198,7 +235,11 @@ export async function POST(request: NextRequest) {
     inc("ingest_total", "Total ingest requests", 1, "zip");
     logger.info("ZIP import success", { requestId, sessionId, points: filtered.length, deviceName });
 
-    return json({ imported: 1, sessionId: session.id, deviceId, deviceName, pointCount: filtered.length, startTime: startTime.toISOString(), endTime: endTime.toISOString() }, 200, { "X-Request-Id": requestId });
+    return json(
+      { imported: 1, sessionId: session.id, deviceId, deviceName, pointCount: filtered.length, dropped: { inaccurate: droppedInaccurate }, startTime: startTime.toISOString(), endTime: endTime.toISOString() },
+      200,
+      { "X-Request-Id": requestId }
+    );
   } catch (err) {
     logger.error("ZIP import error", { requestId, error: err instanceof Error ? err.message : String(err) });
     // v2.11.0 (АУДИТ C-30): наружу — requestId, детали — в логах

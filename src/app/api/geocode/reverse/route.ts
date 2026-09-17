@@ -77,6 +77,16 @@ export async function GET(request: NextRequest) {
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
       return json({ error: "Invalid coordinates" }, 400, { "X-Request-Id": requestId });
     }
+    // v2.38.2 (ревью F42): диапазонные проверки — lat=999 уходил в
+    // Nominatim/2ГИС (бесполезный запрос), а кэш-ключи geocode:999.0000
+    // замусоривали таблицу Setting на 30 дней. Отсекаем ДО кэша и провайдеров.
+    if (Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      return json(
+        { error: "lat must be within [-90, 90] and lon within [-180, 180]" },
+        400,
+        { "X-Request-Id": requestId }
+      );
+    }
 
     const key = cacheKey(lat, lon);
     // Check cache via Setting table (cached for 30 days).

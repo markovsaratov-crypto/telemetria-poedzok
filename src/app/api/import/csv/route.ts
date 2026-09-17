@@ -1,7 +1,8 @@
 // POST /api/import/csv — импорт GPS-сессий из CSV (auto-detect columns).
 // Ожидаемые колонки (case-insensitive, любым разделителем , или ;): lat, lon, speed, altitude, accuracy, timestamp, bearing, device_id, client_id, device_name.
 // timestamp может быть: epoch ms, epoch ns, ISO8601.
-import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.11.0: общий парсер времени (ISO/нс/мс/с)
+import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.11.0: общий парсер времени (ISO/нс/мкс/мс/с)
+import { parseCsvRecords } from "@/lib/csv-records"; // v2.38.2 (ревью F49): RFC-4180-парсер — кавычки, ""-экранирование, разделители внутри кавычек
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
@@ -15,17 +16,9 @@ import { assignTripOnSessionFinalize } from "@/lib/trip-grouping"; // v2.26.0 (�
 
 const writeLock = pLimit(1);
 
-function parseCSV(text: string): { headers: string[]; rows: string[][] } {
-  // Определяем разделитель: ; если больше ; чем ,
-  const semiCount = (text.match(/;/g) || []).length;
-  const commaCount = (text.match(/,/g) || []).length;
-  const sep = semiCount > commaCount ? ";" : ",";
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return { headers: [], rows: [] };
-  const headers = lines[0].split(sep).map((h) => h.trim().toLowerCase().replace(/["']/g, ""));
-  const rows = lines.slice(1).map((l) => l.split(sep).map((c) => c.trim().replace(/["']/g, "")));
-  return { headers, rows };
-}
+// v2.38.2 (ревью F49): наивный parseCSV (split(sep) без кавычек) заменён
+// общим RFC-4180-парсером csv-records.ts (паритет с ZIP-импортом): запятые в
+// device_name/notes больше не сдвигают колонки.
 
 function findCol(headers: string[], names: string[]): number {
   for (const n of names) {
@@ -59,7 +52,7 @@ export async function POST(request: NextRequest) {
       return json({ error: `CSV file too large (${file.size} > ${MAX_CSV_BYTES} bytes)` }, 413, { "X-Request-Id": requestId });
     }
     const text = await file.text();
-    const { headers, rows } = parseCSV(text);
+    const { headers, rows } = parseCsvRecords(text);
 
     if (headers.length === 0) {
       return json({ error: "Empty CSV" }, 400, { "X-Request-Id": requestId });
@@ -88,6 +81,11 @@ export async function POST(request: NextRequest) {
     // обратное («группируем по deviceId»); ZIP-импорт делал это правильно.
     const fallbackClientId = randomUUID();
     const groups = new Map<string, { deviceId: string; clientId: string; deviceName?: string; points: { lat: number; lon: number; speed?: number; altitude?: number; accuracy?: number; timestamp: number; bearing?: number }[] }>();
+    // v2.38.2 (ревью F37): строки с непарсящимся таймстемпом больше НЕ получают
+    // Date.now() (фальсификация времени: «сейчас» ломало startTime/сортировку/
+    // дату поездки — фикс D-6 для sensorlogger не был применён здесь). Как в
+    // ZIP-импорте: строка отбрасывается и попадает в счётчик skipped.
+    let skippedUnparseableTs = 0;
 
     for (const row of rows) {
       const lat = Number(row[iLat]);
@@ -96,6 +94,13 @@ export async function POST(request: NextRequest) {
       // (validation.ts ±90/±180); мусорные координаты (0/999 и т.п.) не попадают в БД.
       if (isNaN(lat) || isNaN(lon)) continue;
       if (lat < -90 || lat > 90 || lon < -180 || lon > 180) continue;
+      // Нет колонки времени → Date.now() (как в ZIP); битая/пустая/отсутствующая
+      // ячейка (рваная строка короче заголовка) → skip
+      const ts = iTs < 0 ? Date.now() : row[iTs] != null ? parseTimestamp(row[iTs]) : null;
+      if (ts == null) {
+        skippedUnparseableTs++;
+        continue;
+      }
       const deviceId = iDevice >= 0 ? row[iDevice] || "csv-import" : "csv-import";
       const clientId = iClient >= 0 && row[iClient] ? row[iClient] : fallbackClientId;
       const key = `${deviceId}:${clientId}`;
@@ -110,7 +115,7 @@ export async function POST(request: NextRequest) {
         speed: iSpeed >= 0 ? finiteOrUndefined(row[iSpeed]) : undefined,
         altitude: iAlt >= 0 ? finiteOrUndefined(row[iAlt]) : undefined,
         accuracy: iAcc >= 0 ? finiteOrUndefined(row[iAcc]) : undefined,
-        timestamp: iTs >= 0 ? (parseTimestamp(row[iTs]) ?? Date.now()) : Date.now(),
+        timestamp: ts,
         // v2.18.0: bearing — finiteOrUndefined, как speed/alt/acc (АУДИТ C-22
         // для соседних полей): «Number(x) || undefined» превращал ЛЕГИТИМНЫЙ
         // bearing 0 (север) в NULL.
@@ -170,11 +175,27 @@ export async function POST(request: NextRequest) {
         await assignTripOnSessionFinalize(String(session.id)).catch(() => null);
         inc("ingest_total", "Total ingest requests", 1, "csv");
       } catch (err) {
-        errors.push({ deviceId: g.deviceId, error: err instanceof Error ? err.message : String(err) });
+        // v2.38.2 (ревью F36): err.message наружу утекал внутренности БД/libsql
+        // (имена констрейнтов, SQL) в ответе 200.errors[]. Детали — в серверный
+        // лог (с deviceId и requestId), клиенту — стабильный код ошибки.
+        const detail = err instanceof Error ? err.message : String(err);
+        logger.error("CSV import: session batch failed", {
+          requestId,
+          deviceId: g.deviceId,
+          points: g.points.length,
+          error: detail,
+        });
+        errors.push({ deviceId: g.deviceId, error: "import_failed" });
       }
     }
 
-    return json({ imported: imported.length, sessions: imported, errors }, 200, { "X-Request-Id": requestId });
+    // v2.38.2 (ревью F37): пропущенные строки (битый таймстемп) — в ответ,
+    // чтобы фальсификация времени не проходила молча
+    return json(
+      { imported: imported.length, sessions: imported, errors, skipped: { unparseableTimestamp: skippedUnparseableTs } },
+      200,
+      { "X-Request-Id": requestId }
+    );
   } catch (err) {
     logger.error("CSV import error", { requestId, error: err instanceof Error ? err.message : String(err) });
     return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });

@@ -11,6 +11,7 @@ import { inc } from "@/lib/metrics";
 import { env } from "@/lib/env";
 import { recomputeAfterSessionDelete } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): пересчёт поездок при удалении записи
 import { revokeSessionShares } from "@/lib/share"; // v2.38.1 (ревью F14): отзыв share-ссылок при удалении записи
+import { trackLatency } from "@/lib/latency"; // v2.38.2 · F43: p95 дашбордных роутов
 
 export async function GET(
   request: NextRequest,
@@ -53,6 +54,7 @@ export async function GET(
     if (!traffic.status) traffic.status = trafficJob?.status == null ? "pending" : String(trafficJob.status);
     if (traffic.trafficFetched === undefined) traffic.trafficFetched = false;
 
+    trackLatency(request); // v2.38.2 · F43: детали сессии в api_latency_p95 (§14.4)
     return json(
       {
         id: session.id,

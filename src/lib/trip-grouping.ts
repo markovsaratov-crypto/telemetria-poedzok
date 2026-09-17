@@ -41,7 +41,7 @@
 // КОНТРОЛЬНАЯ СУММА ПОЕЗДКИ (§4 ТЗ): Σ Duration(фрагментов) + Σ межфрагментных
 // пауз = TripSpan. interFragmentGapSec хранится на Trip; при нарушении (NaN,
 // отрицательный span) — warn-лог с tripId, тихих деградаций нет (§16 ТЗ).
-import { libsql } from "./db";
+import { libsql, batchChunked } from "./db";
 import { env } from "./env";
 import { logger } from "./logger";
 import { inc } from "./metrics";
@@ -384,6 +384,11 @@ export async function recomputeTripsForDevice(
   const MATCH_MS = 120_000;
   const matchedExisting = new Set<string>();
   const stmts: Array<{ sql: string; args: unknown[] }> = [];
+  // v2.38.2 (ревью F55): id каждой вычисленной поездки (матч — стабильный id
+  // существующей, новая — сгенерированный) — параллельно computed, в том же
+  // (хронологическом) порядке; нужно для проставления Session.tripId ТЕМИ ЖЕ
+  // стейтментами без перечтения Trip из БД (см. шаг 6).
+  const computedTripIds: string[] = [];
   let created = 0;
   let updated = 0;
 
@@ -395,6 +400,9 @@ export async function recomputeTripsForDevice(
     );
     const sessionIdsJson = JSON.stringify(trip.sessionIds);
     const status = trip.hasRecordingSession ? "recording" : "completed";
+    // v2.38.2 (F55): id разрешается ДО веток — одинаков для UPDATE и INSERT
+    const tripIdResolved = match ? match.id : crypto.randomUUID();
+    computedTripIds.push(tripIdResolved);
     if (match) {
       matchedExisting.add(match.id);
       const compositionChanged =
@@ -429,7 +437,7 @@ export async function recomputeTripsForDevice(
       }
       if (match.sessionCount !== trip.sessionIds.length) inc("trip_fragments_joined_total", "Fragments joined into existing trip", 1);
     } else {
-      const id = crypto.randomUUID();
+      const id = tripIdResolved; // v2.38.2 (F55): сгенерирован выше, единый источник
       created++;
       stmts.push({
         sql: `INSERT INTO Trip (id, deviceId, userId, status, startTime, endTime, spanStart, spanEnd,
@@ -485,7 +493,7 @@ export async function recomputeTripsForDevice(
 
   // ——— 5. Session.tripId: последняя поездка записи (навигация) ———
   // Сначала сбрасываем у всех записей окна, потом проставляем по составам
-  // (шаг 6 ниже, отдельным батчем — поездки уже записаны).
+  // (шаг 6 ниже — ТЕМИ ЖЕ стейтментами, тем же batch).
   const windowSessionIds = sessions.map((s) => s.id);
   for (let i = 0; i < windowSessionIds.length; i += 50) {
     const chunk = windowSessionIds.slice(i, i + 50);
@@ -493,39 +501,39 @@ export async function recomputeTripsForDevice(
     stmts.push({ sql: `UPDATE Session SET tripId = NULL WHERE id IN (${ph})`, args: chunk });
   }
 
-  // Атомарное применение (libsql.batch = implicit transaction)
+  // ——— 6. Проставляем Session.tripId — в ТОТ ЖЕ batch (v2.38.2, ревью F55) ———
+  // Раньше назначение шло ВТОРЫМ batch-ем ПОСЛЕ перечтения Trip из БД — окно
+  // рассинхрона: между батчами Session.tripId=NULL при живых Trip.sessionIds;
+  // сбой batch-2 (в т.ч. assignStmts > 500 → gateway 400) оставлял NULL до
+  // следующего пересчёта. Составы известны В ПАМЯТИ (computed + матчинг
+  // ±120 c, id стабильны — computedTripIds), перечтение не нужно: reset
+  // (шаг 5) → assign (шаг 6) применяются ОДНИМ batch — на libsql всегда
+  // атомарно, на D1 при ≤400 стейтментов (типичный пересчёт окна); свыше —
+  // группы batchChunked в детерминированном порядке (восстановление —
+  // идемпотентный повтор пересчёта, см. batchChunked в db.ts).
+  // Порядок: computed — по возрастанию startTime; запись, входящая в
+  // несколько поездок (запись на весь день), получает ПОСЛЕДНЮЮ — её UPDATE
+  // выполняется последним и перекрывает предыдущие (семантика прежнего
+  // «ORDER BY startTime ASC» при перечтении).
+  for (let ti = 0; ti < computed.length; ti++) {
+    const tripId = computedTripIds[ti];
+    for (const sid of computed[ti].sessionIds) {
+      stmts.push({ sql: `UPDATE Session SET tripId = ? WHERE id = ?`, args: [tripId, sid] });
+    }
+  }
+
+  // Атомарное применение: libsql.batch = implicit transaction;
+  // v2.38.2 (F55): ОДИН batchChunked на состав+назначение (было ДВА
+  // последовательных libsql.batch с SELECT Trip между ними)
   if (stmts.length > 0) {
     try {
-      await libsql.batch(stmts.map((s) => ({ sql: s.sql, args: s.args as never[] })));
+      await batchChunked(stmts);
     } catch (err) {
       logger.error("trip recompute batch failed", {
         requestId, deviceId, error: err instanceof Error ? err.message : String(err),
       });
       throw err;
     }
-  }
-  // ——— 6. Проставляем Session.tripId (после batch — отдельным батчем) ———
-  // Перечитываем поездки окна (id стабильны) в порядке startTime ASC: записи,
-  // входящие в несколько поездок (запись на весь день), получают ПОСЛЕДНЮЮ —
-  // её UPDATE выполняется последним и перекрывает предыдущие.
-  const afterRes = await libsql.execute({
-    sql: `SELECT id, sessionIds FROM Trip WHERE deviceId = ? AND deletedAt IS NULL AND spanEnd >= ? ORDER BY startTime ASC`,
-    args: [deviceId, new Date(windowStart).toISOString()],
-  });
-  const assignStmts: Array<{ sql: string; args: unknown[] }> = [];
-  for (const r of afterRes.rows as Record<string, unknown>[]) {
-    const tripId = String(r.id);
-    let ids: string[] = [];
-    try {
-      const parsed = JSON.parse(String(r.sessionIds ?? "[]"));
-      if (Array.isArray(parsed)) ids = parsed.map(String);
-    } catch { /* ignore */ }
-    for (const sid of ids) {
-      assignStmts.push({ sql: `UPDATE Session SET tripId = ? WHERE id = ?`, args: [tripId, sid] });
-    }
-  }
-  if (assignStmts.length > 0) {
-    await libsql.batch(assignStmts.map((s) => ({ sql: s.sql, args: s.args as never[] })));
   }
 
   inc("trip_recompute_total", "Trip recompute runs", 1);

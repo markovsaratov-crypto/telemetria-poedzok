@@ -14,6 +14,19 @@ const g = globalThis as unknown as {
 
 const TTL_MS = 60_000;
 
+// v2.38.2 (ревью F53): ключи приложения — единственные потребители in-memory
+// кэша настроек (getSettingSync/getSetting/listOverridableSettings). Таблица
+// Setting раздута геокэшем geocode:* (тысячи строк, читаются ТОЧЕЧНО через
+// getSettingDirect), и прежний refreshCache каждые 60 с делал полный
+// SELECT key, value, updatedAt FROM Setting — постоянный rows_read-шум по
+// KV-таблице (квота D1) без единого полезного чтения. Периодический тик
+// теперь — IN-запрос по 3 строкам; полный скан остаётся ТОЛЬКО на первом
+// прогреве процесса (loadedAt = 0, ensureSettingsLoaded из instrumentation) —
+// начальная семантика загрузки не изменилась. Попутно: map кэша после тика
+// вытесняет накопленные geocode-записи (их пишет setSetting геокодера) —
+// память процесса ограничена, а не растёт со временем.
+const APP_SETTING_KEYS = ["TWO_GIS_API_KEY", "TWO_GIS_PROXY_URL", "OSRM_BASE_URL"] as const;
+
 function getStore() {
   if (!g[GLOBAL_KEY]) {
     g[GLOBAL_KEY] = {
@@ -30,7 +43,15 @@ async function refreshCache(): Promise<void> {
   if (store.loading) return store.loading;
   store.loading = (async () => {
     try {
-      const res = await libsql.execute("SELECT key, value, updatedAt FROM Setting");
+      // v2.38.2 (F53): первый прогрев процесса — полный скан (прежняя
+      // семантика); каждый последующий TTL-тик — только ключи приложения.
+      const full = store.loadedAt === 0;
+      const res = full
+        ? await libsql.execute("SELECT key, value, updatedAt FROM Setting")
+        : await libsql.execute({
+            sql: `SELECT key, value, updatedAt FROM Setting WHERE key IN (${APP_SETTING_KEYS.map(() => "?").join(", ")})`,
+            args: [...APP_SETTING_KEYS] as never[],
+          });
       const next = new Map<string, { value: string; updatedAt: number }>();
       for (const row of res.rows) {
         const r = row as Record<string, unknown>;
@@ -75,9 +96,12 @@ export async function getSetting(key: string): Promise<string> {
 }
 
 // v2.18.0: прямой точечный read для записей, которых НЕТ в кэше настроек
-// (geocode:* — тысячи строк). getSetting(key) гоняет refreshCache() — полную
-// загрузку ВСЕЙ таблицы Setting в Map раз в 60с TTL; дешёвые точечные записи
-// теперь читаются одним SELECT WHERE key = ? без этого churn'а.
+// (geocode:* — тысячи строк). Раньше getSetting(key) гонял refreshCache() —
+// полную загрузку ВСЕЙ таблицы Setting в Map раз в 60с TTL; дешёвые точечные
+// записи читаются одним SELECT WHERE key = ? без этого churn'а.
+// v2.38.2 (F53): периодический refreshCache читает только ключи приложения
+// (IN-список), geocode-записи в in-memory кэш больше не попадают ВООБЩЕ —
+// прямой read остаётся единственным путём к ним (семантика v2.18.0 сохранена).
 export async function getSettingDirect(key: string): Promise<string> {
   try {
     const res = await libsql.execute({

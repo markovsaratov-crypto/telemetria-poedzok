@@ -50,7 +50,7 @@ import { getCorpusEcoBaselines } from "./eco-corpus";
  * session-events.ts / session-track.ts (поля, нормализация, пороги) → bump
  * здесь: все существующие кэши станут протухшими и пересчитаются on-demand.
  */
-export const SESSION_CACHE_VERSION = 8; // v2.33.0: план = время 2ГИС с пробками на момент старта (utc) — planDurationSec/speedDeviationPct/durationDeviationPct в кэшированных payloads пересчитаны; базовая линия §3.2 осталась только для timeLostToTrafficSec
+export const SESSION_CACHE_VERSION = 9; // v2.38.2: EcoScore penalty-экспонента 1.5→2 (§7.3, ревью F65) — кэшированные EcoScore/rating пересчитываются on-demand; было 8 (v2.33.0: план = время 2ГИС с пробками на момент старта (utc) — planDurationSec/speedDeviationPct/durationDeviationPct в кэшированных payloads пересчитаны; базовая линия §3.2 осталась только для timeLostToTrafficSec)
 
 export interface SessionCacheMeta {
   id: string;
@@ -128,18 +128,58 @@ export async function loadSessionMetasWithCache(
  * Кэш свеж? Версия схемы совпала И число точек на момент расчёта равно
  * текущему Session.pointCount. Инжест пишет pointCount += N каждым батчем —
  * активная recording-сессия автоматически «протухает» и пересчитывается.
+ *
+ * v2.38.2 (ревью F51): необязательный `fields` делает «свежесть» ЧЕСТНОЙ
+ * относительно самих кэш-полей: NULL/пустое/маркер oversized (см.
+ * SESSION_CACHE_OVERSIZED ниже) = «не свежо». До этого гвард записи при
+ * превышении D1-лимита 2 МБ писал NULL в поле, но проставлял
+ * cachePointCount/cacheVersion → функция формально отвечала «да», а
+ * негодность кэша каждый call-site выявлял ручной проверкой
+ * parseCachedJson(...) == null — хрупкий контракт (легко потерять в новом
+ * call-site). Без `fields` — прежняя семантика (только версия+состав):
+ * существующие вызовы (speed-record) не меняют поведения.
  */
-export function isSessionCacheFresh(meta: SessionCacheMeta): boolean {
-  return (
+export function isSessionCacheFresh(
+  meta: SessionCacheMeta,
+  fields?: Array<"stats" | "events" | "track">
+): boolean {
+  const base =
     meta.cacheVersion === SESSION_CACHE_VERSION &&
     meta.cachePointCount != null &&
     meta.pointCount != null &&
-    meta.cachePointCount === meta.pointCount
+    meta.cachePointCount === meta.pointCount;
+  if (!base || !fields || fields.length === 0) return base;
+  return fields.every((f) =>
+    isCacheFieldUsable(
+      f === "stats" ? meta.statsCache : f === "events" ? meta.eventsCache : meta.trackCache
+    )
   );
 }
 
-/** Безопасный разбор JSON-кэша: битая строка = «нет кэша» (пересчёт). */
+// ——— v2.38.2 (ревью F51): ЯВНЫЙ маркер oversized-кэша ———
+// Payload > D1-лимита строки (гвард в persistSessionCaches) физически не
+// может быть сохранён. Раньше такое поле писалось как NULL — неотличимо
+// от «не посчитано», а cachePointCount/cacheVersion при этом
+// проставлялись → формальная «свежесть» при негодном кэше + БЕССМЫСЛЕННЫЙ
+// UPDATE (write-amplification) на каждый запрос такой сессии. Теперь:
+//   • поле хранит МАРКЕР: parseCachedJson возвращает null (не JSON),
+//     isSessionCacheFresh(meta, ["track"]) честно отвечает «не свежо»;
+//   • persistSessionCaches пропускает запись строк, где ВСЕ запрошенные
+//     поля — маркер/NULL (см. комментарий там) — пересчёт on-demand
+//     остаётся (данные обязаны попасть в ответ), но rows_written D1
+//     больше не сгорают на перезапись того же состояния.
+export const SESSION_CACHE_OVERSIZED = "__TELEMAT_CACHE_OVERSIZED__";
+
+/** Поле кэша пригодно к использованию? NULL/пусто/маркер oversized → нет. */
+export function isCacheFieldUsable(raw: string | null): boolean {
+  return raw != null && raw !== "" && raw !== SESSION_CACHE_OVERSIZED;
+}
+
+/** Безопасный разбор JSON-кэша: битая строка = «нет кэша» (пересчёт).
+ * v2.38.2 (F51): маркер oversized — явная ветка (самодокументирование
+ * контракта, не полагаемся на исключение JSON.parse). */
 export function parseCachedJson<T>(raw: string | null): T | null {
+  if (raw === SESSION_CACHE_OVERSIZED) return null;
   if (raw == null || raw === "") return null;
   try {
     return JSON.parse(raw) as T;
@@ -192,23 +232,37 @@ export async function persistSessionCaches(
           const args: unknown[] = [row.cachePointCount, SESSION_CACHE_VERSION];
           // v2.37.0 (миграция D1): строка/блоб в D1 ≤ 2 МБ. Кэш — производные
           // данные (null = «не посчитано», пересчёт on-demand): oversized-payload
-          // пишем как NULL — сессия просто пересчитывается при каждом запросе
-          // (замеры сентября 2026: единственный кейс — trackCache 4 МБ одной
-          // сессии из 56К точек). На Turso-пути гвард нейтрален.
+          // помечается МАРКЕРОМ SESSION_CACHE_OVERSIZED (v2.38.2, F51; раньше —
+          // NULL, неотличимый от «не посчитано») — сессия пересчитывается при
+          // каждом запросе (замеры сентября 2026: единственный кейс — trackCache
+          // 4 МБ одной сессии из 56К точек). На Turso-пути гвард нейтрален.
           const D1_MAX_CACHE = 1_500_000; // запас до лимита 2 МБ
           const guard = (name: "statsJson" | "eventsJson" | "trackJson", v: string | undefined): string | null => {
             if (v == null) return null;
             if (v.length > D1_MAX_CACHE) {
-              logger.warn("session cache payload oversized → NULL (per-request recompute)", {
+              logger.warn("session cache payload oversized → marker (per-request recompute)", {
                 sessionId: row.id, field: name, bytes: v.length,
               });
-              return null;
+              return SESSION_CACHE_OVERSIZED;
             }
             return v;
           };
-          if (fields.includes("stats")) args.push(guard("statsJson", row.statsJson));
-          if (fields.includes("events")) args.push(guard("eventsJson", row.eventsJson));
-          if (fields.includes("track")) args.push(guard("trackJson", row.trackJson));
+          const values: Array<string | null> = [];
+          if (fields.includes("stats")) values.push(guard("statsJson", row.statsJson));
+          if (fields.includes("events")) values.push(guard("eventsJson", row.eventsJson));
+          if (fields.includes("track")) values.push(guard("trackJson", row.trackJson));
+          // v2.38.2 (ревью F51): write-amplification — если ВСЕ запрошенные поля
+          // оказались маркером/NULL, UPDATE не нужен: он записал бы ровно то
+          // состояние, которое уже в БД (или перезаписал NULL). Смешанные строки
+          // (годное поле + oversized) пишутся как раньше — годные поля обязаны
+          // попасть в кэш; oversized-сессия с единственным полем не пишет ВООБЩЕ
+          // (пересчёт on-demand — единственный путь данных, D1 rows_written
+          // экономятся). cachePointCount при пропуске не пишется — мета
+          // остаётся «протухшей», т.е. честно нестабильной для такой сессии.
+          if (values.every((v) => v == null || v === SESSION_CACHE_OVERSIZED)) {
+            return Promise.resolve();
+          }
+          args.push(...values);
           args.push(row.id);
           return libsql.execute({ sql, args: args as never[] });
         })

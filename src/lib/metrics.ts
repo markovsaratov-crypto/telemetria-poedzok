@@ -99,3 +99,14 @@ inc("retention_runs_total", "Retention cron runs", 0);
 inc("session_delete_total", "Session soft-deletes", 0);
 inc("trip_delete_total", "Trip deletes (user request)", 0); // v2.30.0: DELETE /api/trips/[id]
 inc("audit_log_total", "Audit log entries", 0);
+// v2.38.2 (ревью F52): телеметрия квоты D1. Шлюз (d1-gateway.js) возвращает
+// meta.rows_read/rows_written с каждым /query и результатом /batch; db-d1.ts
+// агрегирует их сюда. Счётчики пер-процессные (in-memory, как весь реестр:
+// рестарт обнуляет — rate() в Grafana строится по приросту). Дневной бюджет
+// free-тира D1 = 5 млн строк чтения (инцидент 16.09.2026 — OPERATIONS.md §5а);
+// экспорт этих счётчиков делает расход наблюдаемым (алерт на дневной лимит —
+// задача дашборда, значение уже не теряется).
+export const D1_ROWS_READ_TOTAL = "d1_rows_read_total";
+export const D1_ROWS_WRITTEN_TOTAL = "d1_rows_written_total";
+inc(D1_ROWS_READ_TOTAL, "D1 rows read (gateway meta, cumulative per process)", 0);
+inc(D1_ROWS_WRITTEN_TOTAL, "D1 rows written (gateway meta, cumulative per process)", 0);

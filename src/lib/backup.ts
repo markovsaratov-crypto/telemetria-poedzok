@@ -29,21 +29,41 @@ const SETTING_MASKED_VALUE = "[REDACTED-BY-BACKUP]";
  * (сессия создана инжестом ПОСЛЕ дампа Session) в дамп не попадают → restore
  * не падает по FK. includeNullSessionId — строки без сессии (TrafficJob
  * поездок v2.26, системный аудит): FK-сиротами быть не могут, дампятся целиком.
+ *
+ * v2.38.2 (ревью F58): keyset-пагинация по id ВНУТРИ каждого чанка/ветки —
+ * `AND id > ? ORDER BY id ASC LIMIT ?` в цикле. Раньше один SELECT по чанку
+ * ≤90 сессий возвращал ВСЕ их строки ОДНИМ ответом (GpsPoint: 90 сессий ×
+ * тысячи точек = десятки МБ JSON — память изолята шлюза и приложения; часть
+ * F58 про лимит тела запроса шлюза закрыта в v2.38.1 — эта часть про размер
+ * ВЫВОДА). Курсор — текстовый PK (cuid; лексикографический порядок
+ * совпадает с ORDER BY id), '' стартует с начала. Пост-чек снапшота
+ * (Σ pointCount == точки live-сессий в дампе) не меняется — считаются все
+ * собранные строки. Порядок строк в дампе становится id-ASC (restore и
+ * checksum порядка не зависят; метаданные watermark — тоже).
  */
+const CHILD_PAGE_ROWS = 5000; // строк на один ответ шлюза (~0,4–0,8 МБ JSON для GpsPoint)
+
 async function dumpChildRows(table: string, sessionIds: string[], includeNullSessionId: boolean): Promise<unknown[]> {
   const out: unknown[] = [];
+  const dumpPages = async (whereSql: string, args: unknown[]): Promise<void> => {
+    let lastId = "";
+    for (;;) {
+      const res = await libsql.execute({
+        sql: `SELECT * FROM ${table} WHERE ${whereSql} AND id > ? ORDER BY id ASC LIMIT ?`,
+        args: [...args, lastId, CHILD_PAGE_ROWS] as never[],
+      });
+      out.push(...res.rows);
+      if (res.rows.length < CHILD_PAGE_ROWS) break;
+      lastId = String((res.rows[res.rows.length - 1] as Record<string, unknown>).id);
+    }
+  };
   for (let i = 0; i < sessionIds.length; i += D1_PARAM_BUDGET) {
     const chunk = sessionIds.slice(i, i + D1_PARAM_BUDGET);
     const ph = chunk.map(() => "?").join(", ");
-    const res = await libsql.execute({
-      sql: `SELECT * FROM ${table} WHERE sessionId IN (${ph})`,
-      args: chunk as never[],
-    });
-    out.push(...res.rows);
+    await dumpPages(`sessionId IN (${ph})`, chunk);
   }
   if (includeNullSessionId) {
-    const res = await libsql.execute(`SELECT * FROM ${table} WHERE sessionId IS NULL`);
-    out.push(...res.rows);
+    await dumpPages("sessionId IS NULL", []);
   }
   return out;
 }

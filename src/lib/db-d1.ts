@@ -23,6 +23,10 @@
 // (IngestMessage, уникальные ключи, worker attempts).
 
 import type { Client, InStatement, InValue, ResultSet } from "@libsql/client";
+// v2.38.2 (ревью F52): квота D1 — метрики rows_read/rows_written. metrics.ts
+// не импортирует ничего (листь графа модулей) — цикла не возникает; db-d1
+// используется только на ветке USING_D1 → счётчики растут только на D1.
+import { inc, D1_ROWS_READ_TOTAL, D1_ROWS_WRITTEN_TOTAL } from "./metrics";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -49,6 +53,16 @@ function toInValue(v: unknown): InValue {
 }
 
 function toResultSet(r: GatewayQueryResult): ResultSet {
+  // v2.38.2 (ревью F52): meta.rows_read/rows_written от шлюза больше НЕ
+  // выбрасываются — агрегируются в счётчики metrics.ts (экспонируются в
+  // /api/metrics). До инцидента выгорания дневной квоты чтений D1
+  // (16.09.2026, OPERATIONS.md §5а) телеметрии расхода не было вовсе;
+  // теперь дневной бюджет наблюдаем (алерт по приросту — задача дашборда).
+  // Работает и для /query, и для каждого результата /batch (map ниже).
+  const read = r.meta?.rowsRead;
+  const written = r.meta?.rowsWritten;
+  if (typeof read === "number" && read > 0) inc(D1_ROWS_READ_TOTAL, "", read);
+  if (typeof written === "number" && written > 0) inc(D1_ROWS_WRITTEN_TOTAL, "", written);
   return {
     columns: Object.keys(r.rows[0] ?? {}),
     rows: r.rows,

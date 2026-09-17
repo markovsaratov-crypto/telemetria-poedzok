@@ -16,7 +16,11 @@ model User {
   sessions     Session[]
   routes       Route[]
   auditLogs    AuditLog[]
-  @@index([role])
+  // v2.38.2 (ревью F56): @@index([role]) УДАЛЁН — индекса User_role_idx в
+  // прод-D1 НЕТ (схема врала о несуществующем объекте — тот же класс дрифта,
+  // что _SessionTrips/GpsPoint_sessionId_idx из v2.38.1/F26), а запросов по
+  // role приложение не имеет (фильтрация — по id/email/apiKey; селективность
+  // role ~2 значения — индекс и не нужен). Схема = фактическая прод-схема.
 }
 
 datasource db {
@@ -82,6 +86,15 @@ model Session {
   @@index([deletedAt])
   @@index([startTime])
   @@index([tripId])        // v2.26.0: поездка записи (навигация/диагностика)
+  // v2.38.2 (ревью F50): индекс списковых запросов. ВСЕ списковые/агрегатные
+  // чтения фильтруют userId = ?/IS NULL и сортируют по startTime (scope-предикаты
+  // роутов, db.session.findMany/count/aggregate) — без индекса каждый такой
+  // запрос full-scan (выжигает rows_read-квоту D1; RETENTION_DAYS=3650 = годы
+  // роста). У Trip парный [userId, spanStart] был с v2.26. Реальное DDL —
+  // идемпотентный ensure-on-boot в src/lib/db.ts (ensureSessionIndexes):
+  // Prisma здесь — только типы; на прод-D1 индекс строится при первом деплое
+  // (после расширения DDL-вайтлиста шлюза — см. комментарий F50 в db.ts).
+  @@index([userId, startTime])
 }
 
 // v2.26.0 (ТЗ «Поездка не рвётся на куски», §4/§6): каноническая сущность
@@ -160,6 +173,11 @@ model GpsPoint {
   // индекса GpsPoint_sessionId_idx НЕТ (избыточен: составной индекс ниже
   // покрывает все запросы по sessionId; см. OPERATIONS.md §5 «Лимиты и
   // особенности D1»). Схема = фактическая прод-схема (schema drift закрыт).
+  // v2.38.2 (ревью F56): ревизия дрифта завершена — НЕСУЩЕСТВУЮЩИХ объектов в
+  // схеме больше нет (User_role_idx удалён выше; _SessionTrips и
+  // GpsPoint_sessionId_idx — v2.38.1). Рантайм-таблицы вне prisma-моделей
+  // (_AlertState, ShareToken, _ExportJobLock) создаются ensure-on-boot DDL в
+  // коде — в схеме не отражаются (тот же статус, что у _AlertState).
   @@index([sessionId, timestamp])
 }
 

@@ -10,6 +10,9 @@
 // доступен и в Node.js (>=14.18) и в Edge Runtime. Семантика идентична.
 import { createClient, type Client, type InValue } from "@libsql/client";
 import { createD1Client } from "./db-d1";
+// v2.38.2: logger — лист графа модулей (импортов нет), Edge-safe (console +
+// process.env-полифилл); нужен для ensure-on-boot DDL F50 и компенсации F57.
+import { logger } from "./logger";
 
 const globalForDb = globalThis as unknown as {
   libsqlClient: Client | undefined;
@@ -91,6 +94,39 @@ function createDbClient(): Client {
 
 export const libsql = globalForDb.libsqlClient ?? createDbClient();
 if (process.env.NODE_ENV !== "production") globalForDb.libsqlClient = libsql;
+
+// ——— v2.38.2 (ревью F50): ensure-on-boot DDL индекса Session(userId, startTime) ———
+// Все списковые/агрегатные запросы фильтруют userId = ?/IS NULL и сортируются
+// по startTime (session.count/findMany/aggregate, scope-предикаты роутов).
+// При RETENTION_DAYS=3650 таблица растёт годами — без индекса каждый такой
+// запрос = full-scan, выжигающий rows_read-квоту D1 (у Trip индекс [userId,
+// spanStart] есть, у Session не было). Prisma здесь — только типы
+// (schema.prisma отражает индекс декларативно); реальное DDL — идемпотентный
+// ensure-on-boot (паттерн _AlertState/_ExportJobLock/ShareToken).
+// D1-НЮАНС: вайтлист шлюза (cloudflare-worker/d1-gateway.js) сегодня
+// пропускает только CREATE TABLE _AlertState — CREATE INDEX вернёт 403;
+// залогируем warn один раз и не ретраим до рестарта процесса. Владельцу для
+// прода: расширить вайтлист шлюза (одно регулярное выражение) ИЛИ выполнить
+// DDL руками (wrangler/D1-консоль):
+//   CREATE INDEX IF NOT EXISTS Session_userId_startTime_idx
+//     ON Session(userId, startTime);
+// На Turso/файл-пути применяется сразу. На прод-D1 индекс строится при
+// первом деплое после расширения вайтлиста (IF NOT EXISTS — повтор no-op).
+let sessionIndexesEnsured = false;
+export async function ensureSessionIndexes(): Promise<void> {
+  if (sessionIndexesEnsured) return;
+  sessionIndexesEnsured = true; // до попытки: сбой (403 шлюза/сеть) не ретраится до рестарта
+  try {
+    await libsql.execute(
+      "CREATE INDEX IF NOT EXISTS Session_userId_startTime_idx ON Session(userId, startTime)"
+    );
+    logger.info("Session(userId, startTime) index ensured (F50)");
+  } catch (err) {
+    logger.warn("Session(userId, startTime) index ensure failed (non-fatal; на D1 — вайтлист DDL шлюза, см. F50 в db.ts)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 // Helper to convert snake_case DB rows to camelCase objects.
 // v2.16.0: экспортирована — worker-runtime.ts и db-обёртки используют единую реализацию.
@@ -232,6 +268,92 @@ async function fetchRouteById(routeId: unknown): Promise<Record<string, unknown>
   return res.rows.length > 0 ? toCamel(res.rows[0] as Record<string, unknown>) : null;
 }
 
+// ——— v2.38.2 (ревью F47/F54): батч-доставка дочерних строк списка сессий ———
+// Раньше findMany(select/include) и trafficJob.findMany(include.session)
+// гоняли fetchGpsPoints/fetchTrafficJobs/SELECT Session ПОСТРОЧНО — классический
+// N+1 (take до 5000 строк × 1 раундтрип). Теперь: один IN-запрос на чанк ≤8
+// сессий (паттерн batch-points.ts: 8 сессий × ~тысячи точек — ограниченный
+// ответ/память шлюза; IN-лист ≤90 параметров), группировка по sessionId с
+// сохранением хронологии (ORDER BY … ASC → подпоследовательность каждой
+// сессии остаётся asc). Prisma-опции (orderBy desc/take/select) применяются
+// к каждой сессии в памяти — семантика прежних построчных выборок дословно.
+const RELATION_SESSION_CHUNK = 8;
+
+async function fetchGpsPointsForSessions(sessionIds: string[]): Promise<Map<string, Record<string, unknown>[]>> {
+  const out = new Map<string, Record<string, unknown>[]>();
+  for (let i = 0; i < sessionIds.length; i += RELATION_SESSION_CHUNK) {
+    const chunk = sessionIds.slice(i, i + RELATION_SESSION_CHUNK);
+    const ph = chunk.map(() => "?").join(", ");
+    const res = await libsql.execute({
+      sql: `SELECT * FROM GpsPoint WHERE sessionId IN (${ph}) ORDER BY timestamp ASC`,
+      args: chunk as InValue[],
+    });
+    for (const r of res.rows as Record<string, unknown>[]) {
+      const sid = String(r.sessionId);
+      const p = toCamel(r);
+      p.timestamp = Number(p.timestamp);
+      let arr = out.get(sid);
+      if (!arr) { arr = []; out.set(sid, arr); }
+      arr.push(p);
+    }
+  }
+  return out;
+}
+
+async function fetchTrafficJobsForSessions(sessionIds: string[]): Promise<Map<string, Record<string, unknown>[]>> {
+  const out = new Map<string, Record<string, unknown>[]>();
+  for (let i = 0; i < sessionIds.length; i += RELATION_SESSION_CHUNK) {
+    const chunk = sessionIds.slice(i, i + RELATION_SESSION_CHUNK);
+    const ph = chunk.map(() => "?").join(", ");
+    const res = await libsql.execute({
+      sql: `SELECT * FROM TrafficJob WHERE sessionId IN (${ph}) ORDER BY createdAt ASC`,
+      args: chunk as InValue[],
+    });
+    for (const r of res.rows as Record<string, unknown>[]) {
+      const sid = String(r.sessionId);
+      let arr = out.get(sid);
+      if (!arr) { arr = []; out.set(sid, arr); }
+      arr.push(toCamel(r));
+    }
+  }
+  return out;
+}
+
+/** Точки сессии уже загружены (asc); применить orderBy/take/select — как
+ *  fetchGpsPoints, но без SQL (дефолт порядка — asc). */
+function shapePoints(rows: Record<string, unknown>[] | undefined, opts: RelationOpts): Record<string, unknown>[] {
+  const o = (opts === true ? {} : opts || {}) as { orderBy?: { timestamp?: string }; take?: number; select?: Record<string, boolean> };
+  let out = rows ?? [];
+  if (o.orderBy?.timestamp === "desc") out = [...out].reverse();
+  if (o.take) out = out.slice(0, o.take);
+  if (o.select) out = out.map((r) => projectScalars(r, o.select as Record<string, boolean>));
+  return out;
+}
+
+/** Джобы сессии уже загружены (asc); дефолт порядка — DESC, как в
+ *  fetchTrafficJobs (только явный orderBy.createdAt:"asc" даёт asc). */
+function shapeJobs(rows: Record<string, unknown>[] | undefined, opts: RelationOpts): Record<string, unknown>[] {
+  const o = (opts === true ? {} : opts || {}) as { orderBy?: { createdAt?: string }; take?: number };
+  let out = rows ?? [];
+  if (o.orderBy?.createdAt !== "asc") out = [...out].reverse();
+  if (o.take) out = out.slice(0, o.take);
+  return out;
+}
+
+/** Route по списку id — один IN-запрос на ≤90 (строки маленькие, чанк крупнее,
+ *  чем у точек); null/пустые id пропускаются. */
+async function fetchRoutesByIds(routeIds: unknown[]): Promise<Map<string, Record<string, unknown>>> {
+  const out = new Map<string, Record<string, unknown>>();
+  const ids = [...new Set(routeIds.filter((v): v is string => typeof v === "string" && v.length > 0))];
+  for (let i = 0; i < ids.length; i += D1_PARAM_BUDGET) {
+    const chunk = ids.slice(i, i + D1_PARAM_BUDGET);
+    const ph = chunk.map(() => "?").join(", ");
+    const res = await libsql.execute({ sql: `SELECT * FROM Route WHERE id IN (${ph})`, args: chunk as InValue[] });
+    for (const r of res.rows as Record<string, unknown>[]) out.set(String(r.id), toCamel(r));
+  }
+  return out;
+}
+
 // Applying select/include to a Session row (supports nested relations with orderBy/take/select)
 async function projectSession(
   row: Record<string, unknown>,
@@ -262,6 +384,8 @@ async function projectSession(
 export const db = {
   session: {
     async count(args?: { where?: Record<string, unknown> }) {
+      // v2.38.2 (F50): ленивый ensure-on-boot индекса (userId, startTime)
+      void ensureSessionIndexes();
       let sql = "SELECT COUNT(*) as count FROM Session WHERE deletedAt IS NULL";
       const params: unknown[] = [];
       if (args?.where?.status) { sql += " AND status = ?"; params.push(args.where.status); }
@@ -293,6 +417,9 @@ export const db = {
       include?: Record<string, unknown>;
       select?: Record<string, unknown>;
     }) {
+      // v2.38.2 (F50): ленивый ensure-on-boot индекса (userId, startTime) — один
+      // раз на процесс, fire-and-forget (не задерживает первый запрос).
+      void ensureSessionIndexes();
       const HARD_CAP = 5000;
       const take = Math.min(args?.take ?? HARD_CAP, HARD_CAP);
       const w = args?.where || {};
@@ -421,14 +548,21 @@ export const db = {
 
       const result = await libsql.execute({ sql, args: params as InValue[] });
       const rows = result.rows.map(r => toCamel(r as Record<string, unknown>));
-      // select: скалярные поля + вложенные gpsPoints/route (P0-2)
+      // select: скалярные поля + вложенные gpsPoints (P0-2)
+      // v2.38.2 (ревью F47/F54): gpsPoints — БАТЧ на весь список (один IN-запрос
+      // на чанк ≤8 сессий) вместо построчного fetchGpsPoints — N+1 при take
+      // до 5000 устранён; orderBy/take/select применяются в памяти (shapePoints)
       if (args?.select) {
+        const wantPoints = !!args.select.gpsPoints;
+        const pointsMap = wantPoints
+          ? await fetchGpsPointsForSessions(rows.map((r) => String(r.id)))
+          : null;
         const out: Record<string, unknown>[] = [];
         for (const row of rows) {
           const proj: Record<string, unknown> = {};
           for (const [k, v] of Object.entries(args.select)) {
             if (!v) continue;
-            if (k === "gpsPoints") proj.gpsPoints = await fetchGpsPoints(row.id as string, args.select.gpsPoints as RelationOpts);
+            if (k === "gpsPoints") proj.gpsPoints = shapePoints(pointsMap?.get(String(row.id)), args.select.gpsPoints as RelationOpts);
             else if (k in row) proj[k] = row[k];
           }
           out.push(proj);
@@ -439,10 +573,22 @@ export const db = {
       // v2.16.0 (B-2): исправлен no-op — раньше результат projectSession ВЫБРАСЫВАЛСЯ
       // (`await projectSession(row, ...)` без присваивания), т.е. include в findMany
       // молча не работал и возвращал только скаляры. Теперь строки проектируются.
+      // v2.38.2 (ревью F47/F54): дочерние строки — БАТЧЕМ на весь список (было
+      // построчно внутри projectSession — N+1); одиночный findUnique остаётся на
+      // projectSession (одна строка — N+1 нет).
       if (args?.include) {
+        const inc = args.include;
+        const ids = rows.map((r) => String(r.id));
+        const pointsMap = inc.gpsPoints ? await fetchGpsPointsForSessions(ids) : null;
+        const jobsMap = inc.trafficJobs ? await fetchTrafficJobsForSessions(ids) : null;
+        const routesMap = inc.route ? await fetchRoutesByIds(rows.map((r) => r.routeId)) : null;
         const out: Record<string, unknown>[] = [];
         for (const row of rows) {
-          out.push(await projectSession(row, undefined, args.include));
+          const session = toCamel(row);
+          if (inc.gpsPoints) session.gpsPoints = shapePoints(pointsMap?.get(String(session.id)), inc.gpsPoints as RelationOpts);
+          if (inc.trafficJobs) session.trafficJobs = shapeJobs(jobsMap?.get(String(session.id)), inc.trafficJobs as RelationOpts);
+          if (inc.route) session.route = routesMap ? (routesMap.get(String(session.routeId)) ?? null) : null;
+          out.push(session);
         }
         return out;
       }
@@ -452,6 +598,8 @@ export const db = {
     // литеральный дубль внизу файла, затираемый (db as any)-патчем, удалён;
     // сигнатура — как у живого патча: _sum.payloadBytes/_sum.pointCount/_count.id)
     async aggregate(args: { _sum?: { payloadBytes?: boolean; pointCount?: boolean }; _count?: { id?: boolean }; where?: { status?: string; userId?: null | string } }) {
+      // v2.38.2 (F50): ленивый ensure-on-boot индекса (userId, startTime)
+      void ensureSessionIndexes();
       let sql = "SELECT";
       const params: unknown[] = [];
       const parts: string[] = [];
@@ -613,6 +761,9 @@ export const db = {
       // параметров / libsql <999); раньше формула дублировалась по call-site'ам
       const CH = multiRowInsertChunk(cols.length);
       const chunkStmts: Array<{ sql: string; args: InValue[] }> = [];
+      // v2.38.2 (ревью F57): клиентские id строк каждого стейтмента — для
+      // компенсации частичного сбоя между группами (id — ПЕРВАЯ колонка).
+      const stmtRowIds: string[][] = [];
       for (let i = 0; i < rows.length; i += CH) {
         const chunk = rows.slice(i, i + CH);
         const placeholders = chunk.map(() => ph).join(", ");
@@ -620,14 +771,49 @@ export const db = {
           sql: `INSERT INTO GpsPoint (${cols.join(", ")}) VALUES ${placeholders}`,
           args: chunk.flat() as InValue[],
         });
+        stmtRowIds.push(chunk.map((r) => String(r[0])));
       }
       // v2.37.0: на D1 чанки идут атомарными группами (gateway-batch ≤400
       // стейтментов) — меньше раунд-трипов и нет частично вставленных батчей
       // внутри группы; на libsql — прежние последовательные execute.
       // v2.38.1 (ревью F5): группы режутся общим chunkStatements (≤400).
+      // v2.38.2 (ревью F57): атомарность МЕЖДУ группами недостижима при
+      // >400 стейтментов (≈4000 точек при 10 строках/INSERT — предел шлюза
+      // 500): помечено partial. Компенсация: сбой группы K → DELETE уже
+      // закоммиченных строк ЭТОГО вызова по клиентским id (генерируются до
+      // вставки; DELETE чанками ≤90 идемпотентен и безопасен к повтору),
+      // исходная ошибка прокидывается наружу. Recovery сессии: инжест
+      // идемпотентен по ledger'у IngestMessage (deviceId,messageId) —
+      // HTTP-ретрай не дублирует точки; расхождение pointCount↔GpsPoint
+      // закрывается пересчётом/финализацией (считают фактические строки).
+      // Транзакционный путь ($transaction → makeBufferedTxExecutor) буфер
+      // не компенсирует — его семантика описана при batchChunked (F3/F5).
       if (USING_D1) {
-        for (const group of chunkStatements(chunkStmts)) {
-          await libsql.batch(group as never);
+        const groups = chunkStatements(chunkStmts);
+        const committed: string[] = [];
+        let stmtCursor = 0;
+        try {
+          for (const group of groups) {
+            await libsql.batch(group as never);
+            committed.push(...stmtRowIds.slice(stmtCursor, stmtCursor + group.length).flat());
+            stmtCursor += group.length;
+          }
+        } catch (err) {
+          try {
+            for (let i = 0; i < committed.length; i += D1_PARAM_BUDGET) {
+              const idChunk = committed.slice(i, i + D1_PARAM_BUDGET);
+              const dph = idChunk.map(() => "?").join(", ");
+              await libsql.execute({ sql: `DELETE FROM GpsPoint WHERE id IN (${dph})`, args: idChunk as InValue[] });
+            }
+          } catch (compErr) {
+            // компенсация — best-effort: строки-хвост останутся до ручной
+            // чистки (ledger защитит от дублей при ретрае); исходная ошибка не маскируется
+            logger.warn("gpsPoint.createMany: компенсация частичного сбоя не удалась (non-fatal)", {
+              inserted: committed.length,
+              error: compErr instanceof Error ? compErr.message : String(compErr),
+            });
+          }
+          throw err;
         }
       } else {
         for (const st of chunkStmts) {
@@ -682,18 +868,30 @@ export const db = {
       const jobs = result.rows.map(r => toCamel(r as Record<string, unknown>));
       if (args?.include?.session) {
         const wantPoints = !!(args.include.session as { select?: { gpsPoints?: unknown } }).select?.gpsPoints;
+        // v2.38.2 (ревью F54): батч — один IN-запрос Session на ≤90 id + чанки
+        // точек ≤8 сессий (раньше ПОСТРОЧНЫЕ «SELECT * FROM Session WHERE id = ?»
+        // + GpsPoint на каждый джоб — N+1 при take 50 = до 100 раундтрипов).
+        // Фильтра deletedAt НЕТ и раньше не было (воркеру нужны и удалённые).
+        const sessIds = [...new Set(jobs.map((j) => String(j.sessionId ?? "")).filter(Boolean))];
+        const sessMap = new Map<string, Record<string, unknown>>();
+        for (let i = 0; i < sessIds.length; i += D1_PARAM_BUDGET) {
+          const chunk = sessIds.slice(i, i + D1_PARAM_BUDGET);
+          const ph = chunk.map(() => "?").join(", ");
+          const sRes = await libsql.execute({ sql: `SELECT * FROM Session WHERE id IN (${ph})`, args: chunk as InValue[] });
+          for (const r of sRes.rows as Record<string, unknown>[]) sessMap.set(String(r.id), toCamel(r));
+        }
+        const pointsMap = wantPoints ? await fetchGpsPointsForSessions(sessIds) : null;
+        // та же проекция 7 полей, что в прежнем построчном SELECT точек
+        const ptsSelect = { lat: true, lon: true, speed: true, altitude: true, accuracy: true, bearing: true, timestamp: true };
         for (const job of jobs) {
-          const sResult = await libsql.execute({ sql: "SELECT * FROM Session WHERE id = ?", args: [job.sessionId as InValue] });
-          if (sResult.rows.length > 0) {
-            const session = toCamel(sResult.rows[0] as Record<string, unknown>);
-            if (wantPoints) {
-              const pts = await libsql.execute({ sql: "SELECT lat, lon, speed, altitude, accuracy, bearing, timestamp FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC", args: [job.sessionId as InValue] });
-              session.gpsPoints = pts.rows.map(r => { const p = toCamel(r as Record<string, unknown>); p.timestamp = Number(p.timestamp); return p; });
-            } else {
-              delete session.gpsPoints;
-            }
-            job.session = session;
+          const session = sessMap.get(String(job.sessionId ?? ""));
+          if (!session) continue;
+          if (wantPoints) {
+            session.gpsPoints = shapePoints(pointsMap?.get(String(job.sessionId)), { select: ptsSelect });
+          } else {
+            delete session.gpsPoints;
           }
+          job.session = session;
         }
       }
       return jobs;
@@ -787,6 +985,13 @@ export const db = {
   // v2.18.0: db.routeCache УДАЛЁН — обёртку использовал только мёртвый src/lib/cache.ts
   // (0 importers; двухуровневый кэш маршрутизации §3.2 из спеки в рантайме
   // не существовал). Таблица RouteCache остаётся в схеме/бэкапах/restore.
+  // v2.38.2 (ревью F64): рантайм-кэш маршрутизации §13.4/§14 РЕАЛИЗОВАН —
+  // одноуровневый in-memory LRU в src/lib/route-cache.ts (ключ grid-snapped
+  // start/end + time-of-day бакет, TTL 24 ч, ≤512 записей), подключён в
+  // src/lib/routing/chain.ts (routeRequest). SQLite-уровень (эта таблица) в
+  // рантайме по-прежнему НЕ используется: кэш памяти одного процесса покрывает
+  // суточные повторы поездок, персист в D1 добавлял бы чтение/запись на каждый
+  // промах без выигрыша; строка сохраняется для совместимости дампов/restore.
 
   exportJob: {
     async findUnique(args: { where: { id: string }; include?: Record<string, unknown> }) {

@@ -1,8 +1,9 @@
-// src/lib/share.ts — P1-9: stateless share-токены (HMAC от sessionId+срока, ключ SESSION_SECRET).
+// src/lib/share.ts — P1-9: share-токены (HMAC от sessionId+срока, ключ SESSION_SECRET) +
+// v2.38.1 (ревью F14) РЕЕСТР выданных (отзываемость, см. блок ниже).
 // Раньше токены жили в in-memory Map и терялись при рестарте процесса.
-import { createHmac } from "crypto";
+import { createHmac, createHash } from "crypto";
 import { env } from "./env";
-import { db } from "./db";
+import { db, libsql } from "./db";
 import { json } from "./http-utils";
 import { haversineM } from "./geo";
 import { computeMovingTime, computeActiveTrip, type MethodologyPoint, type ActiveTrip } from "./active-trip";
@@ -10,12 +11,58 @@ import { maxSpeedMs, normalizeSessionSpeeds } from "./kpi";
 import { tokenMatches } from "./token-check"; // v2.16.0 (D-16): timing-safe сверка сигнатуры
 
 export const SHARE_DEFAULT_TTL_HOURS = 168; // 7 дней
-export const SHARE_MAX_TTL_HOURS = 8760; // 1 год
+// v2.38.1 (ревью F14): максимум срока — 30 дней (было 8760 = 1 год: утёкшая
+// ссылка открывала точный GPS-трек почти навсегда, а отозвать её было нечем).
+// UI (share-button) предлагает 7/30 дней — лимит не ломает ни один сценарий.
+export const SHARE_MAX_TTL_HOURS = 720;
 
-export function makeShareToken(sessionId: string, ttlHours: number): { token: string; expiresAt: number } {
+// ——— v2.38.1 (ревью F14): реестр выданных токенов — ОТЗЫВАЕМОСТЬ ———
+// Проблема (находка F14): токен = stateless HMAC без jti/реестра — отозвать
+// конкретную ссылку НЕЛЬЗЯ (только ротация SESSION_SECRET, ломающая все
+// сессии сразу, или удаление самой сессии — деструктивный побочный эффект).
+// Решение: таблица ShareToken (ensure-on-boot при первом обращении — тот же
+// паттерн, что _AlertState в alerts.ts; сырой SQL через libsql, БЕЗ prisma-
+// схемы — ею владеет другое изменение). Храним ТОЛЬКО SHA-256 токена: утечка
+// дампа БД не раскрывает сами ссылки. expiresAt/createdAt — для ops-чистки.
+//
+// МИГРАЦИОННЫЙ КОМПРОМИСС: токены, выданные ДО реестра, в нём отсутствуют —
+// verifyShareToken считает их валидными до собственного exp (stateless-HMAC
+// остаётся источником истины). Реестр НЕ аннулирует старые токены задним
+// числом — отзываемыми становятся все новые выдачи.
+let shareTokenTableEnsured = false;
+
+async function ensureShareTokenTable(): Promise<void> {
+  if (shareTokenTableEnsured) return;
+  await libsql.execute(
+    "CREATE TABLE IF NOT EXISTS ShareToken (tokenHash TEXT PRIMARY KEY, sessionId TEXT NOT NULL, expiresAt INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL)"
+  );
+  shareTokenTableEnsured = true;
+}
+
+/** SHA-256(токен) — ключ реестра; сам токен в БД не попадает НИКОГДА. */
+function shareTokenHash(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+// v2.38.1 (F14): makeShareToken стал async (регистрация в реестре); форма
+// возвращаемого значения не изменилась — call sites добавляют только await.
+export async function makeShareToken(sessionId: string, ttlHours: number): Promise<{ token: string; expiresAt: number }> {
   const expiresAt = Date.now() + ttlHours * 3600 * 1000;
   const exp36 = expiresAt.toString(36);
-  return { token: `${sessionId}.${exp36}.${sign(sessionId, exp36)}`, expiresAt };
+  const token = `${sessionId}.${exp36}.${sign(sessionId, exp36)}`;
+  // Регистрация — best-effort: сбой записи не ломает выдачу ссылки (токен
+  // остаётся валидным stateless-путём, как до F14); повторная попытка — при
+  // следующем создании.
+  try {
+    await ensureShareTokenTable();
+    await libsql.execute({
+      sql: `INSERT OR REPLACE INTO ShareToken (tokenHash, sessionId, expiresAt, revoked, createdAt) VALUES (?, ?, ?, 0, ?)`,
+      args: [shareTokenHash(token), sessionId, expiresAt, Date.now()],
+    });
+  } catch {
+    // реестр недоступен (молодая БД/сбой шлюза) — не блокируем шаринг
+  }
+  return { token, expiresAt };
 }
 
 function sign(sessionId: string, exp36: string): string {
@@ -39,7 +86,49 @@ export async function verifyShareToken(token: string): Promise<{ sessionId: stri
   if (!(await tokenMatches(sig, expected))) return null;
   const expiresAt = parseInt(exp36, 36);
   if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) return null;
+  // v2.38.1 (ревью F14): проверка реестра — отозванные токены отклоняются.
+  // Строки НЕТ → legacy-токен (выдан до реестра): валиден до собственного exp
+  // (миграционный компромисс, см. ensureShareTokenTable). Недоступность
+  // реестра не роняет шаринг — stateless-проверка выше уже прошла.
+  try {
+    await ensureShareTokenTable();
+    const res = await libsql.execute({
+      sql: "SELECT revoked FROM ShareToken WHERE tokenHash = ?",
+      args: [shareTokenHash(token)],
+    });
+    if (res.rows.length > 0 && Number((res.rows[0] as Record<string, unknown>).revoked) === 1) {
+      return null;
+    }
+  } catch {
+    // реестр недоступен — деградируем к прежнему stateless-поведению
+  }
   return { sessionId, expiresAt };
+}
+
+// ——— v2.38.1 (ревью F14): API отзыва ———
+
+/** Отозвать конкретный share-токен (владелец попросил «убрать ссылку»).
+ *  Возвращает число затронутых строк (0 = токена нет в реестре — либо legacy,
+ *  либо уже отозван). */
+export async function revokeShareToken(token: string): Promise<number> {
+  await ensureShareTokenTable();
+  const res = await libsql.execute({
+    sql: "UPDATE ShareToken SET revoked = 1 WHERE tokenHash = ? AND revoked = 0",
+    args: [shareTokenHash(token)],
+  });
+  return Number(res.rowsAffected ?? 0);
+}
+
+/** Отозвать ВСЕ токены сессии (вызывается при soft-delete записи —
+ *  sharePayload и так 404 на deletedAt, но отзыв закрывает ссылку и для
+ *  legacy-периода grace/до полной зачистки). Возвращает число отозванных. */
+export async function revokeSessionShares(sessionId: string): Promise<number> {
+  await ensureShareTokenTable();
+  const res = await libsql.execute({
+    sql: "UPDATE ShareToken SET revoked = 1 WHERE sessionId = ? AND revoked = 0",
+    args: [sessionId],
+  });
+  return Number(res.rowsAffected ?? 0);
 }
 
 // v2.31.0 (MAJ-9): интервал [prevTs, ts] пересекает активную часть — семантика
@@ -114,6 +203,23 @@ export async function sharePayload(sessionId: string, expiresAt: number, request
   }
   const maxSpeed = maxSpeedMs(points) ?? 0;
 
+  // v2.38.1 (ревью F21): плотность трека vs размер payload. Публичная страница
+  // не нуждается в полном разрешении: 56K точек = ~3–4 МБ JSON + тяжёлый SVG-рендер
+  // (и Math.min(...lats) спредом на клиенте). KPI выше считаются по ПОЛНОМУ
+  // массиву — прореживание только наружу: равномерный сэмпл ≤800 точек, первая/
+  // последняя сохранены всегда (старт/финиш трека), значения speed остаются при
+  // СВОИХ оставшихся точках (никакой интерполяции). Форма ответа не меняется.
+  const MAX_SHARE_POINTS = 800;
+  let sharePoints = points;
+  if (points.length > MAX_SHARE_POINTS) {
+    const step = (points.length - 1) / (MAX_SHARE_POINTS - 1);
+    sharePoints = [];
+    for (let i = 0; i < MAX_SHARE_POINTS - 1; i++) {
+      sharePoints.push(points[Math.round(i * step)]);
+    }
+    sharePoints.push(points[points.length - 1]); // финиш — всегда
+  }
+
   return json(
     {
       sessionId: session.id,
@@ -122,7 +228,7 @@ export async function sharePayload(sessionId: string, expiresAt: number, request
       startTime: session.startTime,
       endTime: session.endTime,
       pointCount: session.pointCount,
-      points: points.map((p) => ({
+      points: sharePoints.map((p) => ({
         lat: p.lat,
         lon: p.lon,
         speed: p.speed,

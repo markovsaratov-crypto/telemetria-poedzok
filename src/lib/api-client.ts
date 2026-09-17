@@ -177,34 +177,53 @@ async function apiFetch<T = unknown>(
   return data as T;
 }
 
+// v2.38.1 (ревью F17): guard против регресса — FormData в JSON-обёртках (post/
+// patch/put) сериализуется в "{}" (у FormData нет enumerable-свойств), а сервер
+// ждёт multipart → фича молча ломается на 100%. multipart-тело обязано идти через
+// api.upload (Content-Type с boundary выставляет браузер). Ошибка — на этапе
+// вызова, а не тихим "{}" на сервере.
+function assertNotFormData(body: unknown, method: string): void {
+  if (typeof FormData !== "undefined" && body instanceof FormData) {
+    throw new Error(
+      `api.${method}: FormData нельзя отправлять через JSON-обёртку — тело превратится в "{}". Используйте api.upload(path, formData).`
+    );
+  }
+}
+
 // Удобные обёртки
 export const api = {
   get: <T = unknown>(path: string, query?: FetchOpts["query"], opts?: FetchOpts) =>
     apiFetch<T>(path, { method: "GET", query, ...opts }),
 
-  post: <T = unknown>(path: string, body?: unknown, opts?: FetchOpts) =>
-    apiFetch<T>(path, {
+  post: <T = unknown>(path: string, body?: unknown, opts?: FetchOpts) => {
+    assertNotFormData(body, "post");
+    return apiFetch<T>(path, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(opts?.headers || {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
       ...opts,
-    }),
+    });
+  },
 
-  patch: <T = unknown>(path: string, body?: unknown, opts?: FetchOpts) =>
-    apiFetch<T>(path, {
+  patch: <T = unknown>(path: string, body?: unknown, opts?: FetchOpts) => {
+    assertNotFormData(body, "patch");
+    return apiFetch<T>(path, {
       method: "PATCH",
       headers: { "Content-Type": "application/json", ...(opts?.headers || {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
       ...opts,
-    }),
+    });
+  },
 
-  put: <T = unknown>(path: string, body?: unknown, opts?: FetchOpts) =>
-    apiFetch<T>(path, {
+  put: <T = unknown>(path: string, body?: unknown, opts?: FetchOpts) => {
+    assertNotFormData(body, "put");
+    return apiFetch<T>(path, {
       method: "PUT",
       headers: { "Content-Type": "application/json", ...(opts?.headers || {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
       ...opts,
-    }),
+    });
+  },
 
   delete: <T = unknown>(path: string, opts?: FetchOpts) =>
     apiFetch<T>(path, { method: "DELETE", ...opts }),

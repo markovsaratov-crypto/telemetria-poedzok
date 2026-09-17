@@ -595,8 +595,15 @@ export interface ShareResult {
 
 export function useCreateShareLink() {
   return useMutation({
-    mutationFn: (sessionId: string) =>
-      api.post<ShareResult>(`/api/sessions/${sessionId}/share`),
+    // v2.38.1 (ревью F22): опциональный срок действия ссылки (TTL в часах) —
+    // выбор в диалоге «Поделиться» (src/components/v4/share-button.tsx);
+    // строка-аргумент сохранена для совместимости: без TTL сервер даёт
+    // свой дефолт (SHARE_DEFAULT_TTL_HOURS = 7 дней).
+    mutationFn: (vars: string | { sessionId: string; expiresInHours?: number }) =>
+      api.post<ShareResult>(
+        `/api/sessions/${typeof vars === "string" ? vars : vars.sessionId}/share`,
+        typeof vars === "string" ? undefined : { expiresInHours: vars.expiresInHours }
+      ),
   });
 }
 

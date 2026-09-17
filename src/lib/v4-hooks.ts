@@ -20,6 +20,7 @@ import {
 import { useSessions, fetchSessionsStatsBatch, seedSessionsStatsFromBatch, type SessionStats } from "./hooks";
 import { useTrips } from "./trip-hooks"; // v2.26.0: счётчик ПОЕЗДОК периода
 import { type PeriodKey } from "./v4-utils";
+import { sampleIndices } from "./downsample"; // v2.38.1 (ревью F24): глобальный потолок точек период-трека
 
 // /api/stats/speed-record — §4.5 MaxSpeedAllTime (v2.13.0 Ф1).
 export interface SpeedRecordResponse {
@@ -521,6 +522,58 @@ function aggregateTrack(items: TrackResponse[]): TrackResponse {
     pointOffset += (t.points?.length ?? 0);
   }
   const harshPoints = items.flatMap((t) => t.harshPoints);
+
+  // v2.38.1 (ревью F24): период-режим склеивает до 50 треков (MAX_PERIOD_SESSIONS)
+  // — сотни тысяч точек в одном агрегате, который уходит в рендер карты.
+  // Глобальные потолки зеркальны остальному конвейеру (speedProfile 240/720,
+  // события 4000/3000/2000): точки ≤ 20 000 (равномерный сэмпл конкатенации,
+  // первая/последняя сохранены), harshPoints ≤ 2000 «самых резких» (|dv|).
+  // Индексы разрывов перемапливаются на ближайшие оставшиеся точки (дубликаты
+  // fromIdx и вырожденные линии устраняются — это и React-ключи gap-<fromIdx>).
+  // /api/track и одиночный трек не затрагиваются — потолок только в агрегате.
+  const MAX_PERIOD_TRACK_POINTS = 20_000;
+  const MAX_PERIOD_HARSH_POINTS = 2_000;
+  let trackPoints = points;
+  let trackGaps = gaps;
+  if (points.length > MAX_PERIOD_TRACK_POINTS) {
+    const keep = sampleIndices(points.length, MAX_PERIOD_TRACK_POINTS);
+    // Бинарный поиск позиции в keep, ближайшей к исходному индексу.
+    const nearestKeptPos = (idx: number): number => {
+      let lo = 0;
+      let hi = keep.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (keep[mid] < idx) lo = mid + 1;
+        else hi = mid;
+      }
+      // lo — первый keep[lo] >= idx; ближайший из keep[lo] и keep[lo−1]
+      const up = keep[lo];
+      const down = keep[Math.max(0, lo - 1)];
+      return Math.abs(up - idx) <= Math.abs(down - idx) ? lo : Math.max(0, lo - 1);
+    };
+    trackPoints = keep.map((orig) => points[orig]);
+    trackGaps = [];
+    const seenFrom = new Set<number>();
+    for (const g of gaps) {
+      const fromIdx = nearestKeptPos(g.fromIdx);
+      if (seenFrom.has(fromIdx)) continue; // уникальный fromIdx = уникальный React-ключ
+      seenFrom.add(fromIdx);
+      const toIdx = Math.max(fromIdx + 1, nearestKeptPos(g.toIdx)); // линия ≠ точка
+      trackGaps.push({ fromIdx, toIdx, durationSec: g.durationSec });
+    }
+  }
+  let trackHarsh = harshPoints;
+  if (harshPoints.length > MAX_PERIOD_HARSH_POINTS) {
+    // «Самые резкие» по |dv|; исходный порядок конкатенации сохраняется
+    // (стабильная выборка по индексу — для предсказуемых ключей/анимаций).
+    const picked = harshPoints
+      .map((h, i) => ({ h, i }))
+      .sort((a, b) => Math.abs(b.h.dv) - Math.abs(a.h.dv))
+      .slice(0, MAX_PERIOD_HARSH_POINTS)
+      .sort((a, b) => a.i - b.i);
+    trackHarsh = picked.map((p) => p.h);
+  }
+
   const first = items[0];
   const last = items[items.length - 1];
   return {
@@ -530,10 +583,10 @@ function aggregateTrack(items: TrackResponse[]): TrackResponse {
     endTime: last.endTime,
     pointCount: sum(items.map((t) => t.pointCount)),
     bounds,
-    points,
+    points: trackPoints,
     segments,
-    gaps,
-    harshPoints,
+    gaps: trackGaps,
+    harshPoints: trackHarsh,
     markers:
       first.markers && last.markers
         ? { start: first.markers.start, finish: last.markers.finish }

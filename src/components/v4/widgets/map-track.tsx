@@ -24,6 +24,7 @@ import {
 import "leaflet/dist/leaflet.css";
 import { useTheme } from "next-themes";
 import type { TrackResponse } from "@/lib/api-client";
+import { downsampleUniform } from "@/lib/downsample";
 
 // === Tile layers (v2.29.0: все провайдеры — без API-ключа) ===
 // v2.29.0: CARTO (basemaps.cartocdn.com) с авг 2026 требует API-ключ и отдаёт
@@ -181,18 +182,37 @@ export function V4MapTrack({ track, isLoading, isError }: MapTrackProps) {
   const layerMaxZoom = layerDef.maxZoom;
 
   // Сегменты трека (каждый — Polyline своим цветом).
+  // v2.38.1 (ревью F24): даунсемп перед Polyline — полный трек (до 56K точек
+  // на запись; период-режим склеивает до 50 треков через aggregateTrack) не
+  // должен попадать в рендер целиком: мегабайты SVG-геометрии и jank при
+  // pan/zoom. Бюджет 4000 точек на трек распределяется по сегментам равным
+  // потолком на сегмент (max(2, бюджет/число сегментов); 2 = геометрия
+  // сегмента ≠ точка — непрерывность стыков). Первая/последняя точки каждого
+  // сегмента сохраняются. /api/track НЕ меняется — даунсемп только в рендере,
+  // остальные потребители полных точек не затронуты.
+  const MAX_RENDER_TRACK_POINTS = 4000;
   const segments = React.useMemo(() => {
     if (!track?.segments) return [];
-    return track.segments
-      .filter((s) => Array.isArray(s.points) && s.points.length >= 1)
-      .map((s, i) => ({
+    const valid = track.segments.filter(
+      (s) => Array.isArray(s.points) && s.points.length >= 1
+    );
+    // Равный потолок на сегмент (валид.length=0 недостижим: map ниже пуст)
+    const perSeg =
+      valid.length === 0
+        ? MAX_RENDER_TRACK_POINTS
+        : Math.max(2, Math.ceil(MAX_RENDER_TRACK_POINTS / valid.length));
+    return valid.map((s, i) => {
+      // downsampleUniform ≤ max возвращает массив как есть — ветка не нужна
+      const pts = downsampleUniform(s.points, perSeg);
+      return {
         i,
         color: s.color,
         bucket: s.bucket,
-        positions: s.points.map(
+        positions: pts.map(
           (p) => [p.lat, p.lng] as [number, number]
         ),
-      }));
+      };
+    });
   }, [track]);
 
   // Разрывы — пунктирные полилинии между точками fromIdx и toIdx (по points[]).
@@ -211,7 +231,18 @@ export function V4MapTrack({ track, isLoading, isError }: MapTrackProps) {
   }, [track]);
 
   // Harsh points → CircleMarker.
-  const harshPoints = React.useMemo(() => track?.harshPoints ?? [], [track]);
+  // v2.38.1 (ревью F24): потолок 2000 маркеров «самых резких» (по |dv|) —
+  // зеркально событиям 2000 в aggregateEvents; период-агрегат без потолка
+  // рисовал десятки тысяч CircleMarker'ов. Порядок вывода — по убыванию
+  // резкости (canvas-рендер: самые резкие рисуются поверх).
+  const MAX_RENDER_HARSH_POINTS = 2000;
+  const harshPoints = React.useMemo(() => {
+    const all = track?.harshPoints ?? [];
+    if (all.length <= MAX_RENDER_HARSH_POINTS) return all;
+    return [...all]
+      .sort((a, b) => Math.abs(b.dv) - Math.abs(a.dv))
+      .slice(0, MAX_RENDER_HARSH_POINTS);
+  }, [track]);
 
   // Если нет ни одной точки — показываем placeholder.
   const isEmpty = !track || track.points.length === 0;
@@ -270,6 +301,11 @@ export function V4MapTrack({ track, isLoading, isError }: MapTrackProps) {
             center={[55.751244, 37.618423]}
             zoom={12}
             scrollWheelZoom
+            // v2.38.1 (ревью F24): canvas-рендерер вместо SVG по умолчанию —
+            // при сотнях полилиний/маркеров Leaflet-svg разрастается в мегабайты
+            // DOM; canvas держит рисование O(1)-по-слоям и не деградирует при
+            // pan/zoom (divIcon START/FINISH остаются DOM-элементами — так и надо).
+            preferCanvas
             style={{ height: "100%", width: "100%", background: isDark ? "#232328" : "#F7F2F5" }}
             attributionControl
             zoomControl

@@ -30,6 +30,7 @@ import { ZipImport } from "@/components/zip-import";
 import { useSessions, useSessionStats, useSessionsStatsBatch, isStatsBatchCovered, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
 import type { SessionListItem } from "@/lib/api-client";
 import { useTrips, useTripsStatsBatch, useTripStats, useDeleteTrip } from "@/lib/trip-hooks"; // v2.26.0: ПОЕЗДКИ сервера; v2.30.0: удаление
+import { ShareButton } from "@/components/v4/share-button"; // v2.38.1 (ревью F22): вход в share-фичу
 import { ecoCls, ecoBandLabel, ecoBadgeTip } from "@/lib/v4-utils";
 import { fmtSecFull, fmtDurMin, fmtNumber, pluralRu } from "@/lib/format";
 import { bindTips } from "./use-v4-tipbox";
@@ -1043,6 +1044,12 @@ function GroupedTripBody({
         поездкой. Путь, длительность, скорость и оценка плавности считаются так
         же, как на вкладке «Аналитика», поэтому цифры совпадают.
       </div>
+      {/* v2.38.1 (ревью F22): вход в share-фичу. Share-эндпоинт сессионный —
+          для склеенной поездки ссылка открывает ПЕРВУЮ запись (диалог честно
+          предупреждает об этом) */}
+      <div style={{ marginTop: 10 }}>
+        <ShareButton sessionId={first.id} fragmentCount={sessions.length} />
+      </div>
     </div>
   );
 }
@@ -1225,6 +1232,11 @@ function TripBody({
       <div className="seg-total">
         <span>статус:</span>
         <b>{stats.endTime ? "завершена" : "активна"}</b>
+      </div>
+      {/* v2.38.1 (ревью F22): вход в share-фичу — хук useCreateShareLink был
+          мёртвым кодом с P1-9; кнопка в раскрытой карточке записи */}
+      <div style={{ marginTop: 10 }}>
+        <ShareButton sessionId={session.id} />
       </div>
     </div>
   );
@@ -1666,6 +1678,9 @@ function TripEntryBody({
   const spanSec = st.duration;
   const pausesSec = st.interFragmentGapSec ?? 0;
   const r = st.route;
+  // v2.38.1 (ревью F22): share-эндпоинт сессионный — для серверной Trip
+  // (N записей) берём первую запись состава
+  const shareSessionId = trip.sessionIds[0] ?? st.fragments?.[0]?.id ?? null;
 
   return (
     <div className="trip-body">
@@ -1794,6 +1809,13 @@ function TripEntryBody({
         считаются по всей поездке целиком — цифры совпадают с вкладкой
         «Аналитика».
       </div>
+      {/* v2.38.1 (ревью F22): вход в share-фичу — кнопка «Поделиться» в
+          раскрытой карточке (до деструктивного «Удалить») */}
+      {shareSessionId != null ? (
+        <div style={{ marginTop: 10 }}>
+          <ShareButton sessionId={shareSessionId} fragmentCount={trip.sessionCount} />
+        </div>
+      ) : null}
       {/* v2.30.0: удаление поездки пользователем (запрос владельца) — в
           раскрытой карточке, двухшаговое подтверждение без модалки */}
       <DeleteTripControl tripId={trip.id} sessionCount={trip.sessionCount} />

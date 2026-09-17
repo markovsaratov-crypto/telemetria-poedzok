@@ -59,7 +59,11 @@ export function ZipImport() {
       const fd = new FormData();
       fd.append("file", file);
       setProgress(40);
-      const res = await api.post<ImportResult>("/api/import/zip", fd);
+      // v2.38.1 (ревью F17): api.post прогонял FormData через JSON.stringify →
+      // тело превращалось в "{}" + Content-Type: application/json — сервер ждал
+      // multipart и падал 500 на любом архиве. Файл уходит через api.upload,
+      // как в csv-import.tsx (multipart Content-Type с boundary ставит браузер).
+      const res = await api.upload<ImportResult>("/api/import/zip", fd);
       setProgress(100);
       setResult(res);
       toast.success("Импорт завершён", {

@@ -1,11 +1,20 @@
 // src/lib/restore-core.ts — чистое ядро restore (без HTTP/авторизации).
 // Извлечено из /api/admin/restore/route.ts (v2.32.0): один источник таблиц/порядков/
 // BigInt-оживления для локального restore и restore-from-GitHub + покрывается
-// unit-тестами (tests/restore-core.test.ts). Логика дословно прежняя.
+// unit-тестами (tests/restore-core.test.ts).
+// v2.38.1 (ревью F3): INSERT — многорядные (группы строк с одинаковым набором
+// колонок), размер чанка — из db.ts (multiRowInsertChunk, лимит D1 ≤100
+// параметров); применение батчей чанками ≤400 — в restore-роуте (batchChunked).
+import { multiRowInsertChunk } from "./db";
+
 export interface BackupDump {
   version: string;
   timestamp: string;
   users?: Array<Record<string, unknown>>;
+  // v2.38.1 (ревью F25): метаданные снапшота дампа (capturedAt/границы данных) —
+  // informational: старый restore их не читает, новый — может сверять. Данными
+  // не являются, в known-набор включены, чтобы не светились как unknownTables.
+  watermark?: Record<string, unknown>;
   [table: string]: unknown;
 }
 
@@ -119,7 +128,17 @@ export interface RestoreBuildResult {
 /**
  * Собирает statements атомарного restore-батча: DELETE всех таблиц в FK-safe
  * порядке (текущая BackupJob-строка `backupId` сохраняется для провенанса) +
- * INSERT строк дампа (parents first). Логика дословно из restore-роута.
+ * INSERT строк дампа (parents first).
+ * v2.38.1 (ревью F3): по одному INSERT на строку реальный прод-дамп
+ * (79 сессий, 48 358 точек) давал ~48,5K стейтментов — один /batch-вызов
+ * шлюза превышал лимит 500 → restore на D1 всегда падал (RTO недостижим).
+ * Теперь строки с ОДИНАКОВЫМ набором колонок (после вайлист-фильтра)
+ * группируются в один многорядный INSERT по CH строк (CH = 90/колонок —
+ * единый расчёт multiRowInsertChunk в db.ts): ~10× меньше стейтментов у
+ * GpsPoint. Строки с РАЗНЫМИ наборами колонок — отдельные стейтменты:
+ * семантика прежняя, отсутствующая колонка получает DEFAULT (принудительный
+ * NULL не подставляется). Порядок строк внутри таблицы — порядок дампа
+ * (детерминирован); Map-группы — в порядке первого появления сигнатуры.
  */
 export function buildRestoreStatements(dump: BackupDump, backupId: string): RestoreBuildResult {
   const stmts: RestoreStatement[] = [];
@@ -152,24 +171,39 @@ export function buildRestoreStatements(dump: BackupDump, backupId: string): Rest
       tablesCount[table] = 0;
       continue;
     }
+    const allowed = ALLOWED_COLUMNS[table] ?? [];
+    // v2.38.1 (ревью F3): группировка по сигнатуре колонок —
+    // многорядный INSERT требует одинаковый набор колонок у всех строк.
+    const groups = new Map<string, Array<{ keys: string[]; row: Record<string, unknown> }>>();
     for (const rawRow of rows) {
       // Don't re-insert the current BackupJob row (already preserved).
       if (table === "BackupJob" && rawRow.id === backupId) continue;
       const row = reviveRow(table, rawRow);
-      const allowed = ALLOWED_COLUMNS[table] ?? [];
       const keys = Object.keys(row).filter((k) => allowed.includes(k));
       if (keys.length === 0) continue;
-      const placeholders = keys.map(() => "?").join(", ");
-      const values = keys.map((k) => row[k]);
-      stmts.push({
-        sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES (${placeholders})`,
-        args: values,
-      });
+      const sig = keys.join(",");
+      const entry = { keys, row };
+      const bucket = groups.get(sig);
+      if (bucket) bucket.push(entry);
+      else groups.set(sig, [entry]);
+    }
+    for (const entries of groups.values()) {
+      const keys = entries[0]!.keys;
+      const CH = multiRowInsertChunk(keys.length);
+      const rowPh = `(${keys.map(() => "?").join(", ")})`;
+      for (let i = 0; i < entries.length; i += CH) {
+        const chunk = entries.slice(i, i + CH);
+        stmts.push({
+          sql: `INSERT INTO ${table} (${keys.join(", ")}) VALUES ${chunk.map(() => rowPh).join(", ")}`,
+          args: chunk.flatMap((e) => keys.map((k) => e.row[k])),
+        });
+      }
     }
     tablesCount[table] = rows.length;
   }
 
-  const known = new Set<string>([...TABLES, "version", "timestamp", "users"]);
+  // v2.38.1 (ревью F25): watermark — метаданные снапшота, не таблица
+  const known = new Set<string>([...TABLES, "version", "timestamp", "users", "watermark"]);
   const unknownTables = Object.keys(dump).filter((k) => !known.has(k));
   return { stmts, tablesCount, unknownTables };
 }

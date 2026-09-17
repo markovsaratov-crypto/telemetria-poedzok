@@ -5,16 +5,15 @@ import { NextRequest } from "next/server";
 import { zIngestBody } from "@/lib/validation";
 import { findExistingSession } from "@/lib/idempotency";
 import { db } from "@/lib/db";
+import { payloadLimitBytes, isPayloadTooLarge } from "@/lib/payload-limit"; // v2.38.1 (ревью F20)
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import { recordIngestAttempt } from "@/lib/ingest-trace"; // DIAG-1: трассировка попыток
 import { recordIngestOutcome } from "@/lib/alerts"; // P2-16: правило ingest_error_rate
 import { trackLatency } from "@/lib/latency"; // P2-16: api_latency_p95
-import { extractBearer } from "@/lib/auth";
-import { userDb } from "@/lib/user-db"; // v2.23.0: пер-юзерный инжест-токен
-import { tokenMatches } from "@/lib/token-check";
-import { env } from "@/lib/env";
+// v2.38.1 (ревью F11): extractBearer + resolveIngestToken — единая проверка инжест-токенов
+import { extractBearer, resolveIngestToken } from "@/lib/auth";
 
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -25,23 +24,36 @@ export async function POST(request: NextRequest) {
     // без своей проверки писал бы данные по любому запросу.
     const bearer = extractBearer(request);
     const queryToken = new URL(request.url).searchParams.get("token");
-    const e = env();
-    const tokenOk =
-      (await tokenMatches(bearer, e.INGEST_TOKEN)) ||
-      (await tokenMatches(queryToken, e.INGEST_TOKEN));
-    // v2.23.0: пер-юзерный токен (User.apiKey) → привязка сессий к пользователю
-    let ingestUserId: string | null = null;
-    if (!tokenOk) {
-      const presented = bearer ?? queryToken;
-      const u = presented ? await userDb.findByApiKey(presented) : null;
-      if (u) ingestUserId = u.id;
-      else {
-        inc("ingest_unauthorized_total", "Ingest attempts rejected with 401 (bad or missing token)", 1, "ingest");
-        return json({ error: "Unauthorized", reason: "Valid INGEST_TOKEN required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
-      }
+    // v2.38.1 (ревью F11): единая проверка (auth.ts): глобальный INGEST_TOKEN
+    // (Bearer/?token=, канал владельца) / производный it_-токен (Bearer/?token=,
+    // SensorLogger Push URL) / сырой per-user apiKey — ТОЛЬКО Bearer-заголовок.
+    // Раньше сырой apiKey принимался из ?token= и утекал в access-логи
+    // CDN/Render. Ротация apiKey автоматически ротирует it_-токен (HMAC).
+    const ingestAuth = await resolveIngestToken(bearer, queryToken);
+    // v2.23.0: пер-юзерный токен → привязка сессий к пользователю (userId IS NULL = владелец)
+    const ingestUserId = ingestAuth.ok ? ingestAuth.userId : null;
+    if (!ingestAuth.ok) {
+      inc("ingest_unauthorized_total", "Ingest attempts rejected with 401 (bad or missing token)", 1, "ingest");
+      return json({ error: "Unauthorized", reason: ingestAuth.reason }, 401, { "X-Request-Id": requestId });
     }
 
-    const body = await request.json().catch(() => null);
+    // v2.38.1 (ревью F20): РЕАЛЬНАЯ проверка размера тела — ПОСЛЕ чтения, ДО
+    // json.parse/Zod. Прежняя схема полагалась на Content-Length в proxy —
+    // Transfer-Encoding: chunked обходил гард; request.json() парсил в память
+    // тело любого размера (Zod points ≤1000 срабатывал ПОСЛЕ полного парсинга:
+    // один chunked-запрос на сотни МБ → OOM инстанса 512 МБ).
+    const rawBody = await request.text().catch(() => "");
+    if (isPayloadTooLarge(Buffer.byteLength(rawBody))) {
+      inc("ingest_invalid_total", "Ingest rejected with 413 (payload over MAX_PAYLOAD_BYTES)", 1, "ingest");
+      recordIngestOutcome(false); // P2-16: 413 — валидационная ошибка, участвует в ingest_error_rate
+      return json({ error: "Payload too large", limit: payloadLimitBytes() }, 413, { "X-Request-Id": requestId });
+    }
+    let body: unknown = null;
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      body = null; // невалидный JSON → Zod-ветка 400 (прежняя семантика request.json().catch(() => null))
+    }
     const parsed = zIngestBody.safeParse(body);
     if (!parsed.success) {
       recordIngestOutcome(false); // P2-16: ошибка валидации участвует в ingest_error_rate

@@ -1,16 +1,18 @@
 // POST /api/ingest/sensorlogger — адаптер для SensorLogger HTTP Push (iOS app).
 // Принимает нативный формат SensorLogger: JSON-массив сенсорных батчей с вложенной location.
 // Auth: Authorization: Bearer <INGEST_TOKEN>  ИЛИ  ?token=<INGEST_TOKEN>
-// v2.23.0: ЛИЧНЫЙ инжест-токен зарегистрированного пользователя (User.apiKey в
-// Bearer/?token=) — сессии привязываются к его userId (изоляция данных): личный
-// Push URL выдаётся на вкладке «Поездки» после регистрации.
+// v2.23.0: ЛИЧНЫЙ инжест-токен зарегистрированного пользователя — сессии
+// привязываются к его userId (изоляция данных): личный Push URL выдаётся на
+// вкладке «Поездки» после регистрации.
+// v2.38.1 (ревью F11): в query-string Push URL ходит ПРОИЗВОДНЫЙ it_-токен
+// (HMAC от apiKey), а не сам apiKey; сырой apiKey — только Bearer-заголовок.
 // Query: ?deviceId=<required>&deviceName=<optional>
 // Корреляция сессий: батчи с одним deviceId в пределах 60с друг от друга = одна сессия.
 import { NextRequest } from "next/server";
-import { libsql } from "@/lib/db";
-import { extractBearer } from "@/lib/auth";
-import { userDb } from "@/lib/user-db"; // v2.23.0: пер-юзерный инжест-токен
-import { tokenMatches } from "@/lib/token-check"; // AUDIT B-16: timing-safe сравнение
+import { libsql, multiRowInsertChunk } from "@/lib/db";
+import { payloadLimitBytes, isPayloadTooLarge } from "@/lib/payload-limit"; // v2.38.1 (ревью F20)
+// v2.38.1 (ревью F11): extractBearer + resolveIngestToken — единая проверка инжест-токенов
+import { extractBearer, resolveIngestToken } from "@/lib/auth";
 import { env } from "@/lib/env";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
@@ -302,26 +304,21 @@ export async function POST(request: NextRequest) {
     const url = new URL(request.url);
     const queryToken = url.searchParams.get("token");
     const bearer = extractBearer(request);
-    const e = env();
-    // AUDIT B-16: timing-safe сравнение (раньше === — утечка по времени)
-    const tokenOk =
-      (await tokenMatches(bearer, e.INGEST_TOKEN)) ||
-      (await tokenMatches(queryToken, e.INGEST_TOKEN));
-    // v2.23.0: пер-юзерный токен (User.apiKey) — привязка сессий к пользователю.
-    // Глобальный INGEST_TOKEN остаётся каналом владельца (userId IS NULL).
-    let ingestUserId: string | null = null;
-    if (!tokenOk) {
-      const presented = bearer ?? queryToken;
-      const u = presented ? await userDb.findByApiKey(presented) : null;
-      if (u) {
-        ingestUserId = u.id;
-      } else {
-        return json(
-          { error: "Unauthorized: invalid or missing INGEST_TOKEN. Use Authorization: Bearer <token> or ?token=<token>" },
-          401,
-          { "X-Request-Id": requestId }
-        );
-      }
+    // v2.38.1 (ревью F11): единая проверка (auth.ts, timing-safe — AUDIT B-16):
+    // глобальный INGEST_TOKEN (Bearer/?token=, канал владельца) / производный
+    // it_-токен (Bearer/?token=, SensorLogger Push URL) / сырой per-user apiKey
+    // — ТОЛЬКО Bearer-заголовок. Раньше сырой apiKey принимался из ?token= и
+    // утекал в access-логи CDN/Render. Ротация apiKey автоматически ротирует
+    // it_-токен (HMAC от apiKey). Глобальный INGEST_TOKEN остаётся каналом
+    // владельца (userId IS NULL).
+    const ingestAuth = await resolveIngestToken(bearer, queryToken);
+    const ingestUserId = ingestAuth.ok ? ingestAuth.userId : null;
+    if (!ingestAuth.ok) {
+      return json(
+        { error: `Unauthorized: ${ingestAuth.reason}` },
+        401,
+        { "X-Request-Id": requestId }
+      );
     }
 
     // 2. deviceId из query (обязательный) + валидация (C-21)
@@ -344,12 +341,27 @@ export async function POST(request: NextRequest) {
     const deviceName = DEVICE_NAME_RE.test(deviceNameRaw) ? deviceNameRaw.slice(0, 128) : "SensorLogger";
 
     // 3. Parse body — массив (SensorLogger) или объект с массивом точек в известном контейнере
-    const body = await request.json().catch(() => null);
+    // v2.38.1 (ревью F20): РЕАЛЬНАЯ проверка размера тела — ПОСЛЕ чтения, ДО
+    // json.parse. Прежняя схема полагалась на Content-Length в proxy —
+    // Transfer-Encoding: chunked обходил гард, и request.json() парсил в память
+    // тело любого размера (один запрос на сотни МБ → OOM инстанса 512 МБ).
+    const rawBody = await request.text().catch(() => "");
+    const payloadBytes = Buffer.byteLength(rawBody);
+    if (isPayloadTooLarge(payloadBytes)) {
+      return json({ error: "Payload too large", limit: payloadLimitBytes() }, 413, { "X-Request-Id": requestId });
+    }
+    // v2.38.1 (F20): диагностические дампы пишут СЫРОЕ тело (точнее
+    // ресериализации распарсенного объекта), payloadBytes — истинные байты.
+    const bodyStr = rawBody;
+    let body: unknown;
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      body = null;
+    }
     if (!body) {
       return json({ error: "Invalid JSON body" }, 400, { "X-Request-Id": requestId });
     }
-    const bodyStr = JSON.stringify(body);
-    const payloadBytes = Buffer.byteLength(bodyStr);
 
     // v2.11.0 (АУДИТ C-14): идемпотентность по messageId — HTTP-ретрай приложения
     // больше не создаёт дубликаты точек. Sensor Logger шлёт уникальный messageId на батч.
@@ -402,6 +414,24 @@ export async function POST(request: NextRequest) {
         bodyStr,
       );
       return json({ ok: true, test: true, message: "SensorLogger push test passed. Ready to receive GPS data.", deviceId, deviceName }, 200, { "X-Request-Id": requestId });
+    }
+
+    // v2.38.1 (ревью F20): жёсткий потолок числа записей батча — компактный JSON
+    // может нести десятки тысяч точек в рамках 256 КБ; обработка такого батча
+    // (сортировка + вставка + trip-логика под writeLock) блокирует event-loop
+    // и сериализует инжест остальных устройств. Сверху — 5000 записей.
+    const MAX_BATCH_ITEMS = 5000;
+    if (items.length > MAX_BATCH_ITEMS) {
+      recordIngestAttempt({
+        at: new Date().toISOString(), route: "sensorlogger", deviceId,
+        outcome: "invalid", points: items.length, dropped: 0,
+        bytes: payloadBytes,
+      });
+      return json(
+        { error: "Too many points in batch", limit: MAX_BATCH_ITEMS, received: items.length },
+        413,
+        { "X-Request-Id": requestId }
+      );
     }
 
     // 4. Нормализация точек
@@ -533,9 +563,17 @@ export async function POST(request: NextRequest) {
         isNewSession = true;
       }
 
-      // 6. Вставка GPS-точек — v2.11.0 (C-16): многорядный INSERT чанками по 50
+      // 6. Вставка GPS-точек — v2.11.0 (C-16): многорядный INSERT чанками
       // вместо построчных (было ~50-100 мс HTTPS-раундтрипа на КАЖДУЮ точку).
-      const CH = 50;
+      // v2.38.1 (ревью F4): прежний чанк 50×9 = 450 плейсхолдеров — эра Turso
+      // (комментарий про «лимит SQLite 999»); на D1 (лимит ≤100 связанных
+      // параметров) любой батч с ≥12 location-точками падал «too many SQL
+      // variables» → 500, точки не вставлены, ledger не записан — ломалась
+      // офлайн-буферизация SensorLogger. Размер чанка теперь — единый расчёт
+      // multiRowInsertChunk из db.ts (D1: 10 строк × 9 колонок = 90 параметров;
+      // libsql: 100 строк — в лимите 999). Поведение ledger/идемпотентности
+      // не менялось (порядок и аргументы INSERT те же).
+      const CH = multiRowInsertChunk(9);
       for (let i = 0; i < points.length; i += CH) {
         const chunk = points.slice(i, i + CH);
         const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
@@ -638,12 +676,10 @@ export async function GET(request: NextRequest) {
   const url = new URL(request.url);
   const queryToken = url.searchParams.get("token");
   const bearer = extractBearer(request);
-  const e = env();
-  // AUDIT B-16: timing-safe сравнение
-  const tokenOk =
-    (await tokenMatches(bearer, e.INGEST_TOKEN)) ||
-    (await tokenMatches(queryToken, e.INGEST_TOKEN));
-  if (!tokenOk) {
+  // v2.38.1 (ревью F11): та же единая проверка, что и в POST — it_-токен из
+  // Push URL должен проходить и тестовый GET
+  const ingestAuth = await resolveIngestToken(bearer, queryToken);
+  if (!ingestAuth.ok) {
     return json({ ok: false, error: "Unauthorized" }, 401);
   }
   return json({
@@ -651,7 +687,7 @@ export async function GET(request: NextRequest) {
     endpoint: "/api/ingest/sensorlogger",
     method: "POST",
     format: "JSON array of { time, location: { latitude, longitude, speed, altitude, horizontalAccuracy, course } }",
-    auth: "Authorization: Bearer <INGEST_TOKEN> OR ?token=<INGEST_TOKEN>",
+    auth: "Authorization: Bearer <INGEST_TOKEN or it_ ingest token> OR ?token=<same>",
     requiredParams: ["deviceId"],
     optionalParams: ["deviceName"],
   });

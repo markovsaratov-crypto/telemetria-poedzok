@@ -25,9 +25,11 @@ import { logger } from "@/lib/logger";
 import { inc } from "@/lib/metrics";
 import { tokenMatches } from "@/lib/token-check"; // P0-3: проверка ЗНАЧЕНИЙ токенов
 import { sessionCookieName } from "@/lib/cookie-name"; // P0-5: __Host- префикс в prod
-// v2.23.0: пер-юзерный инжест-токен (User.apiKey) — лёгкая проверка для гейта;
-// полная привязка сессий делается в самих инжест-роутах
-import { userDb } from "@/lib/user-db";
+// v2.23.0: пер-юзерный инжест-токен — лёгкая проверка для гейта;
+// полная привязка сессий делается в самих инжест-роутах.
+// v2.38.1 (ревью F11): проверка инжест-токенов централизована в auth.ts
+// (resolveIngestToken: INGEST_TOKEN / производный it_-токен / apiKey — только Bearer)
+import { resolveIngestToken } from "@/lib/auth";
 
 // В dev-режиме cookie без __Host- префикса (который требует Secure).
 const SESSION_COOKIE_NAME = sessionCookieName();
@@ -113,7 +115,12 @@ function rateLimitKey(scope: string, request: NextRequest): string {
   }
   if (scope === "auth:login") {
     // v2.16.0: логин — ВСЕГДА ключ по IP (ротация фейковых Bearer не должна
-    // размывать brute-force-лимит)
+    // размывать brute-force-лимит).
+    // v2.38.1 (ревью F10): ip — теперь РЕАЛЬНЫЙ IP клиента (getClientIP
+    // пропускает TRUSTED_PROXY_COUNT доверенных прокси в XFF — за CDN бакеты
+    // снова пер-клиентские). Дополнительно роут логина проверяет бакет по
+    // ПАРЕ логин+IP (src/lib/rate-limit.ts checkLoginRateLimit) — brute-force
+    // чужого логина не запирает владельца.
     return rlKey(scope, ip);
   }
   if (scope === "admin:heavy" || scope === "admin:requeue") {
@@ -125,7 +132,8 @@ function rateLimitKey(scope: string, request: NextRequest): string {
     }
     // v2.10.7: cookie-браузер без Authorization раньше давал общий бакет "no-token"
     // для ВСЕХ пользователей — лимит 1/час на admin:heavy исчерпывался чужими GET.
-    // Теперь ключ по IP клиента (audited B-9: последняя запись XFF).
+    // Теперь ключ по IP клиента (v2.38.1/ревью F10: getClientIP учитывает
+    // TRUSTED_PROXY_COUNT — за CDN это реальный клиент, а не IP edge-ноды).
     return rlKey(scope, "ip", getClientIP(request));
   }
   return rlKey(scope, ip);
@@ -163,8 +171,13 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     const isLargeUpload = pathname === "/api/import/zip" || pathname === "/api/import/csv";
     // v2.11.0 (АУДИТ C-15): Number("") = 0, Number("abc") = NaN — старая проверка
     // `cl > maxBytes` пропускала NaN и «0» (chunked-encoding без content-length).
-    // Теперь: нечисловой/отсутствующий header не считается «малым» — пропускаем
-    // валидацию здесь (роуты-получатели с JSON-body имеют собственные лимиты чтения).
+    // Теперь: нечисловой/отсутствующий header не считается «малым» — валидация
+    // здесь пропускается. v2.38.1 (ревью F20): это лишь ПРЕДЧЕК по заголовку —
+    // РЕАЛЬНУЮ длину тела теперь сверяют сами роуты-получатели ПОСЛЕ чтения
+    // (await req.text() → Buffer.byteLength > MAX_PAYLOAD_BYTES → 413, до
+    // json.parse/Zod): chunked-запрос без content-length больше не проходит
+    // свободно (src/lib/payload-limit.ts; инжест-роуты + cap точек в
+    // sensorlogger). Импорт-роуты (isLargeUpload) ограничивают себя сами.
     const clRaw = request.headers.get("content-length");
     const cl = clRaw != null && clRaw.trim() !== "" && Number.isFinite(Number(clRaw)) ? Number(clRaw) : null;
     const maxBytes = isLargeUpload ? 100 * 1024 * 1024 : env().MAX_PAYLOAD_BYTES; // 100MB для импортов, 256KB дефолт
@@ -214,15 +227,17 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
       const e = env();
 
       if (pathname === "/api/ingest" || pathname.startsWith("/api/ingest/")) {
-        const token = bearer ?? queryToken;
-        // v2.23.0: ЛИЧНЫЙ токен пользователя (User.apiKey) тоже проходит гейт —
-        // роут привяжет сессии к его userId (изоляция данных)
-        const tokenOk = !!token && (await tokenMatches(token, e.INGEST_TOKEN)) || (!!token && !!(await userDb.findByApiKey(token)));
-        if (!tokenOk) {
+        // v2.38.1 (ревью F11): единая проверка инжест-токенов (auth.ts):
+        // глобальный INGEST_TOKEN / производный it_-токен / сырой apiKey —
+        // ТОЛЬКО Bearer-заголовок. Сырой apiKey из ?token= больше НЕ проходит
+        // гейт (query-string оседает в access-логах CDN/Render). Ротация
+        // apiKey автоматически ротирует it_-токен (HMAC от apiKey).
+        const ingestAuth = await resolveIngestToken(bearer, queryToken);
+        if (!ingestAuth.ok) {
           // DIAG-1: неавторизованные попытки в БД не пишем (анти-абьюз) —
           // только in-memory счётчик в /api/metrics
           inc("ingest_unauthorized_total", "Ingest attempts rejected with 401 (bad or missing token)", 1, "ingest");
-          return json({ error: "Unauthorized", reason: "Valid INGEST_TOKEN required (Bearer header or ?token= query)" }, 401, { "X-Request-Id": requestId });
+          return json({ error: "Unauthorized", reason: ingestAuth.reason }, 401, { "X-Request-Id": requestId });
         }
       } else if (pathname.startsWith("/api/cron/")) {
         const token = bearer ?? queryToken;

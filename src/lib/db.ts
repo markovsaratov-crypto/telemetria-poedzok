@@ -22,6 +22,55 @@ const globalForDb = globalThis as unknown as {
 export const USING_D1 =
   typeof process.env.D1_GATEWAY_URL === "string" && process.env.D1_GATEWAY_URL.length > 0;
 
+// ——— v2.38.1 (ревью F3/F4/F5): ЕДИНЫЕ лимиты чанкования для D1 ———
+// Жёсткие лимиты gateway-воркера (cloudflare-worker/d1-gateway.js):
+//   • /batch — ≤500 стейтментов на вызов (400 = запас);
+//   • каждый стейтмент — ≤100 СВЯЗАННЫХ параметров (90 = запас).
+// Лимиты SQLite/libsql: <999 переменных на стейтмент (900 = запас).
+// Раньше каждый call-site считал размер чанка сам (createMany 90/N,
+// $transaction — вовсе без чанков, sensorlogger — 50×9=450) — расхождение
+// и есть находки F3/F4/F5. Теперь лимит живёт здесь, в одном месте.
+export const D1_BATCH_STMT_CHUNK = 400; // стейтментов на /batch (шлюз: max 500)
+export const D1_PARAM_BUDGET = 90; // связанных параметров на стейтмент (D1: max 100)
+const LIBSQL_PARAM_BUDGET = 900; // переменных на стейтмент (SQLite: max 999)
+
+/**
+ * Сколько строк многорядного INSERT помещается в один стейтмент без нарушения
+ * лимита связанных параметров (D1 ≤100 / libsql <999). Используется createMany,
+ * буферным $transaction-исполнителем, restore-core и инжестом SensorLogger.
+ */
+export function multiRowInsertChunk(columnCount: number): number {
+  return Math.max(1, Math.floor((USING_D1 ? D1_PARAM_BUDGET : LIBSQL_PARAM_BUDGET) / Math.max(1, columnCount)));
+}
+
+/** Разбивает массив (стейтментов/строк/id) на чанки фиксированного размера. */
+export function chunkStatements<T>(stmts: readonly T[], size: number = D1_BATCH_STMT_CHUNK): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < stmts.length; i += size) out.push(stmts.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Применяет пачку стейтментов построчно-чанками: на D1 — группами ≤400
+ * стейтментов на /batch-вызов шлюза (лимит 500), на libsql/Turso — ОДНИМ
+ * batch-вызовом (прошлая атомарная семантика, restore на Turso документирован).
+ * ВАЖНО (F3/F5): на D1 атомарность «всё или ничего» МЕЖДУ чанками недостижима
+ * (каждый /batch — отдельная D1-транзакция); порядок применения детерминирован,
+ * сбой на K-м чанке оставляет применёнными чанки 1..K-1 — вызывающий
+ * восстанавливает консистентность повтором операции (restore-конвейер
+ * начинается с полного DELETE, инжест идемпотентен по (deviceId,messageId)).
+ */
+export async function batchChunked(stmts: Array<{ sql: string; args: unknown[] }>): Promise<void> {
+  if (stmts.length === 0) return;
+  if (!USING_D1) {
+    await libsql.batch(stmts as never);
+    return;
+  }
+  for (const chunk of chunkStatements(stmts)) {
+    await libsql.batch(chunk as never);
+  }
+}
+
 function createDbClient(): Client {
   if (USING_D1) {
     // Секрет обязателен: шлюз без него отвечает 401 — падаем на старте,
@@ -560,8 +609,9 @@ export const db = {
       const cols = Object.keys(items[0]);
       const rows = items.map((item) => normVals(cols.map((c) => (item[c] === undefined ? null : item[c]))));
       const ph = `(${cols.map(() => "?").join(", ")})`;
-      // v2.37.0: D1 — ≤100 связанных параметров на запрос; libsql — < 999
-      const CH = Math.max(1, Math.floor((USING_D1 ? 90 : 900) / cols.length));
+      // v2.38.1 (ревью F4): единый расчёт чанка — multiRowInsertChunk (D1 ≤100
+      // параметров / libsql <999); раньше формула дублировалась по call-site'ам
+      const CH = multiRowInsertChunk(cols.length);
       const chunkStmts: Array<{ sql: string; args: InValue[] }> = [];
       for (let i = 0; i < rows.length; i += CH) {
         const chunk = rows.slice(i, i + CH);
@@ -574,9 +624,10 @@ export const db = {
       // v2.37.0: на D1 чанки идут атомарными группами (gateway-batch ≤400
       // стейтментов) — меньше раунд-трипов и нет частично вставленных батчей
       // внутри группы; на libsql — прежние последовательные execute.
+      // v2.38.1 (ревью F5): группы режутся общим chunkStatements (≤400).
       if (USING_D1) {
-        for (let i = 0; i < chunkStmts.length; i += 400) {
-          await libsql.batch(chunkStmts.slice(i, i + 400) as never);
+        for (const group of chunkStatements(chunkStmts)) {
+          await libsql.batch(group as never);
         }
       } else {
         for (const st of chunkStmts) {
@@ -799,14 +850,18 @@ export const db = {
     // v2.37.0 (миграция D1): интерактивных транзакций в D1 нет. DbTx-исполнитель
     // БУФЕРИЗУЕТ стейтменты (create/createMany/update — только записи с
     // клиентскими id, чтений между ними нет по контракту DbTx), затем буфер
-    // уходит ОДНИМ batch-запросом gateway-воркера: D1 batch = транзакция
-    // «всё или ничего». Бросок внутри fn → буфер не отправляется (идеальный
-    // откат, даже безопаснее интерактивной схемы, где сбой сети до commit
-    // оставлял dangling-транзакцию).
+    // уходит batch-запросами gateway-воркера. Бросок внутри fn → буфер не
+    // отправляется (идеальный откат, даже безопаснее интерактивной схемы, где
+    // сбой сети до commit оставлял dangling-транзакцию).
+    // v2.38.1 (ревью F5): буфер > 400 стейтментов (группа CSV-импорта с ~5 000
+    // точек ≈ 503 стейтмента) раньше уходил ОДНИМ /batch — шлюз отвечал 400
+    // «too many statements (max 500)» и весь импорт группы падал. Теперь —
+    // batchChunked: группы ≤400 стейтментов (см. комментарий к batchChunked
+    // про утрату сквозной атомарности между чанками и путь восстановления).
     if (USING_D1) {
       const buf: Array<{ sql: string; args: InValue[] }> = [];
       const out = await fn(makeBufferedTxExecutor(buf) as unknown as DbTx);
-      if (buf.length > 0) await libsql.batch(buf);
+      await batchChunked(buf);
       return out;
     }
     const txClient = await libsql.transaction("write");
@@ -887,7 +942,7 @@ function makeBufferedTxExecutor(buf: Array<{ sql: string; args: InValue[] }>): R
           const items: Array<Record<string, unknown>> = args.data.map((item) => ({ id: crypto.randomUUID(), ...pruneUndefined(item) }));
           const cols = Object.keys(items[0]);
           const ph = `(${cols.map(() => "?").join(", ")})`;
-          const CH = Math.max(1, Math.floor((USING_D1 ? 90 : 900) / cols.length));
+          const CH = multiRowInsertChunk(cols.length); // v2.38.1 (ревью F4): единый расчёт чанка
           let count = 0;
           for (let i = 0; i < items.length; i += CH) {
             const chunk = items.slice(i, i + CH);
@@ -953,7 +1008,7 @@ function makeTxExecutor(tx: LibsqlTransaction): Record<string, unknown> {
           const items: Array<Record<string, unknown>> = args.data.map((item) => ({ id: crypto.randomUUID(), ...pruneUndefined(item) }));
           const cols = Object.keys(items[0]);
           const ph = `(${cols.map(() => "?").join(", ")})`;
-          const CH = Math.max(1, Math.floor((USING_D1 ? 90 : 900) / cols.length)); // v2.37.0: D1 ≤100 параметров
+          const CH = multiRowInsertChunk(cols.length); // v2.38.1 (ревью F4): единый расчёт чанка
           let count = 0;
           for (let i = 0; i < items.length; i += CH) {
             const chunk = items.slice(i, i + CH);

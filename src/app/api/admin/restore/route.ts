@@ -27,13 +27,13 @@
 //     обоих источников, покрыты unit-тестами).
 import { NextRequest } from "next/server";
 import { z } from "zod";
-import { db, libsql } from "@/lib/db";
+import { db, batchChunked } from "@/lib/db";
 import { authorizeRequest, getUserIdFromRequest } from "@/lib/auth";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { writeAudit } from "@/lib/audit";
 import { buildRestoreStatements, type BackupDump } from "@/lib/restore-core";
-import { findGitHubBackupForRestore, downloadGitHubBackupAsset, isGitHubBackupConfigured } from "@/lib/github-backup";
+import { findGitHubBackupForRestore, downloadDecryptedBackupAsset, isGitHubBackupConfigured } from "@/lib/github-backup";
 import { promises as fs } from "fs";
 import { createHash } from "crypto";
 import path from "path";
@@ -83,10 +83,12 @@ async function loadLocalSource(backupId: string): Promise<RestoreSourceMeta | { 
 }
 
 /**
- * GitHub-путь: durable-копия. Скачивает ассет draft-релиза, проверяет sha256
- * по checksum из тела релиза, кладёт файл в /tmp/backups и создаёт BackupJob
- * completed-строку (провенанс + видимость в listBackups). Работает и после
- * рестарта/деплоя инстанса — в отличие от локальных /tmp-файлов.
+ * GitHub-путь: durable-копия. Скачивает ассет draft-релиза (v2.38.1/ревью F13:
+ * ассеты с v2.38.1 шифруются AES-256-GCM — TELMENC1-магия распознаётся и
+ * расшифровывается автоматически; старые plaintext-ассеты читаются как есть),
+ * проверяет sha256 по checksum из тела релиза, кладёт файл в /tmp/backups и
+ * создаёт BackupJob completed-строку (провенанс + видимость в listBackups).
+ * Работает и после рестарта/деплоя инстанса — в отличие от локальных /tmp-файлов.
  */
 async function loadGitHubSource(tagName: string | undefined): Promise<RestoreSourceMeta | { error: ReturnType<typeof json> }> {
   if (!isGitHubBackupConfigured()) {
@@ -104,10 +106,13 @@ async function loadGitHubSource(tagName: string | undefined): Promise<RestoreSou
   }
   let content: string;
   try {
-    content = await downloadGitHubBackupAsset(src.assetUrl);
+    // v2.38.1 (ревью F13): зашифрованные ассеты (.sql.enc, TELMENC1) расшифровываются
+    // ключом GITHUB_BACKUP_ENCRYPTION_KEY; отсутствие ключа для зашифрованного ассета —
+    // честная ошибка с понятным текстом (не тихая порча данных).
+    content = await downloadDecryptedBackupAsset(src.assetUrl);
   } catch (err) {
     logger.error("Restore: GitHub asset download failed", { tagName: src.tagName, error: err instanceof Error ? err.message : String(err) });
-    return { error: json({ error: "GitHub asset download failed" }, 502) };
+    return { error: json({ error: err instanceof Error ? err.message : "GitHub asset download failed" }, 502) };
   }
   if (src.checksum) {
     const actual = createHash("sha256").update(content).digest("hex");
@@ -180,8 +185,16 @@ export async function POST(request: NextRequest) {
       return json({ error: "Backup file is not valid JSON" }, 422, { "X-Request-Id": requestId });
     }
 
-    // Truncate + insert in a transaction: один атомарный batch (hrana-HTTP:
-    // BEGIN/COMMIT отдельными execute() не гарантируют транзакцию).
+    // Truncate + insert (v2.38.1, ревью F3): на D1 один batch с ~48,5K
+    // стейтментов превышал лимит шлюза 500 → restore всегда падал (RTO
+    // недостижим). Теперь: restore-core собирает МНОГОРЯДНЫЕ INSERT (~10×
+    // меньше стейтментов), а batchChunked применяет их чанками ≤400 на D1
+    // (DELETE-фаза ~13 стейтментов — атомарна одним чанком; INSERT — по чанкам;
+    // сквозная атомарность между чанками на D1 недостижима — сбой midway
+    // оставляет применённые чанки, ПОВТОРНЫЙ restore идемпотентен: конвейер
+    // начинается с полного DELETE). На libsql/Turso — прежний одиночный
+    // атомарный batch (hrana-HTTP: BEGIN/COMMIT отдельными execute() не
+    // гарантируют транзакцию).
     const restoredAt = new Date().toISOString();
     let tablesCount: Record<string, number>;
     try {
@@ -190,7 +203,7 @@ export async function POST(request: NextRequest) {
       if (unknownTables.length > 0) {
         logger.warn("Restore: unknown top-level keys in dump (skipped)", { requestId, backupId, unknownTables });
       }
-      await libsql.batch(stmts as never);
+      await batchChunked(stmts);
     } catch (err) {
       logger.error("Restore: transaction failed, rolled back", { requestId, backupId, error: err instanceof Error ? err.message : String(err) });
       await writeAudit({

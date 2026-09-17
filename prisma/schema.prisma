@@ -68,7 +68,11 @@ model Session {
   trafficJobs TrafficJob[]
   auditLogs   AuditLog[]
   exportJobs  ExportJob[]
-  trips       Trip[]      @relation("SessionTrips")
+  // v2.38.1 (ревью F26): НЕЯВНАЯ m-n связь с Trip (@relation("SessionTrips"))
+  // УДАЛЕНА — она порождала join-таблицу _SessionTrips, которой в прод-D1 НЕТ
+  // (состав поездки хранится в Trip.sessionIds JSON — см. OPERATIONS.md §5).
+  // Схема теперь отражает фактическую прод-схему: db:push больше не пытается
+  // создать/дропнуть несуществующие объекты.
 
   @@unique([deviceId, clientId])
   @@index([status, endTime])
@@ -130,7 +134,8 @@ model Trip {
   routingLegCount     Int?
   statsComputedAt     DateTime?
 
-  sessions     Session[]   @relation("SessionTrips")
+  // v2.38.1 (ревью F26): обратная m-n связь с Session удалена вместе с
+  // @relation("SessionTrips") на Session — _SessionTrips в прод-D1 не существует.
 
   @@index([deviceId, spanStart])
   @@index([userId, spanStart])
@@ -151,7 +156,10 @@ model GpsPoint {
 
   session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
-  @@index([sessionId])
+  // v2.38.1 (ревью F26): одиночный @@index([sessionId]) УДАЛЁН — в прод-D1
+  // индекса GpsPoint_sessionId_idx НЕТ (избыточен: составной индекс ниже
+  // покрывает все запросы по sessionId; см. OPERATIONS.md §5 «Лимиты и
+  // особенности D1»). Схема = фактическая прод-схема (schema drift закрыт).
   @@index([sessionId, timestamp])
 }
 

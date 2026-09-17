@@ -1,4 +1,9 @@
 // src/lib/github-backup.ts — GitHub Releases backup.
+// v2.38.1 (ревью F13): ассеты шифруются AES-256-GCM ДО аплоада (формат
+// TELMENC1 | IV(12) | GCM-tag(16) | ciphertext), ключ — опциональный env
+// GITHUB_BACKUP_ENCRYPTION_KEY (32 байта hex). FAIL-CLOSED: ключ не задан —
+// plaintext-дамп НЕ выгружается в GitHub вовсе (локальный дамп остаётся).
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "crypto";
 import { logger } from "./logger";
 import { writeAudit } from "./audit";
 import { env } from "./env";
@@ -35,6 +40,71 @@ export interface LocalBackupHandle {
   tableCounts: Record<string, number>;
 }
 
+// ——— v2.38.1 (ревью F13): шифрование durable-копий AES-256-GCM ———
+// Магия формата (8 байт): отличает зашифрованные ассеты от старых plaintext-дампов
+// (restore/drill читают ОБА формата — обратная совместимость с релизами до v2.38.1).
+const ENC_MAGIC = Buffer.from("TELMENC1", "utf8");
+
+/**
+ * Ключ шифрования бэкапов: GITHUB_BACKUP_ENCRYPTION_KEY, 32 байта в hex (64
+ * символа). Конвенция env.ts для опциональных переменных: читается напрямую из
+ * process.env (как GITHUB_TOKEN выше), валидируется В МОМЕНТ ИСПОЛЬЗОВАНИЯ.
+ * Возвращает null, если ключ не задан (вызывающий решает политику: upload —
+ * fail-closed, restore зашифрованного ассета — честная ошибка).
+ */
+function getBackupEncryptionKey(): Buffer | null {
+  const raw = process.env.GITHUB_BACKUP_ENCRYPTION_KEY || "";
+  if (raw === "") return null;
+  if (!/^[0-9a-fA-F]{64}$/.test(raw)) {
+    throw new Error(
+      "GITHUB_BACKUP_ENCRYPTION_KEY невалиден: ожидается 64 hex-символа (32 байта); сгенерируйте: openssl rand -hex 32"
+    );
+  }
+  return Buffer.from(raw, "hex");
+}
+
+/** Шифрует дамп: TELMENC1 | IV(12) | GCM-tag(16) | ciphertext. */
+export function encryptBackupAsset(plaintext: Buffer, key: Buffer): Buffer {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  return Buffer.concat([ENC_MAGIC, iv, cipher.getAuthTag(), ciphertext]);
+}
+
+/**
+ * Расшифровывает ассет бэкапа. Ассет БЕЗ магии TELMENC1 — старый plaintext-дамп
+ * (до v2.38.1) — возвращается как есть. GCM-тег гарантирует целостность:
+ * подмена/порча зашифрованного ассета → исключение с понятным текстом.
+ */
+export function decryptBackupAsset(raw: Buffer): string {
+  if (!raw.subarray(0, 8).equals(ENC_MAGIC)) return raw.toString("utf8");
+  if (raw.length < 8 + 12 + 16) {
+    throw new Error("зашифрованный бэкап повреждён: короче заголовка TELMENC1 (IV+tag)");
+  }
+  const key = getBackupEncryptionKey();
+  if (!key) {
+    throw new Error(
+      "ассет бэкапа зашифрован (TELMENC1), но GITHUB_BACKUP_ENCRYPTION_KEY не задан — задайте 32-байтный hex-ключ, которым шифровались бэкапы (см. docs/OPERATIONS.md)"
+    );
+  }
+  const iv = raw.subarray(8, 20);
+  const tag = raw.subarray(20, 36);
+  const ciphertext = raw.subarray(36);
+  const decipher = createDecipheriv("aes-256-gcm", key, iv);
+  decipher.setAuthTag(tag);
+  let plaintext: Buffer;
+  try {
+    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  } catch (err) {
+    // GCM-тег не сошёлся: неверный ключ ИЛИ ассет бит/подменён — тексты Node
+    // («Unsupported state or unable to authenticate data») не говорят этого
+    throw new Error(
+      `не удалось расшифровать ассет бэкапа (GCM-тег не сошёлся): неверный GITHUB_BACKUP_ENCRYPTION_KEY или повреждённый ассет (${err instanceof Error ? err.message : String(err)})`
+    );
+  }
+  return plaintext.toString("utf8");
+}
+
 export async function backupToGitHub(actorId?: string, existing?: LocalBackupHandle) {
   const cfg = getGitHubConfig();
   if (!cfg) throw new Error("GITHUB_TOKEN not configured");
@@ -45,6 +115,30 @@ export async function backupToGitHub(actorId?: string, existing?: LocalBackupHan
   // делает дамп и аплоадит ЕГО, без второго полного дампа).
   const local = existing ?? (await runBackup(actorId));
   const content = await fs.readFile(local.filePath);
+
+  // v2.38.1 (ревью F13) FAIL-CLOSED: дамп содержит PII (треки, deviceId, email)
+  // и настройки — plaintext больше НЕ выгружается в GitHub Releases даже
+  // draft-релизом: публикация draft — одна кнопка в UI GitHub (ровно так
+  // случился инцидент C-1). Без ключа шифрования аплоад ПРОПУСКАЕТСЯ (локальный
+  // дамп остаётся, durable-уровень деградирует до «нет копии» — это видно и в
+  // логе, и в ответе роута), сигнал — logger.error + Slack.
+  const encKey = getBackupEncryptionKey();
+  if (!encKey) {
+    const msg =
+      "GITHUB_BACKUP_ENCRYPTION_KEY не задан — отказ выгружать plaintext-дамп в GitHub (fail-closed, ревью F13); сгенерируйте и задайте: openssl rand -hex 32";
+    logger.error("github-backup: дамп НЕ выгружен в GitHub (нет ключа шифрования)", {
+      backupId: local.backupId,
+    });
+    try {
+      const { sendSlackMessage } = await import("./alerts");
+      await sendSlackMessage(
+        `🔒 «Телеметрия поездок»: durable-копия в GitHub НЕ создана — не задан GITHUB_BACKUP_ENCRYPTION_KEY (plaintext не выгружается, ревью F13). Локальный дамп создан.`
+      );
+    } catch { /* алерт не должен маскировать исходную ошибку */ }
+    throw new Error(msg);
+  }
+  // Шифруем ДО любого сетевого взаимодействия: в память GitHub уходит только ciphertext
+  const uploadBody = encryptBackupAsset(content, encKey);
 
   const now = new Date();
   const tag = `backup-${now.toISOString().slice(0,10)}-${now.toISOString().slice(11,19).replace(/:/g,"")}`;
@@ -68,11 +162,15 @@ export async function backupToGitHub(actorId?: string, existing?: LocalBackupHan
 
   try {
     const uploadUrl = release.upload_url.replace(/\{.*\}/, "");
-    const fileName = local.filePath.split("/").pop() || "backup.json";
+    // v2.38.1 (ревью F13): имя ассета .sql.enc — зашифрованный бинарник
+    // (plaintext-дамп в релизах больше не появляется).
+    const baseName = local.filePath.split("/").pop() || "backup.json";
+    const fileName = `${baseName.replace(/\.json$/, "")}.sql.enc`;
     const uploadRes = await fetch(`${uploadUrl}?name=${encodeURIComponent(fileName)}`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${cfg.token}`, Accept: "application/vnd.github+json", "Content-Type": "application/json", "Content-Length": String(content.length) },
-      body: content,
+      headers: { Authorization: `Bearer ${cfg.token}`, Accept: "application/vnd.github+json", "Content-Type": "application/octet-stream", "Content-Length": String(uploadBody.length) },
+      // Uint8Array-обёртка: DOM-тайпинги fetch не принимают Buffer как BodyInit
+      body: new Uint8Array(uploadBody),
     });
     if (!uploadRes.ok) throw new Error(`GitHub upload failed: ${uploadRes.status}`);
     const asset = await uploadRes.json() as GhAsset;
@@ -176,9 +274,10 @@ export async function findGitHubBackupForRestore(tagName?: string): Promise<GitH
 
 /**
  * Скачивает дамп-ассет draft-релиза через GitHub API (Accept: octet-stream —
- * единственный способ для приватных draft-ассетов). Возвращает текст дампа.
+ * единственный способ для приватных draft-ассетов). Возвращает СЫРЫЕ байты:
+ * с v2.38.1 ассеты зашифрованы (TELMENC1), расшифровка — decryptBackupAsset.
  */
-export async function downloadGitHubBackupAsset(assetUrl: string): Promise<string> {
+export async function downloadGitHubBackupAsset(assetUrl: string): Promise<Buffer> {
   const cfg = getGitHubConfig();
   if (!cfg) throw new Error("GITHUB_TOKEN not configured");
   const res = await fetch(assetUrl, {
@@ -186,7 +285,17 @@ export async function downloadGitHubBackupAsset(assetUrl: string): Promise<strin
     signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) throw new Error(`GitHub asset download failed: ${res.status}`);
-  return await res.text();
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/**
+ * Скачивает и расшифровывает дамп-ассет: TELMENC1-ассеты — AES-256-GCM c тем же
+ * ключом, старые plaintext-ассеты (до v2.38.1) — как есть. Возвращает текст дампа.
+ * v2.38.1 (ревью F13): путь restore-from-GitHub и read-back drill.
+ */
+export async function downloadDecryptedBackupAsset(assetUrl: string): Promise<string> {
+  const raw = await downloadGitHubBackupAsset(assetUrl);
+  return decryptBackupAsset(raw);
 }
 
 export interface DrillResult {
@@ -214,8 +323,11 @@ export async function runBackupReadBackDrill(opts: {
   const result: DrillResult = { ok: false, checksumVerified: false, parsed: false, totalRows: 0, countsMatch: false };
   try {
     if (!opts.assetUrl) throw new Error("asset url is empty");
-    const text = await downloadGitHubBackupAsset(opts.assetUrl);
-    const { createHash } = await import("crypto");
+    // v2.38.1 (ревью F13): drill скачивает СЫРЫЕ байты и расшифровывает их же
+    // кодом, что и restore (TELMENC1) — проверяется именно восстановимость
+    // durable-копии, включая расшифровку; sha256 — по PLAINTEXT (чексумма
+    // локального дампа-источника), как и до v2.38.1.
+    const text = await downloadDecryptedBackupAsset(opts.assetUrl);
     const actual = createHash("sha256").update(text).digest("hex");
     result.checksumVerified = actual === opts.expectedChecksum;
     if (!result.checksumVerified) throw new Error(`drill checksum mismatch: expected ${opts.expectedChecksum.slice(0, 12)}…, got ${actual.slice(0, 12)}…`);

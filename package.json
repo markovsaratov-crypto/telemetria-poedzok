@@ -1,13 +1,15 @@
 {
   "name": "telemetria-poedzok",
-  "version": "2.38.0",
+  "version": "2.38.1",
   "private": true,
   "scripts": {
     "dev": "next dev -p ${PORT:-3000}",
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint .",
-    "db:push": "prisma db push --accept-data-loss",
+    "lint:secrets": "bash scripts/check-secrets.sh",
+    "db:push": "prisma db push",
+    "db:push:danger": "echo '⚠️  db:push:danger: prisma db push --accept-data-loss — ДЕСТРУКТИВНО (может дропнуть/пересоздать таблицы и данные). Только для локальной песочницы, НЕ для прода (Prisma здесь — источник типов; схема прода — фактическая D1, см. docs/OPERATIONS.md §5).' && prisma db push --accept-data-loss",
     "db:generate": "prisma generate",
     "test": "vitest run"
   },

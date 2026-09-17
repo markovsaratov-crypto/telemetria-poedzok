@@ -161,7 +161,7 @@
 | Скоринг водителя          | CAP (Continuous Acceleration Profiling) | EcoScore, калибруется по референсному корпусу |
 | Ворчер                    | Next.js instrumentation (in-process) | Асинхронная обработка TrafficJob (2ГИС→OSRM→гаверсинус) |
 | Логирование               | Pino (JSON)                          | Структурированные логи с requestId           |
-| Метрики                   | prom-client                          | Prometheus text exposition на /api/metrics   |
+| Метрики                   | Самописный реестр `src/lib/metrics.ts` (v2.38.2, ревью F73: ранее ошибочно «prom-client» — зависимости нет) | Prometheus text exposition на /api/metrics |
 | Лимиты                    | In-memory LRU / Redis sliding window | Защита от перегрузки                         |
 | Деплой                    | Render / Vercel Pro                  | Контейнеризация или serverless               |
 
@@ -179,7 +179,7 @@
 
 - **Устойчивость к выбросам** — `RouteTrend` считается через Theil-Sen (breakdown point 29%) вместо МНК; `HotspotSegments` — через перцентиль P75 вместо среднего; bootstrap в `RouteTrend` детерминирован через PRNG seed из входных данных (принцип идемпотентности).
 
-- **HMM map matching (Viterbi)** — стандарт индустрии (GraphHopper, Valhalla, OSRM snap-to-road, Mapbox Map Matching API). Сложность `O(N × M × K)`, типичная поездка ~5 мс.
+- **HMM map matching (Viterbi)** — стандарт индустрии (GraphHopper, Valhalla, OSRM snap-to-road, Mapbox Map Matching API). Проектная сложность `O(N × M × K)` при топологии сегментов; фактическая реализация (мини-сервис) — `O(N × M²)` без топологии, см. §12.6.
 
 - **Сохранность данных** — retention 10 лет, soft-delete с grace period 30 дней, 3 уровня резервного копирования с RPO 1 час / RTO 30 минут.
 
@@ -345,25 +345,26 @@ services:
 | **Переменная**                       | **По умолчанию**        | **Описание**                                                              |
 |--------------------------------------|-------------------------|---------------------------------------------------------------------------|
 | ECO_SCORE_CAP_BASELINE               | (пусто)                 | Базовая линия CAP: пусто = авто-калибровка по медиане корпуса живых сессий (≥60 точек каждая; фильтра по SessionReliability НЕТ); <5 сессий → дефолты 0.5/0.4/0.3, < ECO_SCORE_MIN_CALIBRATION_CORPUS (30) → маржа ×1.2; иначе — 0.5/0.4/0.3 (braking/accel/jerk) |
-| ECO_SCORE_CAP_PENALTY_EXPONENT       | 1.5                     | Показатель степени в насыщающей функции штрафа (сигмоида)                |
-| ECO_SCORE_REFERENCE_CORPUS_PATH      | (пусто)                 | Путь к JSON-файлу с предрасчитанным корпусом rate'ов; пусто — вычисление на лету |
+| ECO_SCORE_CAP_PENALTY_EXPONENT       | 2                       | Экспонента насыщающего штрафа (сигмоида §7.3). v2.38.2 (ревью F65): дефолт приведён к документированной формуле (actual/baseline)² — было 1.5; прежняя кривая доступна через env для преемственности шкалы; при смене поднять SESSION_CACHE_VERSION (§7.3 п.7). ВНИМАНИЕ: render.yaml пинует 1.5 — синхронизировать при деплое v2.38.2 |
 | ECO_SCORE_MIN_CALIBRATION_CORPUS     | 30                      | Минимальный размер референсного корпуса для калибровки (иначе дефолт)     |
 | ECO_SCORE_MIN_BASELINE_VALUE         | 0.05                    | Защита от вырождения: базовая линия не может быть меньше                  |
-| ECO_SCORE_MIN_ACTIVE_DISTANCE_KM     | 5                       | Минимальная дистанция активной поездки для участия в корпусе             |
-| ECO_SCORE_MIN_ACTIVE_DURATION_SEC    | 300                     | Минимальная длительность активной поездки для участия в корпусе (5 мин)   |
+| ECO_SCORE_MIN_ACTIVE_DISTANCE_KM     | 5                       | Порог insufficient_data-РЕЙТИНГА: поездки короче — value вычисляется, rating = insufficient_data (v2.38.2, ревью F66: в null-гейт методологии и состав корпуса НЕ влияет) |
+| ECO_SCORE_MIN_ACTIVE_DURATION_SEC    | 300                     | То же для длительности активной поездки (5 мин; v2.38.2, ревью F66)      |
 
 ### 4.8. HMM map matching (Viterbi)
 
 Параметры Hidden Markov Model для сопоставления GPS-точек сегментам плана (раздел 17.2 методологии).
 
-| **Переменная**          | **По умолчанию** | **Описание**                                                              |
+> **v2.38.2 (ревью F70):** параметры — ТОЛЬКО мини-сервиса. Конвейер HMM в проде не реализован, поля не читались никем в `src/` — переменные УДАЛЕНЫ из прод-конфига `src/lib/env.ts` (и никогда не задавались в `render.yaml`). `mini-services/worker/processor.ts` читает их напрямую из `process.env` окружения мини-сервиса (envNumber, дефолты 5/5 зашиты в коде).
+
+| **Переменная** (окружение мини-сервиса) | **Дефолт processor.ts** | **Описание**                                                          |
 |-------------------------|------------------|---------------------------------------------------------------------------|
 | HMM_TRANSITION_BETA_M   | 5.0              | Параметр перехода: `p(s_j→s_k) = (1/β) × exp(-Δ_route(s_j,s_k)/β)`, м     |
 | HMM_EMISSION_SIGMA_M    | 5.0              | Стандартное отклонение эмиссионной вероятности (GPS-погрешность, м)       |
 
 > При сбросе Viterbi (разрыв > `MOVING_TIME_GAP_SEC`) счётчик `hmm_mapmatching_fallback_total` не инкрементируется — это нормальное поведение. Fallback-метка ставится, только если Viterbi не нашёл ни одного валидного пути (N×M=0 или все V[N-1][j] = -∞).
 
-> Значения синхронны с env-дефолтами `src/lib/env.ts`, `render.yaml` и разделом 17.2 методологии (σ = 5, β = 5). Сам конвейер HMM map matching в продакшене НЕ задействован (примечание в §12.6).
+> Значения синхронны с разделом 17.2 методологии (σ = 5, β = 5). Сам конвейер HMM map matching в продакшене НЕ задействован (примечание в §12.6).
 
 ### 4.9. Сравнительные метрики (Theil-Sen, P75, routeHash)
 
@@ -375,7 +376,9 @@ services:
 | ROUTE_TREND_BOOTSTRAP_SAMPLES        | 200              | Количество случайных попарных наклонов в bootstrap; seed = FNV-1a(даты)   |
 | HOTSPOT_SEGMENTS_PERCENTILE          | 75               | Перцентиль для отсечения хронически пробочных сегментов                   |
 | HOTSPOT_SEGMENTS_THRESHOLD           | 0.5              | Порог P75: сегмент попадает в HotspotSegments, если `P75 < 0.5`           |
-| ROUTE_ID_SNAP_GRID_M                 | 50               | Шаг snap-to-grid для routeHash/topologyHash, м (~0.0005° на широте Москвы) |
+| ROUTE_ID_SNAP_GRID_DEG               | 0.0005 (~55 м)   | Шаг snap-to-grid для routeHash/topologyHash (§10.0) и кэша маршрутизации (§12.5), градусы (v2.38.2, F64: в ранних редакциях ошибочно `ROUTE_ID_SNAP_GRID_M`) |
+| ROUTE_CACHE_TTL_HOURS                | 24               | TTL in-memory кэша маршрутизации §12.5 (v2.38.2, F64; LRU ≤512 — константа модуля) |
+| TELEMAT_TIMEZONE                     | Europe/Saratov  | Часовой пояс оператора: часовые бакеты §10.3/§10.4 методологии и ToD-бакет кэша §12.5 (v2.38.2, F68; IANA-имя, невалидное → серверный пояс) |
 
 ### 4.10. Retention и удаление
 
@@ -792,15 +795,15 @@ CORS разрешён только для same-origin запросов. Для �
 
 ## 12. Маршрутизация и цепочка провайдеров
 
-Построение маршрутов выполняется по цепочке: 2ГИС (primary) → OSRM (fallback) → гаверсинус (последний шанс). Каждый провайдер имеет таймаут и circuit breaker. Сегменты от провайдера (с `nextSegmentIds` и `bearing`) используются для HMM map matching (раздел 12.6).
+Построение маршрутов выполняется по цепочке: 2ГИС (primary) → OSRM (fallback) → гаверсинус (последний шанс). Каждый провайдер имеет таймаут и circuit breaker. Сегменты от провайдера (с `bearing`) используются для routeHash/topologyHash §10.0 (топология `nextSegmentIds` нужна только HMM §17.2 — не задействован — и провайдером не запрашивается; v2.38.2, F70: ранее заявлялось ошибочно).
 
 ### 12.1. 2ГИС carrouting 6.0.0
 
-Primary провайдер. API: `https://catalog.api.2gis.ru/carrouting/6.0.0` (актуальный хост; устаревший `routing.api.2gis.ru` выведен из эксплуатации — см. `src/lib/routing/chain.ts`). Требует `TWO_GIS_API_KEY`. Возвращает: геометрию маршрута, плановую дистанцию, плановое время, данные о пробках по сегментам (`trafficSpeed`, `trafficDuration`), а также массив `segments[]` с полями `id`, `lat`, `lon`, `planSpeed`, `trafficSpeed`, `planDuration`, `trafficDuration`, `distance`, `nextSegmentIds` (топология), `bearing` (направление сегмента). Таймаут: 8 секунд.
+Primary провайдер. API: `https://catalog.api.2gis.ru/carrouting/6.0.0` (актуальный хост; устаревший `routing.api.2gis.ru` выведен из эксплуатации — см. `src/lib/routing/chain.ts`). Требует `TWO_GIS_API_KEY`. Возвращает: геометрию маршрута (maneuvers → outcoming_path.geometry LINESTRING), total_distance/total_duration (с пробками), algorithm («с учётом пробок»). Сегменты нормализуются в `chain.ts`: `{lat, lon, distanceM, durationSec, planSpeedKmh, trafficSpeedKmh, trafficSource}` — дистанция/время манёврного пути распределяются по координатам пропорционально (топология `nextSegmentIds` НЕ запрашивается — нужна только HMM §17.2, не задействован; v2.38.2, F70: ранние редакции ошибочно приписывали её ответу 2ГИС, см. §16 методологии). Таймаут: 8 секунд.
 
 ### 12.2. OSRM Demo Server
 
-Fallback при отказе 2ГИС. URL: `https://router.project-osrm.org` (`OSRM_BASE_URL`). Бесплатный демо-сервер, без данных о пробках. Возвращает: геометрию, дистанцию, время. Сегменты OSRM также нормализуются к структуре 2ГИС для унификации HMM (topology берётся из последовательности геометрии). Таймаут: 8 секунд.
+Fallback при отказе 2ГИС. URL: `https://router.project-osrm.org` (`OSRM_BASE_URL`). Бесплатный демо-сервер, без данных о пробках. Возвращает: геометрию, дистанцию, время. Сегменты OSRM также нормализуются к структуре 2ГИС (топология из последовательности геометрии). Таймаут: 8 секунд.
 
 ### 12.3. Гаверсинус (40 км/ч)
 
@@ -812,9 +815,9 @@ Fallback при отказе 2ГИС. URL: `https://router.project-osrm.org` (`O
 
 ### 12.5. Snap-to-grid кэш
 
-Двухуровневое кэширование результатов маршрутизации. Ключ: `hash(snap-to-grid(start, end) + tod_bucket)`. Snap-to-grid: округление координат до сетки ~55 м × ~35 м (погрешность приемлема для автомобильной маршрутизации). Time-of-day бакеты: 0, 3, 6, 9, 12, 15, 18, 21 (час) — учитывает зависимость пробок от времени суток. TTL кэша: настраиваемый (по умолчанию 24 часа). Хранилище: in-memory LRU + SQLite persistent (`RouteCache`).
+Кэширование результатов маршрутизации. **v2.38.2 (ревью F64): РЕАЛИЗОВАН** — `src/lib/route-cache.ts`, подключён в `routeRequest` (`src/lib/routing/chain.ts`): проверка кэша ДО цепочки провайдеров, запись после успешного ответа 2ГИС/OSRM (гаверсинус-фоллбек не кэшируется). Ключ: `hash(snap-to-grid(start, end) + tod_bucket)`. Snap-to-grid: округление координат до сетки ~55 м × ~35 м (шаг `ROUTE_ID_SNAP_GRID_DEG` = 0.0005° — та же сетка, что и routeHash §10.0; погрешность приемлема для автомобильной маршрутизации). Time-of-day бакеты: 0, 3, 6, 9, 12, 15, 18, 21 (час) — по МЕСТНОМУ времени `TELEMAT_TIMEZONE` (дефолт Europe/Saratov; v2.38.2, F68). TTL кэша: настраиваемый (`ROUTE_CACHE_TTL_HOURS`, по умолчанию 24 часа). Хранилище: **in-memory LRU (≤512 записей, реестр на globalThis — общий для воркера и роутов)**; SQLite-таблица `RouteCache` в рантайме не используется (остаётся в схеме/бэкапах/restore для совместимости дампов — L2-уровень из ранних редакций не реализован: in-memory покрывает суточные повторы, персист в БД добавлял бы чтение/запись на каждый промах). Диагностика попаданий: `RouteResult.cached = true` (персистится в `TrafficJob.result`).
 
-> Тот же механизм snap-to-grid используется для `routeHash` (раздел 10.0 методологии), но с шагом `ROUTE_ID_SNAP_GRID_M` = 50 м (округление 0.0005° на широте Москвы).
+> Тот же механизм snap-to-grid используется для `routeHash` (раздел 10.0 методологии) — тот же шаг `ROUTE_ID_SNAP_GRID_DEG` = 0.0005° (~55 м на широте Москвы; v2.38.2: ранние редакции ошибочно называли переменную `ROUTE_ID_SNAP_GRID_M`).
 
 ### 12.6. HMM map matching (Viterbi)
 
@@ -825,12 +828,14 @@ Fallback при отказе 2ГИС. URL: `https://router.project-osrm.org` (`O
 - Скрытые состояния: сегменты маршрута `S = {s_0, ..., s_m}`.
 - Наблюдения: GPS-точки `O = {o_0, ..., o_n}`.
 - Эмиссионная вероятность `p(o_i | s_j) = (1/√(2π·σ²)) · exp(-d²(o_i, s_j)/(2σ²))`, где `d(o, s)` — расстояние от точки до сегмента (haversine), `σ = HMM_EMISSION_SIGMA_M` (по умолчанию 5 м).
-- Transition probability `p(s_j → s_k) = (1/β) · exp(-Δ_route(s_j, s_k)/β)`, если `s_k` достижима из `s_j` (по `nextSegmentIds`); иначе 0. `β = HMM_TRANSITION_BETA_M` (по умолчанию 5 м).
+- Transition probability `p(s_j → s_k) = (1/β) · exp(-Δ_route(s_j, s_k)/β)` — в ПРОЕКТНОЙ спецификации только для достижимых `s_k` из `s_j` (по `nextSegmentIds`); `β = HMM_TRANSITION_BETA_M` (по умолчанию 5 м).
 - Декодирование: `V[i][s] = max over s' (V[i-1][s'] × p(s'→s) × p(o_i | s))`.
 
-> **Статус в продакшене:** конвейер HMM map matching НЕ задействован — метрики и сравнение с планом считаются без сопоставления точек сегментам. Реализация (Viterbi) живёт в `mini-services/worker` — отдельном опциональном сервисе, в проде не развёрнутом. Параметры σ/β описаны для полноты конфигурации и при активации сервиса уже синхронизированы между документами (5/5).
+> **Статус в продакшене:** конвейер HMM map matching НЕ задействован — метрики и сравнение с планом считаются без сопоставления точек сегментам. Реализация (Viterbi) живёт в `mini-services/worker` — отдельном опциональном сервисе, в проде не развёрнутом (параметры σ/β — переменные окружения мини-сервиса, из прод-конфига `src/lib/env.ts` удалены в v2.38.2, ревью F70).
 
-**Производительность:** `O(N × M × K)`, `K` — среднее число достижимых следующих сегментов (2–4). Типичная поездка: 1000 точек × 50 сегментов × 3 ≈ 150 000 операций ≈ 5 мс. Длинная поездка (10 000 точек): ~50 мс.
+> **⚠️ Расхождение реализации с моделью (v2.38.2, ревью F70):** фактическая реализация в мини-сервисе БЕЗ топологии сегментов — `nextSegmentIds` провайдеры не возвращают, transition считается для ВСЕХ пар (s_j, s_k) полным перебором предшественников: сложность `O(N × M²)`, а НЕ проектная `O(N × M × K)`. При 5 000 точек × 2 000 сегментов это ~2×10¹⁰ гаверсинусов на джоб — воркер зависнет на часы. Для продакшена обязательна топология сегментов (K средних последовательных преемников 2–4) и/или окно кандидатов по расстоянию; активация мини-сервиса «как есть» на длинных маршрутах недопустима.
+
+**Производительность (проектная, при топологии):** `O(N × M × K)`, `K` — среднее число достижимых следующих сегментов (2–4). Типичная поездка: 1000 точек × 50 сегментов × 3 ≈ 150 000 операций ≈ 5 мс. Длинная поездка (10 000 точек): ~50 мс. **Фактическая (без топологии):** `O(N × M²)` — см. предупреждение выше.
 
 **Edge cases (см. методология 17.3):**
 
@@ -908,12 +913,15 @@ RETURNING id, sessionId, attempts;
    - Если точек < 2 — завершить с `provider='haversine'`, `distanceM=0`, `segments=[]`.
    - Старт/финиш — `activeStartCoord`/`activeEndCoord` (не «первые/последние точки»!), чтобы хвосты записи не уводили план-факт.
 
-6. **CAP-расчёт EcoScore.** Если `hasActiveTrip` и `Distance ≥ ECO_SCORE_MIN_ACTIVE_DISTANCE_KM` и `activeDuration ≥ ECO_SCORE_MIN_ACTIVE_DURATION_SEC`:
-   - `BrakingRate = Σ a[i]²·dt[i] / Distance_km` для `a[i] < 0`.
-   - `AccelRate`, `JerkRate` — аналогично.
-   - Базовая линия: если `ECO_SCORE_CAP_BASELINE` задан — используется; иначе — авто-калибровка по медиане корпуса ВСЕХ живых сессий с ≥60 точками (фильтра по SessionReliability НЕТ); <5 сессий → дефолты 0.5/0.4/0.3, корпус < `ECO_SCORE_MIN_CALIBRATION_CORPUS` (30) → маржа ×1.2 к медиане (семантика single-user корпуса — коучинг относительно собственной медианы, см. §7.3 методологии).
-   - `EcoScore = 100 × (1 − 0.45·penalty(BrakingRate, BASELINE_BRAKING) − 0.30·penalty(AccelRate, BASELINE_ACCEL) − 0.25·penalty(JerkRate, BASELINE_JERK))`, `clamp(0, 100)`.
-   - При `hasActiveTrip = false` или NaN/Infinity → `EcoScore = null`, `rating = insufficient_data`.
+6. **CAP-расчёт EcoScore.** Двухуровневый гейт (v2.38.2, ревью F66 — синхронизировано с кодом; прежде заявлялось, что env-пороги гейтят сам расчёт):
+   - **Методологический пол существования значения** (жёстко в коде, §7.3): `hasActiveTrip` И `Distance ≥ 500 м` И `activeDuration ≥ 60 с` И `≥ 60 точек` — иначе `EcoScore = null`, `rating = insufficient_data` (пол не конфигурируется: операторский порог в пол менял бы состав калибровочного корпуса и медианные базлайны).
+   - **Операторский порог качественной оценки** (env): `Distance < ECO_SCORE_MIN_ACTIVE_DISTANCE_KM` (5) или `activeDuration < ECO_SCORE_MIN_ACTIVE_DURATION_SEC` (300) → значение ВЫЧИСЛЯЕТСЯ, но `rating = insufficient_data`.
+   - При выполнении порогов:
+     - `BrakingRate = Σ a[i]²·dt[i] / Distance_km` для `a[i] < 0`.
+     - `AccelRate`, `JerkRate` — аналогично.
+     - Базовая линия: если `ECO_SCORE_CAP_BASELINE` задан — используется; иначе — авто-калибровка по медиане корпуса ВСЕХ живых сессий с ≥60 точками (фильтра по SessionReliability НЕТ); <5 сессий → дефолты 0.5/0.4/0.3, корпус < `ECO_SCORE_MIN_CALIBRATION_CORPUS` (30) → маржа ×1.2 к медиане (семантика single-user корпуса — коучинг относительно собственной медианы, см. §7.3 методологии).
+     - `EcoScore = 100 × (1 − 0.45·penalty(BrakingRate, BASELINE_BRAKING) − 0.30·penalty(AccelRate, BASELINE_ACCEL) − 0.25·penalty(JerkRate, BASELINE_JERK))`, `clamp(0, 100)`; `penalty = 1 − 1/(1 + (actual/baseline)^ECO_SCORE_CAP_PENALTY_EXPONENT)` (дефолт 2 — формула §7.3, v2.38.2/F65).
+   - При NaN/Infinity → `EcoScore = null`, `rating = insufficient_data`.
 
 7. **Новые поведенческие метрики.** В активной части записи (между `firstMovingIdx` и `lastMovingIdx`):
    - `AccelerationRMS` — СКО ускорений, м/с².
@@ -934,7 +942,7 @@ RETURNING id, sessionId, attempts;
    - **Фактически (v2.33.0):** `SpeedDeviation` считается на уровне поездки/записи — `(actualAvgSpeed − planSpeed) / planSpeed`, где `planSpeed = PlanDistance / PlanDuration` (реальная плановая скорость 2ГИС).
 
 10. **routeHash computation via topologyHash (snap-to-grid):**
-    - `snapToGrid(activeStartCoord, ROUTE_ID_SNAP_GRID_M)` + `snapToGrid(activeEndCoord, ROUTE_ID_SNAP_GRID_M)` + `topologyHash` (sha256 последовательности ключевых точек поворота с |Δbearing| > 60°, округлённых через snap-to-grid).
+    - `snapToGrid(activeStartCoord, ROUTE_ID_SNAP_GRID_DEG)` + `snapToGrid(activeEndCoord, ROUTE_ID_SNAP_GRID_DEG)` + `topologyHash` (sha256 последовательности ключевых точек поворота с |Δbearing| > 60°, округлённых через snap-to-grid).
     - `routeHash = sha256(startGrid + ":" + endGrid + ":" + topologyHash).slice(0, 16)`.
     - Гарантия: одинаковый `routeHash` для двух поездок по одному пути с небольшим отличием в старте/финиша (до 55 м); разный `routeHash` для разных путей с одинаковыми концами.
     - Именование: в БД/коде/API — `Session.routeHash` (группировка); `Session.routeId` — отдельный FK на админскую сущность Route, назначается вручную, в группировке не участвует.
@@ -987,7 +995,7 @@ GET /health
 
 ### 14.1. Prometheus-метрики
 
-Метрики доступны на `GET /api/metrics` в формате Prometheus text exposition. Используется библиотека `prom-client`.
+Метрики доступны на `GET /api/metrics` в формате Prometheus text exposition. **v2.38.2 (ревью F73 — синхронизировано с кодом):** зависимость `prom-client` НЕ используется — реестр самописный (`src/lib/metrics.ts`): in-memory счётчики/gauges на `globalThis` (общие для API-роутов и in-process воркера), сериализация в текстовый формат Prometheus вручную (`metricsText()`, `# HELP`/`# TYPE` + лейблы `key="value"`). Гистограммы — эмуляция буферами p95 в памяти инстанса. Параллелизм воркера — p-limit (`WORKER_MAX_CONCURRENCY`, по умолчанию 5 — см. §4.4/§13.1).
 
 | **Метрика**                          | **Тип**           | **Описание**                                              |
 |---------------------------------------|-------------------|-----------------------------------------------------------|
@@ -1007,8 +1015,8 @@ GET /health
 | worker_running_jobs                   | gauge             | Выполняющиеся TrafficJob                                  |
 | http_request_duration_seconds         | histogram         | Длительность HTTP-запросов                                |
 | active_trip_computations_total        | counter           | Расчёты ActiveTrip (разовые на сессию)                    |
-| hmm_mapmatching_runs_total            | counter           | Запуски HMM/Viterbi map matching                          |
-| hmm_mapmatching_fallback_total        | counter           | Fallback HMM (Viterbi не нашёл валидного пути)            |
+| hmm_mapmatching_runs_total            | counter           | Запуски HMM/Viterbi map matching — инкрементируется ТОЛЬКО внешним мини-сервис-воркером (протокол /api/worker/complete); прод-инстанс не инкрементирует (HMM не задействован, v2.38.2, F70) |
+| ~~hmm_mapmatching_fallback_total~~    | counter           | НЕ РЕАЛИЗОВАН (v2.38.2, F70): заявлен в ранних редакциях, в коде счётчик отсутствует — fallback-случай (avgLogProb = −∞) не инкрементирует ничего; строка оставлена как историческая справка |
 | route_id_assignments_total            | counter           | Установленные routeHash на Session                        |
 | eco_score_calculations_total          | counter           | Расчёты EcoScore (CAP)                                    |
 | eco_score_low_reliability_total       | counter           | Сессии с SessionReliability < порога (excluded из корпуса)|
@@ -1254,11 +1262,11 @@ groups:
 
 - Параметры state machine (`MOVING_TIME_HYSTERESIS_HIGH_KMH`, `LOW_KMH`, `DEBOUNCE_SEC`, `GAP_SEC`) — или дефолт, или явно заданы.
 
-- Параметры CAP EcoScore (`ECO_SCORE_CAP_BASELINE`, `ECO_SCORE_CAP_PENALTY_EXPONENT`, `ECO_SCORE_REFERENCE_CORPUS_PATH`) — или дефолт, или явно заданы.
+- Параметры CAP EcoScore (`ECO_SCORE_CAP_BASELINE`, `ECO_SCORE_CAP_PENALTY_EXPONENT`, `ECO_SCORE_MIN_*`) — или дефолт, или явно заданы (v2.38.2: `ECO_SCORE_REFERENCE_CORPUS_PATH` удалён из документации — в коде переменная отсутствовала, корпус считается eco-corpus.ts на лету).
 
-- Параметры HMM (`HMM_TRANSITION_BETA`, `HMM_EMISSION_SIGMA_M`) — или дефолт, или явно заданы.
+- Параметры HMM — переменные окружения мини-сервиса (v2.38.2, F70: из прод-конфига `src/lib/env.ts` удалены; в проде HMM не задействован) — или дефолты processor.ts, или явно заданы в окружении мини-сервиса.
 
-- Параметры сравнительных метрик (`ROUTE_TREND_BOOTSTRAP_THRESHOLD`, `ROUTE_TREND_BOOTSTRAP_SAMPLES`, `HOTSPOT_SEGMENTS_PERCENTILE`, `HOTSPOT_SEGMENTS_THRESHOLD`, `ROUTE_ID_SNAP_GRID_M`) — или дефолт, или явно заданы.
+- Параметры сравнительных метрик (`ROUTE_TREND_BOOTSTRAP_THRESHOLD`, `ROUTE_TREND_BOOTSTRAP_SAMPLES`, `HOTSPOT_SEGMENTS_PERCENTILE`, `HOTSPOT_SEGMENTS_THRESHOLD`, `ROUTE_ID_SNAP_GRID_DEG`) — или дефолт, или явно заданы (v2.38.2: `ROUTE_ID_SNAP_GRID_M` → фактическое имя `ROUTE_ID_SNAP_GRID_DEG`).
 
 ### 18.2. Миграция SQLite → Turso
 

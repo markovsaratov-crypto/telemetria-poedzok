@@ -10,6 +10,36 @@
 // основной проект. Логика chain маршрутизации (2ГИС → OSRM → haversine)
 // и circuit-breaker скопирована из src/lib/routing/{chain,circuit-breaker}.ts
 // и адаптирована под worker-local env.
+//
+// ⚠️ v2.38.2 (ревью F69): РЕФЕРЕНСНАЯ (DEV) РЕАЛИЗАЦИЯ — В ПРОДЕ НЕ РАЗВЁРНУТА.
+// ИСТОЧНИК ИСТИНЫ ДЛЯ ПРОДА — src/lib/* (worker-runtime.ts + active-trip.ts +
+// metrics-methodology.ts + route-hash.ts); при включении этого сервиса «как есть»
+// будет ТИХАЯ ДЕГРАДАЦИЯ метрик. Известные расхождения с прод-конвейером (~6
+// пунктов методологии; SYNC-СПИСОК, поддерживать при правках основного кода):
+//   1. §4.6а sparse-move НЕТ: computeMovingTime не знает SPARSE_MOVE_MIN_M —
+//      разреженные блипы (тишина > 30 с с перемещением ≥ 75 м) считаются
+//      стоянкой; прод: src/lib/active-trip.ts (v2.36.0).
+//   2. ActiveTrip без legs/сплитов: один span firstMoving..lastMoving —
+//      запись «утром доехал / 8 ч парковка / вечером уехал» считается ОДНОЙ
+//      поездкой (activeDuration = span); прод: мульти-leg §4.11 (v2.25.0),
+//      activeDuration = Σ legs, стоянки ≥ 900 с режут legs.
+//   3. BearingConsistency — СТАРЫЙ линейный 1 − stddev(Δbearing)/180 по
+//      свёрнутым в [0,180] дельтам (претензия №12 ревью, исправлена в проде
+//      v2.32.0 круговой статистикой mean(cos θ)); здесь осознанно не обновлялся.
+//   4. SessionReliability без plausibilityScore: completeness × driftScore
+//      (drift — max, не P95; без фильтра «обе точки idle, скорость < 1 м/с»);
+//      прод: §11.6 — × plausibilityScore, drift P95 (v2.25.0+).
+//   5. EcoScore на ХАРДКОД-базлайнах 0.5/0.4/0.3, без корпус-калибровки
+//      и без env-порогов insufficient_data-рейтинга (экспонента штрафа
+//      приведена к §7.3 = 2, v2.38.2 F65); прод: eco-corpus.ts (медиана корпуса,
+//      env-override, маржа ×1.2).
+//   6. Маршрут строится от СЫРЫХ первой/последней точки записи (не от
+//      activeStart/EndCoord — хвосты стоянки уводят план-факт) и БЕЗ utc
+//      (2ГИС считает пробки на момент запроса, не на момент старта, §13.1);
+//      прод: worker-runtime.ts v2.33.0 — активные границы + departAtMs
+//      каждого leg + кэш §13.4 (src/lib/route-cache.ts, v2.38.2 — здесь его нет).
+// Примечание: computeRouteHash §10.0 ПОРТИРОВАН в прод v2.38.1 (src/lib/route-hash.ts)
+// с побайтовой паритетностью — расхождений нет.
 
 import { createHash } from "crypto";
 
@@ -712,7 +742,9 @@ function computeEcoScoreCAP(
   const penalty = (actual: number, baseline: number): number => {
     if (baseline <= 0) return 1;
     const ratio = actual / baseline;
-    return 1 - 1 / (1 + Math.pow(ratio, 1.5));
+    // v2.38.2 (F65): экспонента 2 — как формула §7.3 (тривиальная сверка с продом;
+    // базлайны здесь по-прежнему хардкод — см. расхождение №5 в шапке)
+    return 1 - 1 / (1 + Math.pow(ratio, 2));
   };
 
   let value = 100 * (1 - 0.45 * penalty(brakingRate, BRAKING_BASE) - 0.30 * penalty(accelRate, ACCEL_BASE) - 0.25 * penalty(jerkRate, JERK_BASE));

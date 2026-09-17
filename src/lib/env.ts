@@ -116,14 +116,26 @@ const schema = z.object({
   TRIP_BACKFILL_BATCH: z.coerce.number().int().positive().default(50),
   // v2.9 §7.3: CAP EcoScore — базовые линии калибруются по референсному корпусу (по умолчанию 0.5/0.4/0.3)
   ECO_SCORE_CAP_BASELINE: z.string().default(""),
-  ECO_SCORE_CAP_PENALTY_EXPONENT: z.coerce.number().positive().default(1.5),
+  // v2.38.2 (ревью F65): дефолт экспоненты штрафа приведён к формуле методологии §7.3 —
+  // penalty = 1 − 1/(1 + (actual/baseline)²) — т.е. 2. Прежний дефолт 1.5 систематически
+  // искажал EcoScore относительно спецификации (мягче к плохим, жёстче к хорошим).
+  // Оператор может вернуть 1.5 для преемственности прежней шкалы; после смены
+  // экспоненты следует поднять SESSION_CACHE_VERSION (конвенция §7.3, п.7).
+  // ВНИМАНИЕ: render.yaml пинует значение — синхронизировать при деплое v2.38.2.
+  ECO_SCORE_CAP_PENALTY_EXPONENT: z.coerce.number().positive().default(2),
   ECO_SCORE_MIN_CALIBRATION_CORPUS: z.coerce.number().int().positive().default(30),
   ECO_SCORE_MIN_BASELINE_VALUE: z.coerce.number().positive().default(0.05),
+  // v2.38.2 (ревью F66): пороги НЕ гейтят null-значение EcoScore (методологический
+  // пол 500 м / 60 с / 60 точек зафиксирован в коде §7.3 — смена пола меняла бы состав
+  // калибровочного корпуса) — они понижают rating до insufficient_data при вычисленном
+  // значении (поездка короче «серьёзной» не оценивается качественно).
   ECO_SCORE_MIN_ACTIVE_DISTANCE_KM: z.coerce.number().positive().default(5),
   ECO_SCORE_MIN_ACTIVE_DURATION_SEC: z.coerce.number().positive().default(300),
-  // v2.9 §17.2: HMM map matching — σ (GPS-погрешность, м) + β (transition, м)
-  HMM_EMISSION_SIGMA_M: z.coerce.number().positive().default(5),
-  HMM_TRANSITION_BETA_M: z.coerce.number().positive().default(5),
+  // v2.38.2 (ревью F70): HMM_EMISSION_SIGMA_M / HMM_TRANSITION_BETA_M УДАЛЕНЫ из
+  // прод-конфига — в src/ HMM/Viterbi (§17.2) не реализован (проектная спецификация,
+  // в проде НЕ задействован), эти поля не читались никем в src/. Параметры остались
+  // только в НЕ-деплоемом mini-services/worker (processor.ts читает их напрямую из
+  // process.env через envNumber, дефолты 5/5 зашиты там же).
   // v2.9 §10.5: Theil-Sen RouteTrend — bootstrap при n > 200
   ROUTE_TREND_BOOTSTRAP_THRESHOLD: z.coerce.number().int().positive().default(200),
   ROUTE_TREND_BOOTSTRAP_SAMPLES: z.coerce.number().int().positive().default(200),
@@ -132,6 +144,15 @@ const schema = z.object({
   HOTSPOT_SEGMENTS_THRESHOLD: z.coerce.number().positive().default(0.5),
   // v2.9 §10.0: routeHash — snap-to-grid шаг (0.0005° ≈ 55 м на широте Москвы)
   ROUTE_ID_SNAP_GRID_DEG: z.coerce.number().positive().default(0.0005),
+  // v2.38.2 (ревью F64): TTL in-memory кэша результатов маршрутизации (§13.4/§14,
+  // src/lib/route-cache.ts): 24 ч = суточная периодичность одинаковых поездок при
+  // приемлемой свежести пробок 2ГИС. LRU-ёмкость (512 записей) — константа модуля.
+  ROUTE_CACHE_TTL_HOURS: z.coerce.number().int().positive().default(24),
+  // v2.38.2 (ревью F68): часовой пояс оператора для часовых бакетов §10.3/§10.4
+  // (RouteTrafficPattern / DayOfWeek) и ToD-бакета кэша маршрутизации (§13.4).
+  // IANA-имя; дефолт — пояс владельца (Саратов = UTC+4, см. кейс §4.6а методологии);
+  // невалидное имя → фолбэк на серверный пояс (lenient).
+  TELEMAT_TIMEZONE: z.string().default("Europe/Saratov"),
   // P2-16: вебхук Slack для алертов §14.4 (пусто — только журнал и /api/admin/alerts)
   SLACK_WEBHOOK_URL: z.string().default(""),
   // v2.32.0: дедуп Slack-уведомлений алертов — одно и то же горящее правило

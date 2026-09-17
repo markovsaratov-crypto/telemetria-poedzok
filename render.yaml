@@ -103,7 +103,9 @@ services:
       - key: ECO_SCORE_CAP_BASELINE
         value: ""
       - key: ECO_SCORE_CAP_PENALTY_EXPONENT
-        value: "1.5"
+        value: "2"
+        # v2.38.2 (ревью F65): приведено к методологии §7.3 — штраф в квадрате;
+        # прежнее значение 1.5 было расхождением код/дока
       - key: ECO_SCORE_MIN_CALIBRATION_CORPUS
         value: "30"
       - key: ECO_SCORE_MIN_BASELINE_VALUE

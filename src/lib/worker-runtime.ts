@@ -7,13 +7,18 @@ import { inc, set } from "./metrics";
 import { routeRequest, type RouteResult, type RouteSegment } from "./routing/chain";
 import { haversineM } from "./geo"; // v2.25.0 (П.5): Σ прямых участков мульти-leg плана
 import { finalizeSession } from "./session-finalize"; // v2.14.0 (Ф3): «жнец» зависших recording-сессий
-import { computeMovingTime, computeActiveTrip } from "./active-trip"; // v2.16.0 (B-10): каноническое активное окно §4.11
+import { computeMovingTime, computeActiveTrip, type MethodologyPoint } from "./active-trip"; // v2.16.0 (B-10): каноническое активное окно §4.11; v2.38.2 (F60): + тип точки для гигиены routing-legs
 import { getCorpusEcoBaselines } from "./eco-corpus"; // v2.17.1: фоновый прогрев corpus-калибровки
 import { closeStaleTrips, tripsEnabled } from "./trip-grouping"; // v2.26.0 (ТЗ §7-п.4): «жнец» поездок
 // v2.38.1 (ревью F7): §10.0 routeHash/topologyHash — прод-порт из мини-сервиса
 // (раньше считал ТОЛЬКО недеплояемый mini-services/worker — 8 из 62 метрик §10
 // были мертвы для новых сессий). Считается в completeJob-пути и пишется в Session.
 import { computeRouteHash, type RouteHashCoord, type RouteHashResult } from "./route-hash";
+// v2.38.2 (ревью F60): гигиена точек БД перед routing-legs — порог точности
+// и парсер времени из КАНОНИЧЕСКОГО конвейера (read-only import; файлы чужих
+// зон kpi.ts/parse-timestamp.ts не редактировались).
+import { MAX_TRUSTED_ACCURACY_M } from "./kpi";
+import { parseTimestamp } from "./parse-timestamp";
 
 // P0-фикс v2.9.10 (Render build failure — финальная версия без костылей):
 //
@@ -89,24 +94,86 @@ interface JobWithPoints {
   };
 }
 
-async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoints[]> {
-  const now = new Date().toISOString();
-  const STUCK_TTL_MS = 60_000;
-  const stuckCutoff = new Date(Date.now() - STUCK_TTL_MS).toISOString();
+// v2.38.2 (ревью F60): гигиена точки из БД перед routing-legs — КАНОНИЧЕСКИЙ
+// конвейер инжеста/статов отбрасывает точки с accuracy > MAX_TRUSTED_ACCURACY_M
+// (kpi.ts: тот же порог, что isUsableSpeedPoint и sensorlogger-инжест
+// MAX_POINT_ACCURACY_M = 100 м), нормализует bearing в [0,360) и время через
+// единый parse-timestamp. Воркер же гнал в computeMovingTime/computeActiveTrip
+// accuracy:null/bearing:null: driftThreshold §4.6 = 0 (дрейф-защита парковки
+// выключена), при speed=null парковочный дрейф проходил как dispSpeed →
+// ложно «moving» — legs план-факта расходились с каноническим конвейером.
+// null = точка отброшена (координата/время недостоверны).
+function hygieneWorkerPoint(p: Record<string, unknown>): MethodologyPoint | null {
+  const accNum = p.accuracy == null ? null : Number(p.accuracy);
+  const accuracy = accNum != null && Number.isFinite(accNum) && accNum >= 0 ? accNum : null;
+  // Тот же порог, что канонический инжест: координата/скорость недостоверны
+  if (accuracy != null && accuracy > MAX_TRUSTED_ACCURACY_M) return null;
+  const ts = parseTimestamp(String(p.timestamp)); // BigInt-мс → мс; legacy-сек → ×1000; мусор → null
+  if (ts == null) return null;
+  const speedNum = p.speed == null ? null : Number(p.speed);
+  const bearingNum = p.bearing == null ? null : Number(p.bearing);
+  return {
+    lat: Number(p.lat),
+    lon: Number(p.lon),
+    speed: speedNum != null && Number.isFinite(speedNum) && speedNum >= 0 ? speedNum : null,
+    altitude: null, // не в SELECT: legs/маршрутизация высоту не используют
+    accuracy,
+    // [0,360): нормализация (neg/≥360), как extractPoint инжеста
+    bearing: bearingNum != null && Number.isFinite(bearingNum) ? ((bearingNum % 360) + 360) % 360 : null,
+    timestamp: ts,
+  };
+}
 
-  // v2.16.0 (R5): Reclaim зависших running-джобов С инкрементом attempts и
-  // «смертью» после 10 неудачных реклеймов — раньше джоб, убивший процесс
-  // (OOM между claim и complete), ретраился КАЖДЫЕ 60 СЕК навечно (attempts
-  // инкрементировался только в completeJob) — вечный цикл внешних вызовов.
+// v2.38.2 (ревью F61): TTL реклейма привязан к конфигурации опроса —
+// max(5 × WORKER_POLL_INTERVAL_MS, 120 с). Прежние 60 с МЕНЬШЕ worst-case
+// цикла (batch 10 × p-limit(5) × 45 с мульти-leg ≈ 90 с): при ≥2 поллерах
+// (мини-сервис на той же БД) реклейм крал LIVE-джоб медленного воркера →
+// двойная маршрутизация. Живого владельца из чужого процесса не видно
+// (heartbeat-поля в схеме нет) — прокси «владелец мёртв» = lockedAt стух
+// СВЕРХ worst-case цикла (задокументированная семантика); СВОИ live-джобы
+// исключаются явно через rt.inFlight (поле ожило: было заявлено, но не
+// использовалось) — страховка на случай перекрывающихся циклов опроса.
+const STUCK_RECLAIM_TTL_MS = 120_000;
+// v2.38.2 (ревью F62): poison-pill для джобов, роняющих воркер и никогда не
+// завершающихся: «attempts ≥ 9» мёртв (реклейм счётчик больше не растит),
+// вместо него возраст строки: running + стухший lock + createdAt старше часа
+// → dead. Щедро к TTL (≈30 циклов реклейма) и убивает исторических «вечных
+// running»-зомби из R5-эры.
+const STUCK_JOB_MAX_AGE_MS = 60 * 60_000;
+
+async function pollJobs(rt: WorkerRuntime, batchSize: number): Promise<JobWithPoints[]> {
+  const workerId = rt.workerId;
+  const now = new Date().toISOString();
+  // v2.38.2 (F61): max(5×poll, 120 c) — не ниже worst-case цикла (~90 с)
+  const stuckTtlMs = Math.max(5 * env().WORKER_POLL_INTERVAL_MS, STUCK_RECLAIM_TTL_MS);
+  const stuckCutoff = new Date(Date.now() - stuckTtlMs).toISOString();
+  const stuckDeadCutoff = new Date(Date.now() - STUCK_JOB_MAX_AGE_MS).toISOString();
+
+  // v2.16.0 (R5): Reclaim зависших running-джобов — раньше джоб, убивший
+  // процесс (OOM между claim и complete), ретраился КАЖДЫЕ 60 СЕК навечно —
+  // вечный цикл внешних вызовов.
+  // v2.38.2 (ревью F62): attempts реклеймом БОЛЬШЕ не инкрементируется —
+  // единственный писатель счётчика completeJob, бюджет «dead после 3»
+  // считают РЕАЛЬНЫЕ фейлы (прежде reclaim +1 и complete +1: джоб после
+  // 2 реклеймов умирал на ПЕРВОМ фейле). Семантика сошлась с протоколом
+  // /api/worker/complete мини-сервиса (тоже инкремент при завершении).
+  // Идемпотентность сохранена: реклеймнутый джоб → pending, повторный
+  // реклейм невозможен (WHERE требует running + стухший lock).
   try {
-    await libsql.execute({
+    const inFlightIds = [...rt.inFlight];
+    const notInFlightSql = inFlightIds.length > 0 ? ` AND id NOT IN (${inFlightIds.map(() => "?").join(", ")})` : "";
+    const res = await libsql.execute({
       sql: `UPDATE TrafficJob
-            SET status = CASE WHEN attempts >= 9 THEN 'dead' ELSE 'pending' END,
-                attempts = attempts + 1,
+            SET status = CASE WHEN createdAt < ? THEN 'dead' ELSE 'pending' END,
                 lockedBy = NULL, lockedAt = NULL, updatedAt = ?
-            WHERE status = 'running' AND lockedAt < ?`,
-      args: [now, stuckCutoff],
+            WHERE status = 'running' AND lockedAt < ?${notInFlightSql}`,
+      args: [stuckDeadCutoff, now, stuckCutoff, ...inFlightIds],
     });
+    const reclaimed = Number(res.rowsAffected ?? 0);
+    if (reclaimed > 0) {
+      inc("traffic_job_reclaimed_total", "Traffic jobs reclaimed from stuck running (owner stale beyond worst-case cycle)", reclaimed);
+      logger.warn("reclaimed stuck traffic jobs", { workerId, count: reclaimed, ttlMs: stuckTtlMs });
+    }
   } catch {}
 
   // Atomic claim
@@ -166,23 +233,21 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
     }
     // Точки всех записей всех поездок одним набором чанков
     const allSessionIds = [...new Set(tripJobs.flatMap((c) => tripById.get(c.tripId as string)?.sessionIds ?? []))];
-    const tripPoints = new Map<string, Array<{ lat: number; lon: number; speed: number | null; timestamp: number; altitude: null; accuracy: null; bearing: null }>>();
+    const tripPoints = new Map<string, MethodologyPoint[]>();
     for (let i = 0; i < allSessionIds.length; i += 8) {
       const chunk = allSessionIds.slice(i, i + 8);
       const ph = chunk.map(() => "?").join(", ");
       const ptsRes = await libsql.execute({
-        sql: `SELECT sessionId, lat, lon, speed, timestamp FROM GpsPoint WHERE sessionId IN (${ph}) ORDER BY timestamp ASC`,
+        // v2.38.2 (ревью F60): + accuracy/bearing — гигиена точек (см. hygieneWorkerPoint)
+        sql: `SELECT sessionId, lat, lon, speed, timestamp, accuracy, bearing FROM GpsPoint WHERE sessionId IN (${ph}) ORDER BY timestamp ASC`,
         args: chunk,
       });
       for (const p of ptsRes.rows as Record<string, unknown>[]) {
+        const hp = hygieneWorkerPoint(p);
+        if (hp == null) continue;
         const sid = String(p.sessionId);
         if (!tripPoints.has(sid)) tripPoints.set(sid, []);
-        tripPoints.get(sid)!.push({
-          lat: Number(p.lat), lon: Number(p.lon),
-          speed: p.speed != null ? Number(p.speed) : null,
-          timestamp: Number(p.timestamp),
-          altitude: null, accuracy: null, bearing: null,
-        });
+        tripPoints.get(sid)!.push(hp);
       }
     }
     for (const c of tripJobs) {
@@ -269,15 +334,18 @@ async function pollJobs(workerId: string, batchSize: number): Promise<JobWithPoi
     if (Number.isFinite(ms)) sessionDepartMs.set(String(row.id), ms);
   }
   const ptsRes = await libsql.execute({
-    sql: `SELECT sessionId, lat, lon, speed, timestamp FROM GpsPoint WHERE sessionId IN (${placeholders}) ORDER BY sessionId, timestamp ASC`,
+    // v2.38.2 (ревью F60): + accuracy/bearing — гигиена точек (см. hygieneWorkerPoint)
+    sql: `SELECT sessionId, lat, lon, speed, timestamp, accuracy, bearing FROM GpsPoint WHERE sessionId IN (${placeholders}) ORDER BY sessionId, timestamp ASC`,
     args: sessionIds, // v2.19.0: string[] — валидные InValue (было `as any`)
   });
-  const pointsMap = new Map<string, Array<{ lat: number; lon: number; speed: number | null; timestamp: number; altitude: null; accuracy: null; bearing: null }>>();
+  const pointsMap = new Map<string, MethodologyPoint[]>();
   for (const r of ptsRes.rows) {
     const p = r as Record<string, unknown>;
+    const hp = hygieneWorkerPoint(p);
+    if (hp == null) continue;
     const sid = String(p.sessionId);
     if (!pointsMap.has(sid)) pointsMap.set(sid, []);
-    pointsMap.get(sid)!.push({ lat: Number(p.lat), lon: Number(p.lon), speed: p.speed != null ? Number(p.speed) : null, timestamp: Number(p.timestamp), altitude: null, accuracy: null, bearing: null });
+    pointsMap.get(sid)!.push(hp);
   }
 
   const jobs2: JobWithPoints[] = [];
@@ -351,6 +419,9 @@ async function completeJob(
   routeHashInfo?: RouteHashResult | null,
 ) {
   const now = new Date().toISOString();
+  // v2.38.2 (ревью F62): attempts инкрементируется ТОЛЬКО здесь (complete) —
+  // реклейм счётчик не трогает, «dead после 3» = 3 РЕАЛЬНЫХ фейла (раньше
+  // reclaim +1 и complete +1: 2 реклейма + первый фейл = сразу dead).
   const newAttempts = attempts + 1;
   let finalStatus: string = status;
   let scheduledFor: string | null = null;
@@ -443,6 +514,21 @@ async function withRouteHash(
   return { result: enriched, routeHashInfo };
 }
 
+// v2.38.2 (ревью F61): Promise.race НЕ отменяет таймаут-таймеры — победивший
+// маршрут оставлял 15/45-секундный setTimeout жить дальше (мёртвый reject в
+// уже решённой гонке + лишний тик event-loop; «очистка таймеров race» из
+// находки). Обёртка чистит таймер при любом исходе; сообщения и задержки —
+// прежние (паритет логов/семантики таймаутов).
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (err) => { clearTimeout(timer); reject(err instanceof Error ? err : new Error(String(err))); },
+    );
+  });
+}
+
 async function processOneJob(job: JobWithPoints, parentRequestId: string) {
   const requestId = crypto.randomUUID();
   // v2.26.0 (ТЗ §14): поездковое задание — своя метрика (сессионные считаются
@@ -520,10 +606,8 @@ async function processOneJob(job: JobWithPoints, parentRequestId: string) {
           legDirectM: Math.round(legDirectM),
         };
       };
-      const result = await Promise.race<RouteResult>([
-        routeAllLegs(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("routeRequest multi-leg timeout 45s")), MULTI_TIMEOUT_MS)),
-      ]);
+      // v2.38.2 (F61): гонка с таймаутом БЕЗ утечки таймера (см. withTimeout)
+      const result = await withTimeout(routeAllLegs(), MULTI_TIMEOUT_MS, "routeRequest multi-leg timeout 45s");
       // v2.38.1 (ревью F7): §10.0 routeHash/topologyHash для сессионного джоба
       const applied = await withRouteHash(job, result);
       await completeJob(job.id, "completed", applied.result, null, job.attempts, requestId, applied.routeHashInfo);
@@ -534,10 +618,8 @@ async function processOneJob(job: JobWithPoints, parentRequestId: string) {
     const routeEnd = legEnds && legEnds.length === 1 ? { lat: legEnds[0].endLat, lon: legEnds[0].endLon } : end;
     // v2.33.0: utc = момент старта leg/поездки — «план на момент старта» (2ГИС)
     const departAtMs = (legEnds && legEnds.length === 1 ? legEnds[0].startMs : undefined) ?? job.session.departAtMs;
-    const result = await Promise.race<RouteResult | null>([
-      routeRequest(routeStart.lat, routeStart.lon, routeEnd.lat, routeEnd.lon, departAtMs),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("routeRequest timeout 15s")), 15000)),
-    ]);
+    // v2.38.2 (F61): гонка с таймаутом БЕЗ утечки таймера (см. withTimeout)
+    const result = await withTimeout(routeRequest(routeStart.lat, routeStart.lon, routeEnd.lat, routeEnd.lon, departAtMs), 15000, "routeRequest timeout 15s");
     // v2.38.1 (ревью F7): §10.0 routeHash/topologyHash для сессионного джоба
     const applied = await withRouteHash(job, result);
     await completeJob(job.id, "completed", applied.result, null, job.attempts, requestId, applied.routeHashInfo);
@@ -595,11 +677,21 @@ function prewarmCorpusBaselines(): void {
 async function pollOnce(rt: WorkerRuntime) {
   const requestId = crypto.randomUUID();
   try {
-    const jobs = await pollJobs(rt.workerId, env().WORKER_BATCH_SIZE);
+    const jobs = await pollJobs(rt, env().WORKER_BATCH_SIZE);
     if (jobs.length > 0) {
       logger.info("polled jobs", { requestId, workerId: rt.workerId, count: jobs.length });
       const limit = pLimit(env().WORKER_MAX_CONCURRENCY);
-      await Promise.all(jobs.map((job) => limit(() => processOneJob(job, requestId))));
+      // v2.38.2 (F61): rt.inFlight ведётся по-настоящему — reclaim в pollJobs
+      // не трогает джобы, которые ЭТОТ процесс обрабатывает прямо сейчас
+      // (межпроцессных владельцев различает TTL сверх worst-case, см. pollJobs)
+      await Promise.all(jobs.map((job) => limit(async () => {
+        rt.inFlight.add(job.id);
+        try {
+          await processOneJob(job, requestId);
+        } finally {
+          rt.inFlight.delete(job.id);
+        }
+      })));
     }
   } catch (err) {
     logger.error("poll cycle failed", { requestId, error: err instanceof Error ? err.message : String(err) });
@@ -804,12 +896,19 @@ export function startWorkerRuntime(): WorkerRuntime {
     stop: () => { rt.shuttingDown = true; if (rt.pollTimer) clearTimeout(rt.pollTimer); logger.info("worker runtime stopped", { workerId: rt.workerId }); },
   };
 
+  // v2.38.2 (ревью F63): конфиг WORKER_POLL_INTERVAL_MS — база И МИНИМУМ
+  // адаптивного интервала на КАЖДОМ тике (раньше хардкод 2000/5000/30000
+  // брал верх после первого тика — env действовал один раз). Загрузка/норма =
+  // base (быстрее настроенного не уходим: оператор, которому нужен быстрый
+  // дрейн бэклога, ставит меньший env); простой = 6×base (дефолт 5 с → 30 с,
+  // как прежде); сбой подсчёта → base, а не хардкод-5000.
+  const baseIntervalMs = e.WORKER_POLL_INTERVAL_MS;
   const schedulePoll = () => {
     if (rt.shuttingDown) return;
     rt.pollTimer = setTimeout(async () => {
       try { await pollOnce(rt); } catch (err) { logger.error("pollOnce threw", { error: err instanceof Error ? err.message : String(err) }); }
       // Adaptive polling + metrics
-      let nextInterval = 5000;
+      let nextInterval = baseIntervalMs;
       try {
         const countsRes = await libsql.execute("SELECT status, COUNT(*) as c FROM TrafficJob WHERE status IN ('pending','running') GROUP BY status");
         let pending = 0, running = 0;
@@ -820,9 +919,7 @@ export function startWorkerRuntime(): WorkerRuntime {
         }
         set("worker_pending_jobs", pending, "Pending traffic jobs");
         set("worker_running_jobs", running, "Running traffic jobs");
-        if (pending === 0 && running === 0) nextInterval = 30000;
-        else if (pending > 10) nextInterval = 2000;
-        else nextInterval = 5000;
+        if (pending === 0 && running === 0) nextInterval = baseIntervalMs * 6;
       } catch {}
       rt.pollIntervalMs = nextInterval;
       schedulePoll();

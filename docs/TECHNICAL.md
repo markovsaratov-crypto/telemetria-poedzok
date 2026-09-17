@@ -112,7 +112,7 @@
 
 1. **Инжест.** Sensor Logger шлёт батч → `/api/ingest/sensorlogger` (токен INGEST_TOKEN). Создаётся/продолжается сессия `recording`; точки пишутся в `GpsPoint` (BigInt timestamp в мс).
 2. **Финализация.** Разрыв > 60 с между батчами → предыдущая сессия закрывается (`completed`), атомарно создаётся `TrafficJob` (pending). Ту же работу делают cron finalize-sessions (каждые 5 мин) и «жнец» в воркере — финализация идемпотентна.
-3. **Маршрутизация.** In-process воркер опрашивает `TrafficJob` каждые 5 с, атомарно захватывает (UPDATE…RETURNING), прогоняет цепочку 2GIS → OSRM → гаверсинус(40 км/ч), кладёт результат (полилайн, длительность по трафику) в `TrafficJob.result` (кэш — `RouteCache`).
+3. **Маршрутизация.** In-process воркер опрашивает `TrafficJob` каждые 5 с, атомарно захватывает (UPDATE…RETURNING), прогоняет цепочку 2GIS → OSRM → гаверсинус(40 км/ч), кладёт результат (полилайн, длительность по трафику) в `TrafficJob.result` (кэш повторов — in-memory `src/lib/route-cache.ts`, §10.2).
 4. **Метрики.** `GET /api/sessions/[id]/stats` (и батч-вариант `/api/stats/batch`) считаются на лету по точкам + план-факт из результата TrafficJob. Единый конвейер `src/lib/session-stats.ts` — идентичен для поштучного и батч-роута.
 5. **UI.** React/TanStack Query: префетч батча на корне лейаута → мгновенное открытие «Поездок» из кэша; TTL-кэш 30 с на сервере для батчей.
 
@@ -132,7 +132,7 @@
 | БД | Turso (libSQL, SQLite-диалект), Prisma 6.19.2 + `@prisma/adapter-libsql` + `@libsql/client` 0.17 (прямые SQL там, где Prisma-обёртка ограничена) |
 | Валидация | Zod 4 (все тела/квери-параметры API) |
 | Крипто | WebCrypto HMAC (cookie/share), node:crypto (timing-safe, sha256 бэкапов), bcryptjs 3 |
-| Воркер | in-process (instrumentation.ts), p-limit 7 для конкурентности |
+| Воркер | in-process (instrumentation.ts), p-limit 5 для конкурентности (`WORKER_MAX_CONCURRENCY`; v2.38.2, ревью F73 — прежде ошибочно «7») |
 | PWA | service worker (`public/sw.js`), manifest, offline.html |
 | Инфраструктура | Render (web + 5 cron), GitHub (код, бэкап-релизы), Turso |
 | Опционально | Cloudflare Worker как прокси к 2GIS (`cloudflare-worker/worker.js`, PROXY_SECRET) |
@@ -220,13 +220,15 @@
 | `MOVING_TIME_HYSTERESIS_HIGH_KMH` / `_LOW_KMH` | 5 / 2 | гистерезис state machine §4.6 |
 | `MOVING_TIME_DEBOUNCE_SEC` / `MOVING_TIME_GAP_SEC` | 5 / 30 | debounce и gap state machine §4.6 |
 | `SPARSE_MOVE_MIN_M` | 75 | порог разреженного движения §4.6а (v2.36.0): перемещение (м) в тишине > 30 с, подтверждающее движение |
-| `ECO_SCORE_CAP_BASELINE` / `_PENALTY_EXPONENT` | "" / 1.5 | EcoScore CAP §7.3 |
+| `ECO_SCORE_CAP_BASELINE` / `_PENALTY_EXPONENT` | "" / 2 | EcoScore CAP §7.3 (v2.38.2: дефолт экспоненты приведён к формуле §7.3 — было 1.5; render.yaml пинует — синхронизировать при деплое) |
 | `ECO_SCORE_MIN_CALIBRATION_CORPUS` | 30 | мин. корпус калибровки EcoScore |
-| `ECO_SCORE_MIN_BASELINE_VALUE` / `_MIN_ACTIVE_DISTANCE_KM` / `_MIN_ACTIVE_DURATION_SEC` | 0.05 / 5 / 300 | пороги применимости EcoScore |
-| `HMM_EMISSION_SIGMA_M` / `HMM_TRANSITION_BETA_M` | 5 / 5 | HMM map-matching §17.2 — конвейер в проде НЕ задействован (параметры для опционального мини-сервиса, см. ADMIN_SPEC §12.6) |
+| `ECO_SCORE_MIN_BASELINE_VALUE` / `_MIN_ACTIVE_DISTANCE_KM` / `_MIN_ACTIVE_DURATION_SEC` | 0.05 / 5 / 300 | 0.05 — защита базлайнов от вырождения; 5/300 — порог insufficient_data-РЕЙТИНГА EcoScore (значение ниже порога вычисляется; null-гейт §7.3 — фикс. 500 м/60 с/60 точек) |
+| ~~`HMM_EMISSION_SIGMA_M` / `HMM_TRANSITION_BETA_M`~~ | — | удалены из прод-конфига v2.38.2 (ревью F70): HMM §17.2 в проде не реализован, поля не читались; параметры остался только у мини-сервиса (processor.ts читает process.env, дефолты 5/5) |
 | `ROUTE_TREND_BOOTSTRAP_THRESHOLD` / `_SAMPLES` | 200 / 200 | Theil-Sen bootstrap §10.5 |
 | `HOTSPOT_SEGMENTS_PERCENTILE` / `_THRESHOLD` | 75 / 0.5 | P75-хотспоты §10.6 |
-| `ROUTE_ID_SNAP_GRID_DEG` | 0.0005 (~55 м) | snap-to-grid routeHash §10.0 |
+| `ROUTE_ID_SNAP_GRID_DEG` | 0.0005 (~55 м) | snap-to-grid routeHash §10.0 и кэша маршрутизации §13.4 |
+| `ROUTE_CACHE_TTL_HOURS` | 24 | TTL in-memory кэша маршрутизации §13.4/§14 (v2.38.2, F64; LRU ≤512 — константа модуля) |
+| `TELEMAT_TIMEZONE` | Europe/Saratov | часовой пояс оператора: бакеты §10.3/§10.4 и ToD-бакет кэша §13.4 (v2.38.2, F68; IANA-имя, невалидное → серверный пояс) |
 | `NODE_ENV` | production | — |
 | `APP_VERSION` | 2.32.0 | информационно; фактически `/health` берёт версию из package.json |
 | `ALERT_DEDUP_COOLDOWN_MIN` | 60 | дедуп Slack-алертов: горящее правило уведомляется не чаще раза в N мин (0 = выкл) |
@@ -260,7 +262,7 @@ Unique `@@unique([deviceId, clientId])` — идемпотентность `/api
 
 **Route** — админ-справочник маршрутов (для план-факта). `id`, `userId`?, `name`, `description`?, `startLat/startLon/endLat/endLon`, таймстемпы. Индекс `userId`.
 
-**RouteCache** — кэш результатов маршрутизации: `hash` (unique), `result` (JSON), `todBucket` (time-of-day bucket), `routeId`?, `expiresAt`. Индексы `(todBucket, expiresAt)`, `routeId`.
+**RouteCache** — кэш результатов маршрутизации: `hash` (unique), `result` (JSON), `todBucket` (time-of-day bucket), `routeId`?, `expiresAt`. Индексы `(todBucket, expiresAt)`, `routeId`. v2.38.2 (ревью F64): в рантайме НЕ используется — кэш маршрутизации реализован in-memory (`src/lib/route-cache.ts`, см. §10.2); таблица сохраняется в схеме/бэкапах/restore для совместимости дампов.
 
 **TrafficJob** — задача маршрутизации поездки.
 `id`, `sessionId` (Cascade), `status` (`pending`→`running`→`completed`/`failed`/`dead`), `attempts`, `priority`, `scheduledFor`, `lockedBy`?, `lockedAt`?, `result`? (JSON: полилайн/длительность провайдера), `error`?, таймстемпы. Индексы `(status, scheduledFor, priority)`, `sessionId`.
@@ -504,7 +506,7 @@ Session(recording) + GpsPoint[] ──(gap>60c / cron / жнец)──► final
 Запускается через `src/instrumentation.ts` при старте Next.js (только Node-runtime, не build). Циклы:
 
 - **Poll TrafficJob** (5 с): реклейм застрявших `running > 60 c` (attempts+1; после 10 реклеймов — `dead`); атомарный захват `LIMIT 10` (`UPDATE…RETURNING`); обработка с `p-limit(5)`.
-- **Маршрутизация** (`src/lib/routing/chain.ts`): 2GIS carrouting (приоритет; опционально через Cloudflare-прокси `TWO_GIS_PROXY_URL` для обхода региональных блокировок) → OSRM demo → гаверсинус 40 км/ч (последний рубеж). Circuit breaker по провайдеру (5 ошибок → разомкнут на 30 c). Кэш `RouteCache` (hash + time-of-day bucket).
+- **Маршрутизация** (`src/lib/routing/chain.ts`): 2GIS carrouting (приоритет; опционально через Cloudflare-прокси `TWO_GIS_PROXY_URL` для обхода региональных блокировок) → OSRM demo → гаверсинус 40 км/ч (последний рубеж). Circuit breaker по провайдеру (5 ошибок → разомкнут на 30 c). v2.38.2 (ревью F64): кэш повторов маршрутов — in-memory LRU `src/lib/route-cache.ts` (ключ grid-snapped start/end + time-of-day бакет по `TELEMAT_TIMEZONE`, TTL 24 ч `ROUTE_CACHE_TTL_HOURS`, ≤512 записей, globalThis); SQLite-таблица `RouteCache` в рантайме не используется (остаётся в схеме/бэкапах/restore).
 - **Результат** → `TrafficJob.result` = JSON маршрутизации (полилайн, длительность в трафике) — источник план-факта.
 - **Жнец recording-сессий**: та же `finalizeSession` — зависшие сессии закрываются, дубли TrafficJob исключены атомарной вставкой.
 - **Прогрев corpus-калибровки EcoScore** (первый цикл + каждые 4 мин, fire-and-forget) — холодный свип ~15–20 с не платится первым пользователем. v2.38.0: перед свипом (56К строк) проверяется ПОДПИСЬ корпуса (одна агрегатная строка COUNT+SUM по финализированным записям) — без изменений корпуса свип не выполняется; состав корпуса — только финализированные записи.

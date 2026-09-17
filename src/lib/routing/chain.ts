@@ -6,6 +6,10 @@ import { env } from "../env";
 import { getSettingSync } from "../settings";
 import { logger } from "../logger";
 import { checkCircuit, recordFailure, recordSuccess } from "./circuit-breaker";
+// v2.38.2 (ревью F64): кэш результатов маршрутизации §13.4/§14: snap-to-grid +
+// ToD-бакет, in-memory LRU, TTL 24 ч (src/lib/route-cache.ts). Кэшируем ДО цепочки
+// провайдеров (ежедневные одинаковые маршруты не бьют квоту 2ГИС заново).
+import { routeCacheGet, routeCacheKey, routeCachePut } from "../route-cache";
 // P2-14: канонический гаверсинус — src/lib/geo.ts (была локальная копия)
 import { haversineM as haversine } from "@/lib/geo";
 export { haversine };
@@ -266,9 +270,24 @@ export async function routeRequest(
 ): Promise<RouteResult> {
   // v2.33.0: departAtMs (мс epoch) — только 2ГИС-канал использует его как utc
   // («план на момент старта»); OSRM/гаверсинус свободного потока времени не знают.
+  // v2.38.2 (ревью F64): кэш §13.4/§14 — grid-snapped (start, end) + ToD-бакет
+  // по моменту старта. Ежедневные одинаковые поездки (дом→работа) попадают в
+  // тот же ключ внутри суток → живой запрос к 2ГИС/OSRM выполняется один раз,
+  // далее 24 ч обслуживается из памяти (RouteResult.cached = true). Гаверсинус-
+  // фоллбек не кэшируется (детерминирован и бесплатен — иначе «прилипал» бы на
+  // 24 ч при восстановлении провайдера).
+  const cacheKey = routeCacheKey(startLat, startLon, endLat, endLon, departAtMs);
+  const cached = routeCacheGet(cacheKey);
+  if (cached) return cached;
   const r1 = await route2Gis(startLat, startLon, endLat, endLon, departAtMs);
-  if (r1) return r1;
+  if (r1) {
+    routeCachePut(cacheKey, r1);
+    return r1;
+  }
   const r2 = await routeOsrm(startLat, startLon, endLat, endLon);
-  if (r2) return r2;
+  if (r2) {
+    routeCachePut(cacheKey, r2);
+    return r2;
+  }
   return routeHaversine(startLat, startLon, endLat, endLon);
 }

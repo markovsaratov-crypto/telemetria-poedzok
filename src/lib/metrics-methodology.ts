@@ -265,6 +265,13 @@ export interface EcoScoreResult {
   breakdown: { brakingPenalty: number; accelPenalty: number; jerkPenalty: number };
 }
 
+// v2.38.2 (ревью F65): экспонента — параметр env ECO_SCORE_CAP_PENALTY_EXPONENT,
+// с v2.38.2 дефолт 2 = документированная формула §7.3 методологии
+// (penalty = 1 − 1/(1 + (actual/baseline)²)). Прежний дефолт 1.5 противоречил
+// спецификации и систематически искажал EcoScore (мягче к плохим, жёстче к хорошим);
+// прежнее поведение доступно оператору через env для преемственности шкалы.
+// ratio^2 — каноническая сигмоида по лог-шкале: нормировка энергии на базовую
+// линию естественно квадратична (energy ~ a²).
 function penalty(actual: number, baseline: number, exponent: number): number {
   if (baseline <= 0) return 1;
   const ratio = actual / baseline;
@@ -367,6 +374,16 @@ export function computeEcoScore(
   const minDurSec = e.ECO_SCORE_MIN_ACTIVE_DURATION_SEC;
   const exponent = e.ECO_SCORE_CAP_PENALTY_EXPONENT;
 
+  // v2.38.2 (ревью F66): ДВУХУРОВНЕВЫЙ гейт — позиция фикса (документирована в
+  // §7.3 методологии и ADMIN_SPEC §4.7/§9.11):
+  //   1) методологический пол СУЩЕСТВОВАНИЯ значения — 500 м / 60 с / 60 точек —
+  //      ЗАФИКСИРОВАН в коде (не env): пол — часть CAP-методики («защита от
+  //      тривиальных данных»), а его конфигурабельность через env молча меняла
+  //      состав калибровочного корпуса (сессии с value=null не калибруют,
+  //      eco-corpus.ts) и сдвигала бы медианные базлайны всех остальных;
+  //   2) операторский порог КАЧЕСТВЕННОЙ оценки — ECO_SCORE_MIN_ACTIVE_DISTANCE_KM /
+  //      _MIN_ACTIVE_DURATION_SEC ниже — понижает rating до insufficient_data,
+  //      ЗНАЧЕНИЕ при этом вычисляется (см. ниже, блок rating).
   if (!activeTrip.hasActiveTrip || distanceM < 500 || activeTrip.activeDuration < 60 || points.length < 60) {
     return {
       value: null,
@@ -887,6 +904,11 @@ export function computeRouteTrendTheilSen(
   const intercept = medianY - slope * medianX;
   const ci95: [number, number] = [percentile(sortedSlopes, 2.5), percentile(sortedSlopes, 97.5)];
 
+  // v2.38.2 (ревью F67): порог ±1 сек/день + CI-гейт — КАНОНИЧЕСКАЯ семантика
+  // (методология §10.5 синхронизирована с кодом в v2.38.2; ранние редакции
+  // дока описывали ±0.5 без CI). CI-гейт математически обязателен: без него
+  // шум пары сессий (slope 2 сек/день при CI95 [−40, +44]) выдавался бы за
+  // «degrading» — рейтинг есть только когда CI95 наклонов ЦЕЛИКОМ исключает 0.
   let rating: RouteTrendResult["rating"];
   if (slope < -1 && ci95[1] < 0) rating = "improving";
   else if (slope > 1 && ci95[0] > 0) rating = "degrading";

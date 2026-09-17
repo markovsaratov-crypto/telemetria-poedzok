@@ -242,8 +242,8 @@ export async function computeTripStats(
   const hit = TRIP_CORE_CACHE.get(trip.id);
   if (hit != null && hit.fp === fp && hit.bk === bk) {
     inc("trip_stats_cache_hit_total", "Trip stats served from in-memory core cache", 1);
-    const route = await tripPlanRoute(trip, hit.core);
-    return assembleTripStatsPayload(trip, hit.core, route);
+    const { route, legCount } = await tripPlanRoute(trip, hit.core);
+    return assembleTripStatsPayload(trip, hit.core, route, legCount);
   }
   inc("trip_stats_cache_miss_total", "Trip stats recomputed (fingerprint/baselines changed or cold)", 1);
 
@@ -290,7 +290,8 @@ export async function computeTripStats(
   };
 
   // План-факт: поездковый джоб (tripId), разбор — planFactFromJobResult (§9 ТЗ)
-  const route = await tripPlanRoute(trip, core);
+  // v2.38.2 (F71): + routingLegCount из того же результата джоба
+  const { route, legCount } = await tripPlanRoute(trip, core);
 
   // Кэш в Trip (конвенция §6.1: null = «не посчитано»; сюда попадаем при
   // отсутствии кэша — маршрутизация/инвалидация уже NULL-нули поля).
@@ -305,7 +306,7 @@ export async function computeTripStats(
               internalStopTimeSec = ?, interFragmentGapSec = ?, distanceM = ?,
               pointCountActual = ?, maxSpeedMs = ?, ecoScore = ?,
               planDistanceM = ?, planDurationSec = ?, planComparable = ?, planCoverage = ?,
-              statsComputedAt = ?
+              routingLegCount = ?, statsComputedAt = ?
             WHERE id = ?`,
       args: [
         round1(core.p.methodology?.activeTrip?.activeDuration ?? core.actualDurationSec),
@@ -322,6 +323,7 @@ export async function computeTripStats(
         route.planDurationSec,
         route.planComparable,
         route.planCoverage,
+        legCount, // v2.38.2 (F71): был всегда NULL — писателя поля не существовало
         writtenAt,
         trip.id,
       ] as never[],
@@ -343,7 +345,7 @@ export async function computeTripStats(
     core,
   });
 
-  return assembleTripStatsPayload(trip, core, route);
+  return assembleTripStatsPayload(trip, core, route, legCount);
 }
 
 /** Ядро конвейера статов — всё, что выводится из (точки ∩ окно, базлайны). */
@@ -383,10 +385,34 @@ function baselinesKey(b: EcoScoreBaselines): string {
 
 /** Свежий план-факт поездки (1 строка TrafficJob) — мимо кэша сознательно:
  * маршрутный джоб может завершиться позже расчёта статов — план должен
- * появиться в карточке без ожидания инвалидации. */
-async function tripPlanRoute(trip: TripRow, core: TripStatsCore): Promise<RoutePlanFact> {
+ * появиться в карточке без ожидания инвалидации.
+ * v2.38.2 (ревью F71): заодно — routingLegCount из ТОГО ЖЕ результата джоба
+ * (RouteResult.legCount кладёт мульти-leg маршрутизация воркера). */
+async function tripPlanRoute(
+  trip: TripRow,
+  core: TripStatsCore
+): Promise<{ route: RoutePlanFact; legCount: number | null }> {
   const facts = await loadPlanFactsByTrip([trip.id]);
-  return composeRoute(facts.get(trip.id), core.activeDistanceM, core.actualDurationSec, core.avgSpeedRawMs);
+  const raw = facts.get(trip.id);
+  return {
+    route: composeRoute(raw, core.activeDistanceM, core.actualDurationSec, core.avgSpeedRawMs),
+    legCount: jobResultLegCount(raw),
+  };
+}
+
+/** v2.38.2 (ревью F71): число routing-legs из результата поездкового TrafficJob.
+ *  Worker-runtime (processOneJob, мульти-leg ветка) кладёт legCount в
+ *  result-JSON; одиночный leg и результаты мини-сервиса поля не несут → null
+ *  («неизвестно»). Разбор — как planFactFromJobResult: сырая JSON-строка/
+ *  объект, мусор → null. Поле Trip.routingLegCount до этого не имело НИ
+ *  ОДНОГО писателя — всегда NULL (находка F71). */
+function jobResultLegCount(raw: unknown): number | null {
+  if (raw == null) return null;
+  let parsed: unknown;
+  try { parsed = typeof raw === "string" ? JSON.parse(raw) : raw; } catch { return null; }
+  if (!parsed || typeof parsed !== "object") return null;
+  const n = Number((parsed as Record<string, unknown>).legCount);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : null;
 }
 
 function ecoClamped(v: number | null): number | null {
@@ -398,7 +424,9 @@ function ecoClamped(v: number | null): number | null {
 function assembleTripStatsPayload(
   trip: TripRow,
   core: TripStatsCore,
-  route: RoutePlanFact
+  route: RoutePlanFact,
+  // v2.38.2 (F71): legCount из свежего результата джоба (см. tripPlanRoute)
+  routingLegCount: number | null
 ): TripStatsPayload {
   const p = core.p;
   return {
@@ -429,7 +457,9 @@ function assembleTripStatsPayload(
     spanEnd: trip.spanEnd,
     methodology: p.methodology,
     route,
-    routingLegCount: null, // заполняется из джоба воркера при наличии legCount
+    // v2.38.2 (F71): из результата поездкового джоба (RouteResult.legCount,
+    // мульти-leg маршрутизация); null = «неизвестно» (джоба нет/одиночный leg)
+    routingLegCount,
   };
 }
 

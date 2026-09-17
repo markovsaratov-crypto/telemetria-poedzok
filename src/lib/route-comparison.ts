@@ -20,6 +20,10 @@ import {
   type HotspotSegment,
 } from "./metrics-methodology";
 import { haversineM } from "./geo";
+// v2.38.2 (ревью F68): местные час/день недели (TELEMAT_TIMEZONE) для бакетов
+// §10.3/§10.4 — хелпер живёт в route-cache.ts (общий с ToD-бакетом кэша §13.4,
+// лёгкий env-only импорт без db-цепочки).
+import { localHour, localDow } from "./route-cache";
 
 export interface GroupSession {
   sessionId: string;
@@ -229,10 +233,21 @@ export function routeDurationStats(sessions: GroupSession[]): DurationStats {
   const variance = durations.length > 1
     ? durations.reduce((a, b) => a + (b - avg) ** 2, 0) / (durations.length - 1)
     : 0;
+  // v2.38.2 (ревью F72): best/worst — циклом, без Math.min(...durations)/
+  // Math.max(...) спреда: spread на большой routeHash-группе (год commuting-маршрута
+  // = сотни/тысячи сессий) роняет движок RangeError (максимум аргументов call);
+  // тот же класс бага уже чинился в session-stats.ts (v2.29.0 MI-10) и
+  // shared-view.tsx (v2.38.1 F21) — здесь был последний спред-occurrence.
+  let best = durations[0];
+  let worst = durations[0];
+  for (const d of durations) {
+    if (d < best) best = d;
+    if (d > worst) worst = d;
+  }
   return {
     avg: Math.round(avg),
-    best: Math.round(Math.min(...durations)),
-    worst: Math.round(Math.max(...durations)),
+    best: Math.round(best),
+    worst: Math.round(worst),
     stdDev: Math.round(Math.sqrt(variance)),
     eligibleCount: eligible.length,
     totalCount: sessions.length,
@@ -252,7 +267,14 @@ const BUCKET_LABELS = ["0–3", "3–6", "6–9", "9–12", "12–15", "15–18"
 export function routeTrafficPattern(sessions: GroupSession[]): TrafficBucket[] {
   const buckets: { durations: number[] }[] = Array.from({ length: 8 }, () => ({ durations: [] }));
   for (const s of sessions) {
-    const hour = new Date(s.activeStartTime).getHours();
+    // v2.38.2 (ревью F68): бакеты — по МЕСТНОМУ времени (TELEMAT_TIMEZONE,
+    // дефолт Europe/Saratov — гражданские «утренний пик 6–9» и т.д.). Прежнее
+    // new Date(...).getHours() брало СЕРВЕРНЫЙ пояс: на UTC-хостинге (Render)
+    // пики сдвигались на 3–4 ч и расходились с локальным временем UI
+    // (клиент форматирует в поясе браузера). Б-4-подход «передать tzOffsetMin
+    // с клиента» для агрегатов не годится: паттерн — детерминированный агрегат
+    // истории, а не граница «сегодня» — пояс фиксируется оператором в env.
+    const hour = localHour(s.activeStartTime);
     buckets[Math.floor(hour / 3)].durations.push(s.activeDuration);
   }
   return buckets.map((b, i) => ({
@@ -276,9 +298,10 @@ const DOW_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 export function routeDayOfWeekPattern(sessions: GroupSession[]): DowBucket[] {
   const buckets: { durations: number[] }[] = Array.from({ length: 7 }, () => ({ durations: [] }));
   for (const s of sessions) {
-    const jsDow = new Date(s.activeStartTime).getDay(); // 0=вс..6=сб
-    const dow = jsDow === 0 ? 6 : jsDow - 1; // 0=пн..6=вс
-    buckets[dow].durations.push(s.activeDuration);
+    // v2.38.2 (ревью F68): день недели — тоже местный (раньше getDay() серверного
+    // пояса: поездка 00:30 МСК попадала в «воскресенье» вместо «понедельника»);
+    // localDow уже возвращает 0=пн..6=вс — маппинг ниже не нужен.
+    buckets[localDow(s.activeStartTime)].durations.push(s.activeDuration);
   }
   return buckets.map((b, i) => ({
     dow: i + 1,

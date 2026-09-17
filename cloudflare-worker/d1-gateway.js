@@ -13,8 +13,66 @@
 // v2.37.0 (миграция Turso → D1): воркер создан, потому что D1 REST API
 // требует отдельного разрешения у токена; биндинг воркера получает доступ
 // к D1 через Workers-рантайм без D1-API-прав у токена деплоя.
+//
+// v2.38.1 (ревью F1, hardening): секрет шлюза был скоммичен в публичный репо
+// (.env.production.local, коммит 25bd1bd) — «один секрет» больше не считается
+// достаточной защитой, добавлены три слоя (ротация секрета — владелец, см.
+// docs/SECURITY-ROTATION.md):
+//   1) ВАЙТЛИСТ ОПЕРАЦИЙ: только SELECT/INSERT/UPDATE/DELETE по известным
+//      таблицам (prisma/schema.prisma + рантайм-таблица _AlertState) + два
+//      идемпотентных исключения (PRAGMA page_count/page_size, CREATE TABLE IF
+//      NOT EXISTS _AlertState). DROP/ALTER/ATTACH/VACUUM/PRAGMA(прочие)/CTE и
+//      любые неизвестные таблицы (вкл. sqlite_*) → 403 ДО исполнения;
+//   2) ЛИМИТ ТЕЛА: стрим с капом (дефолт 2 МБ) → 413 — и по content-length,
+//      и по фактическим байтам (chunked без заголовка не проходит);
+//   3) PER-IP RATE-LIMIT в памяти изолейта (дефолт 3000/мин → 429;
+//      env-оверрайд GATEWAY_RATE_LIMIT_MAX). Дефолт НЕ 60/мин из рецепта
+//      ревью осознанно: единственный легитимный вызывающий — приложение на
+//      Render, один HTTP-запрос API порождает несколько SQL-вызовов (фан-аут
+//      инжеста/статов), 60/мин душил бы прод; 3000/мин = 50 rps ≈ 10×
+//      пикового легитимного трафика, останавливает runaway-циклы и
+//      скан-штормы с украденным секретом. Проверяется ПОСЛЕ auth — без
+//      секрета нельзя бесплатно 429-нуть легитимного вызывающего.
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
+
+// ——— v2.38.1 (ревью F1): вайтлист операций ———
+// Таблицы prisma/schema.prisma (User, Session, Trip, GpsPoint, Route,
+// RouteCache, TrafficJob, AuditLog, ExportJob, BackupJob, Setting,
+// IngestMessage) + рантайм-таблица алертов _AlertState (alerts.ts и
+// restore-core.ts). Всё, чего нет в списке (включая sqlite_*), → 403.
+const ALLOWED_TABLES = new Set(
+  [
+    "User",
+    "Session",
+    "Trip",
+    "GpsPoint",
+    "Route",
+    "RouteCache",
+    "TrafficJob",
+    "AuditLog",
+    "ExportJob",
+    "BackupJob",
+    "Setting",
+    "IngestMessage",
+    "_AlertState",
+  ].map((t) => t.toLowerCase())
+);
+
+// Единственные исключения помимо DML (оба используются рантаймом приложения):
+//  - PRAGMA page_count / PRAGMA page_size — read-only размер БД (alerts.ts,
+//    правило db_size_growth; при отказе деградирует мягко — «PRAGMA недоступен»);
+//  - CREATE TABLE IF NOT EXISTS _AlertState — идемпотентное самовосстановление
+//    KV-таблицы алертов (alerts.ts + restore-core.ts). IF NOT EXISTS = no-op на
+//    существующей таблице, существующие данные не трогает.
+const PRAGMA_RE = /^PRAGMA\s+(page_count|page_size)\s*$/i;
+const CREATE_ALERTSTATE_RE = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?_AlertState"?\s*\(/i;
+
+// ——— v2.38.1 (ревью F1): лимит тела и rate-limit ———
+const MAX_BODY_BYTES_DEFAULT = 2 * 1024 * 1024; // 2 МБ
+const RATE_LIMIT_WINDOW_MS = 60000;
+const RATE_LIMIT_MAX_DEFAULT = 3000; // см. комментарий в шапке — почему не 60
+const RATE_BUCKETS_MAX = 10000;
 
 // Сравнение секрета без раннего выхода (timing-safe на длину).
 function secretEquals(a, b) {
@@ -26,6 +84,124 @@ function secretEquals(a, b) {
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
+}
+
+// ——— v2.38.1 (ревью F1): валидация стейтмента вайтлистом ———
+
+// Убирает SQL-комментарии (-- и /* */) — глагол/таблицу нельзя спрятать в них.
+function stripSqlComments(sql) {
+  return sql
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\n]*/g, " ");
+}
+
+// Имена таблиц после FROM/JOIN/INTO/UPDATE. «DO UPDATE SET» (хвост ON CONFLICT)
+// вырезаем заранее — иначе за таблицу примется SET (alerts.ts: INSERT ... ON
+// CONFLICT(key) DO UPDATE SET ...). Подзапрос «FROM (SELECT ...)» не матчится
+// (за ключевым словом идёт «(», не идентификатор) — внутренние FROM ловятся
+// тем же общим сканом.
+const TABLE_TOKEN_RE = /\b(?:FROM|JOIN|INTO|UPDATE)\s+(?:"([^"]+)"|`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))/gi;
+function extractTableNames(sql) {
+  const clean = stripSqlComments(sql).replace(/\bDO\s+UPDATE\s+SET\b/gi, " ");
+  const names = new Set();
+  let m;
+  while ((m = TABLE_TOKEN_RE.exec(clean)) !== null) {
+    names.add((m[1] ?? m[2] ?? m[3] ?? "").toLowerCase());
+  }
+  return names;
+}
+
+// Валидация ОДНОГО стейтмента. null = разрешено; строка = причина отказа (403).
+function validateStatement(sql) {
+  // Мульти-стейтменты через «;» запрещены (D1 prepare их и так отверг бы —
+  // валидируем ДО исполнения, включая попытку «SELECT 1; DROP TABLE Session»).
+  const noTrailing = sql.replace(/;\s*$/, "");
+  if (noTrailing.includes(";")) return "multiple statements are not allowed";
+
+  const clean = stripSqlComments(noTrailing).trim();
+  if (clean.length === 0) return "empty statement";
+
+  const verbMatch = clean.match(/^([A-Za-z]+)/);
+  if (!verbMatch) return "unrecognized statement";
+  const verb = verbMatch[1].toUpperCase();
+
+  if (verb === "SELECT" || verb === "INSERT" || verb === "UPDATE" || verb === "DELETE") {
+    const tables = extractTableNames(clean);
+    if (tables.size === 0) {
+      // SELECT без FROM (SELECT 1) безвреден; DML без таблицы — битый синтаксис
+      return verb === "SELECT" ? null : "no table reference";
+    }
+    for (const t of tables) {
+      if (!ALLOWED_TABLES.has(t)) return `forbidden table: ${t}`;
+    }
+    return null;
+  }
+  if (verb === "PRAGMA") {
+    return PRAGMA_RE.test(clean) ? null : "forbidden operation: PRAGMA";
+  }
+  if (verb === "CREATE") {
+    return CREATE_ALERTSTATE_RE.test(clean) ? null : "forbidden operation: CREATE";
+  }
+  // DROP / ALTER / ATTACH / DETACH / VACUUM / EXPLAIN / BEGIN / COMMIT /
+  // ROLLBACK / REPLACE / TRUNCATE / ANALYZE / REINDEX / SAVEPOINT / WITH (CTE)...
+  return `forbidden operation: ${verb}`;
+}
+
+// ——— v2.38.1 (ревью F1): per-IP rate-limit (память изолейта воркера) ———
+// CF-Connecting-IP ставит сам Cloudflare (доверенный). Окно 60 с, слiding.
+const rateBuckets = new Map(); // ip → массив timestamp
+function rateLimitExceeded(ip, limit, windowMs) {
+  const now = Date.now();
+  let ts = rateBuckets.get(ip);
+  if (!ts) {
+    if (rateBuckets.size > RATE_BUCKETS_MAX) {
+      // грубая защита от роста карты: выметаем старейшую запись (insertion order)
+      const oldest = rateBuckets.keys().next().value;
+      if (oldest !== undefined) rateBuckets.delete(oldest);
+    }
+    ts = [];
+    rateBuckets.set(ip, ts);
+  }
+  const fresh = [];
+  for (const t of ts) {
+    if (t > now - windowMs) fresh.push(t);
+  }
+  if (fresh.length >= limit) {
+    rateBuckets.set(ip, fresh);
+    return true;
+  }
+  fresh.push(now);
+  rateBuckets.set(ip, fresh);
+  return false;
+}
+
+// ——— v2.38.1 (ревью F1): чтение тела стримом с капом ———
+// Стрим прерывается на превышении: chunked-запрос без content-length не может
+// уложить память изолейта (раньше request.json() парсил всё подряд).
+async function readBodyLimited(request, maxBytes) {
+  const reader = request.body && typeof request.body.getReader === "function" ? request.body.getReader() : null;
+  if (!reader) return { ok: false, status: 400, error: "empty body" };
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      try { await reader.cancel(); } catch {}
+      return { ok: false, status: 413, error: "payload too large", limitBytes: maxBytes };
+    }
+    chunks.push(value);
+  }
+  let byteLen = 0;
+  for (const c of chunks) byteLen += c.byteLength;
+  const merged = new Uint8Array(byteLen);
+  let off = 0;
+  for (const c of chunks) {
+    merged.set(c, off);
+    off += c.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(merged) };
 }
 
 // JSON не переносит BigInt — D1 может вернуть BigInt для INTEGER-колонок.
@@ -64,9 +240,31 @@ export default {
       return json({ error: "unauthorized" }, 401);
     }
 
+    // v2.38.1 (ревью F1): лимит тела — предчек по content-length (дёшево, до
+    // чтения) и фактический по байтам стрима (readBodyLimited ниже).
+    const maxBody =
+      Number(env.GATEWAY_MAX_BODY_BYTES) > 0 ? Number(env.GATEWAY_MAX_BODY_BYTES) : MAX_BODY_BYTES_DEFAULT;
+    const cl = Number(request.headers.get("content-length") || "0");
+    if (cl > maxBody) {
+      return json({ error: "payload too large", limitBytes: maxBody }, 413);
+    }
+
+    // v2.38.1 (ревью F1): rate-limit ПОСЛЕ auth (без секрета нельзя бесплатно
+    // 429-нуть легитимного вызывающего) и ДО чтения тела.
+    const ip = request.headers.get("cf-connecting-ip") || "unknown";
+    const rlMax =
+      Number(env.GATEWAY_RATE_LIMIT_MAX) > 0 ? Number(env.GATEWAY_RATE_LIMIT_MAX) : RATE_LIMIT_MAX_DEFAULT;
+    if (rateLimitExceeded(ip, rlMax, RATE_LIMIT_WINDOW_MS)) {
+      return json({ error: "rate limit exceeded", retryAfterSec: 60, limit: rlMax }, 429);
+    }
+
+    const bodyRes = await readBodyLimited(request, maxBody);
+    if (!bodyRes.ok) {
+      return json({ error: bodyRes.error, limitBytes: bodyRes.limitBytes }, bodyRes.status);
+    }
     let body;
     try {
-      body = await request.json();
+      body = JSON.parse(bodyRes.text);
     } catch {
       return json({ error: "invalid json body" }, 400);
     }
@@ -75,6 +273,9 @@ export default {
       if (url.pathname === "/query") {
         const { sql, params } = body ?? {};
         if (typeof sql !== "string" || sql.length === 0) return json({ error: "sql required" }, 400);
+        // v2.38.1 (ревью F1): вайтлист операций ДО prepare/exec
+        const violation = validateStatement(sql);
+        if (violation) return json({ error: "forbidden", reason: violation }, 403);
         let stmt = env.DB.prepare(sql);
         if (Array.isArray(params) && params.length > 0) stmt = stmt.bind(...params.map(normParam));
         const res = await stmt.all();
@@ -97,10 +298,18 @@ export default {
         if (statements.length > 500) {
           return json({ error: "too many statements (max 500 per batch)" }, 400);
         }
-        const stmts = statements.map((s) => {
+        // v2.38.1 (ревью F1): вайтлист операций — ВСЕ стейтменты батча ДО
+        // построения prepare-объектов (атомарный batch не начинает исполняться)
+        for (const s of statements) {
           if (typeof s?.sql !== "string" || s.sql.length === 0) {
-            throw new Error("each statement requires non-empty sql");
+            return json({ error: "each statement requires non-empty sql" }, 400);
           }
+          const violation = validateStatement(s.sql);
+          if (violation) {
+            return json({ error: "forbidden", reason: violation }, 403);
+          }
+        }
+        const stmts = statements.map((s) => {
           let st = env.DB.prepare(s.sql);
           if (Array.isArray(s.params) && s.params.length > 0) {
             st = st.bind(...s.params.map(normParam));

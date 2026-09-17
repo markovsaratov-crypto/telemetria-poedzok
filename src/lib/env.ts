@@ -26,6 +26,17 @@ const schema = z.object({
   RATE_LIMIT_MAX_ADMIN: z.coerce.number().int().positive().default(1),
   RATE_LIMIT_MAX_REQUEUE: z.coerce.number().int().positive().default(10), // P1-11: спека §7.3
   RATE_LIMIT_BACKEND: z.enum(["redis", "memory"]).default("memory"),
+  // v2.38.1 (ревью F10): сколько ДОВЕРЕННЫХ прокси стоит перед приложением.
+  // getClientIP идёт по X-Forwarded-For СПРАВА НАЛЕВО и пропускает это число
+  // записей (суффикс XFF дописывают наши прокси, каждый — IP своего peer;
+  // реальный клиент — первый элемент суффикса). 1 = прямой доступ к Render
+  // (дефолт: берётся последняя запись XFF — её аппендит сам Render).
+  // 2 = цепочка клиент → TurboFlare (CDN) → Render: последняя запись = IP
+  // edge-ноды CDN (общая для всех клиентов ноды → общий rate-limit-бакет,
+  // login-DoS), реальный клиент — предпоследняя запись. Значение обязано
+  // совпадать с ФАКТИЧЕСКОЙ длиной доверенной цепочки прокси (см.
+  // docs/CUSTOM_DOMAIN.md «Нюансы»).
+  TRUSTED_PROXY_COUNT: z.coerce.number().int().min(0).max(10).default(1),
   MAX_PAYLOAD_BYTES: z.coerce.number().int().positive().default(262144),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   WORKER_ID: z.string().default("worker-local"),

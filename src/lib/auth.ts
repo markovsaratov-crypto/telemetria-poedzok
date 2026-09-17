@@ -6,6 +6,8 @@ import { env } from "./env";
 import { getClientIP } from "./http-utils";
 import { timingSafeEqual as nodeTimingSafeEqual } from "crypto";
 import { userDb, type UserRow } from "./user-db";
+// v2.38.1 (ревью F11): edge-safe хелперы для производного инжест-токена it_
+import { INGEST_TOKEN_RE, deriveIngestToken as deriveIngestTokenHex, tokenMatches } from "./token-check";
 import bcrypt from "bcryptjs";
 import { sessionCookieName, isProduction } from "./cookie-name";
 
@@ -204,6 +206,85 @@ export function authenticateBearer(token: string | null, scope: BearerScope): bo
   return safeEqual(token, expected);
 }
 
+// === v2.38.1 (ревью F11): производный инжест-токен (ingest-only) ===
+// it_<32 hex> = первые 32 символа hex(HMAC-SHA256(SESSION_SECRET, "<apiKey>:ingest")).
+// Зачем: раньше SensorLogger Push URL получал из /api/auth/me САМ apiKey (полный
+// api-скоп: сессии/статы/экспорт/share/delete) и таскал его в query-string —
+// query оседает в access-логах CDN/Render, истории браузера. it_-токен даёт
+// ТОЛЬКО инжест. Ротация apiKey автоматически ротирует it_-токен (HMAC от
+// apiKey); ротация SESSION_SECRET инвалидирует все it_-токены — пользователи
+// копируют новые из /api/auth/me (docs/SECURITY-ROTATION.md).
+
+// Вычислить it_-токен пользователя по его apiKey.
+export async function deriveIngestToken(apiKey: string): Promise<string> {
+  return deriveIngestTokenHex(apiKey, env().SESSION_SECRET);
+}
+
+// Проверить it_-токен → пользователь или null. Таблица User маленькая
+// (single-owner продукт) — перебираем apiKey и сверяем производные токены
+// timing-safe (tokenMatches). Токен чужого формата → сразу null без SQL.
+// Обратного словаря нет намеренно: токен не хранится в БД (stateless HMAC),
+// схема не требует миграций prisma-схемы.
+export async function verifyIngestToken(token: string | null | undefined): Promise<UserRow | null> {
+  if (!token || !INGEST_TOKEN_RE.test(token)) return null;
+  const users = await userDb.findAll();
+  for (const u of users) {
+    const expected = await deriveIngestToken(u.apiKey);
+    if (await tokenMatches(token, expected)) return u;
+  }
+  return null;
+}
+
+// Маска apiKey для показа пользователю (полное значение больше не покидает
+// сервер): первые 4 + … + последние 4 символа.
+export function maskApiKeyPreview(apiKey: string): string {
+  return apiKey.length > 12 ? `${apiKey.slice(0, 4)}…${apiKey.slice(-4)}` : "…";
+}
+
+// ЕДИНАЯ проверка инжест-авторизации для гейта прокси и обоих инжест-роутов
+// (до этого логика была размазана по трём местам — классический «починил в
+// одном, сломал в другом»). Возвращает userId личного канала (null =
+// глобальный канал владельца) или причину отказа. Правила:
+//   1) глобальный INGEST_TOKEN — Bearer ИЛИ ?token= (SensorLogger не умеет
+//      заголовки; канал владельца, userId IS NULL);
+//   2) производный it_-токен — Bearer (предпочтительно) ИЛИ ?token=
+//      (совместимость SensorLogger Push URL: значение бесполезно без
+//      SESSION_SECRET и не даёт api-скопа — утечка логов некритична);
+//   3) сырой per-user apiKey — ТОЛЬКО Authorization: Bearer (заголовок не
+//      пишется в access-логи). Из ?token= apiKey больше НЕ принимается:
+//      query-string оседает в логах CDN/Render (ревью F11).
+export type IngestAuth =
+  | { ok: true; userId: string | null }
+  | { ok: false; reason: string };
+
+export async function resolveIngestToken(
+  bearer: string | null,
+  queryToken: string | null
+): Promise<IngestAuth> {
+  const e = env();
+  if (bearer && (await tokenMatches(bearer, e.INGEST_TOKEN))) return { ok: true, userId: null };
+  if (queryToken && (await tokenMatches(queryToken, e.INGEST_TOKEN))) return { ok: true, userId: null };
+  const presented = bearer ?? queryToken;
+  if (presented && INGEST_TOKEN_RE.test(presented)) {
+    const u = await verifyIngestToken(presented);
+    if (u) return { ok: true, userId: u.id };
+    return { ok: false, reason: "Invalid it_ ingest token" };
+  }
+  if (bearer) {
+    const u = await userDb.findByApiKey(bearer);
+    if (u) return { ok: true, userId: u.id };
+    if (queryToken) {
+      return {
+        ok: false,
+        reason:
+          "Per-user apiKey is accepted only via Authorization: Bearer; use the it_ ingest token in ?token= (copy from /api/auth/me)",
+      };
+    }
+    return { ok: false, reason: "Invalid ingest token (Bearer INGEST_TOKEN, it_ token or Bearer apiKey required)" };
+  }
+  return { ok: false, reason: "Valid INGEST_TOKEN or it_ ingest token required (Bearer header or ?token= query)" };
+}
+
 // === Multi-user helpers ===
 
 // Extract userId from request: works for both user cookie and legacy owner cookie.
@@ -241,6 +322,16 @@ export async function authorizeRequest(
       const u = await userDb.findByApiKey(bearer);
       if (u) {
         return { ok: true, via: "bearer", userId: u.id, role: u.role };
+      }
+    }
+    // v2.38.1 (ревью F11): производный it_-токен — ТОЛЬКО ingest-скоп.
+    // Ветка требует scope="ingest" (для scope="api" it_-токен не матчится
+    // ни с API_KEY, ни с чьим-либо apiKey → корректный отказ ниже) —
+    // ingest-only по построению, даже при утечке логов CDN.
+    if (scope === "ingest" && INGEST_TOKEN_RE.test(bearer)) {
+      const u = await verifyIngestToken(bearer);
+      if (u) {
+        return { ok: true, via: "bearer", userId: u.id, role: "ingest" };
       }
     }
   }

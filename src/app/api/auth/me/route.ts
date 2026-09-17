@@ -5,6 +5,9 @@ import {
   issueSessionCookie,
   issueUserCookie,
   setSessionCookie,
+  // v2.38.1 (ревью F11): производный инжест-токен + маска apiKey
+  deriveIngestToken,
+  maskApiKeyPreview,
 } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -30,8 +33,14 @@ export async function GET(request: NextRequest) {
           expiresAt: renewed.expiresAt,
           renewed: true,
           user: renewed.user,
-          // v2.23.0: личный инжест-токен для SensorLogger Push URL
-          ingestToken: session.user.apiKey,
+          // v2.38.1 (ревью F11): ingestToken — ПРОИЗВОДНЫЙ it_-токен
+          // (HMAC-SHA256 от apiKey), а НЕ сам apiKey: ключ полного api-скопа
+          // (сессии/статы/экспорт/share/delete) больше не покидает сервер и не
+          // попадает в query-string SensorLogger Push URL. Ротация apiKey
+          // автоматически ротирует этот токен.
+          ingestToken: await deriveIngestToken(session.user.apiKey),
+          // v2.38.1 (ревью F11): вместо полного apiKey — маска (первые 4…последние 4)
+          apiKeyPreview: maskApiKeyPreview(session.user.apiKey),
         },
         { status: 200, headers: { "X-Request-Id": requestId } }
       );
@@ -43,8 +52,10 @@ export async function GET(request: NextRequest) {
         authenticated: true,
         expiresAt: new Date(session.payload.exp * 1000).toISOString(),
         user: { id: session.user.id, email: session.user.email, role: session.user.role },
-        // v2.23.0: личный инжест-токен для SensorLogger Push URL
-        ingestToken: session.user.apiKey,
+        // v2.38.1 (ревью F11): производный it_-токен вместо сырого apiKey
+        // (полный api-скоп не выдаётся наружу; см. ветку renewed выше)
+        ingestToken: await deriveIngestToken(session.user.apiKey),
+        apiKeyPreview: maskApiKeyPreview(session.user.apiKey),
       },
       { status: 200, headers: { "X-Request-Id": requestId } }
     );

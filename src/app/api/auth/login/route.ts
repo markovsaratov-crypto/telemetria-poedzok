@@ -12,6 +12,9 @@ import {
 import { userDb } from "@/lib/user-db";
 import { inc } from "@/lib/metrics";
 import { logger } from "@/lib/logger";
+// v2.38.1 (ревью F10): лимит логина по паре логин+IP + реальный IP клиента
+import { checkLoginRateLimit } from "@/lib/rate-limit";
+import { getClientIP } from "@/lib/http-utils";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +34,29 @@ export async function POST(request: NextRequest) {
     // проверяет тот же бакет auth:login (тот же ключ rl:auth:login:<ip>) —
     // двойное списание съедало лимит: 5 попыток/мин превращались в ~2.5.
     // Брутфорс-защита не ослабла: прокси отвечает 429 до роута.
+    // v2.38.1 (ревью F10): ДОБАВЛЕН отдельный бакет по ПАРЕ логин+IP
+    // (rl:auth:login-cred:<ip>:<login>) — ключ ДРУГОЙ, лимит auth:login
+    // прокси по-прежнему списывается один раз (C-19 не нарушен). Зачем:
+    // brute-force одного логина не может запереть окно ДРУГОГО аккаунта,
+    // а владелец не блокируется сканером при деградации IP-бакетов за CDN.
+    const loginRl = await checkLoginRateLimit(
+      parsed.data.email ?? "__owner__",
+      getClientIP(request)
+    );
+    if (!loginRl.allowed) {
+      inc("auth_login_failed_total", "Auth login failures", 1);
+      logger.warn("Login rate-limited (login+IP bucket)", { requestId });
+      return NextResponse.json(
+        { error: "Слишком много попыток входа. Повторите через минуту" },
+        {
+          status: 429,
+          headers: {
+            "X-Request-Id": requestId,
+            "Retry-After": String(Math.max(1, loginRl.retryAfter)),
+          },
+        }
+      );
+    }
 
     const { email, password } = parsed.data;
 

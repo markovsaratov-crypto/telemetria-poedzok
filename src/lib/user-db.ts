@@ -52,6 +52,16 @@ export const userDb = {
     return rowToUser(res.rows[0] as Record<string, unknown>);
   },
 
+  // v2.38.1 (ревью F11): все пользователи — для проверки производных it_-токенов
+  // (verifyIngestToken в auth.ts перебирает apiKey и сверяет HMAC timing-safe).
+  // Таблица User маленькая (single-owner продукт, регистрация закрыта),
+  // сортировка — детерминизм. Вызов ~1/инжест-запрос — та же цена, что и
+  // прежний findByApiKey в гейте прокси.
+  async findAll(): Promise<UserRow[]> {
+    const res = await libsql.execute("SELECT * FROM User ORDER BY createdAt ASC");
+    return res.rows.map((r) => rowToUser(r as Record<string, unknown>));
+  },
+
   async count(): Promise<number> {
     const res = await libsql.execute("SELECT COUNT(*) as count FROM User");
     return Number((res.rows[0] as Record<string, unknown>).count);

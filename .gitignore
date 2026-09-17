@@ -14,6 +14,11 @@ dist/
 next-env.d.ts
 
 # Environment
+# v2.38.1 (ревью F1): .env-файлы НИКОГДА не трекаются. Секрет D1_GATEWAY_SECRET
+# уже был закоммичен (.env.production.local, коммит 25bd1bd) — паттерны были и
+# раньше, но gitignore НЕ отслеживает уже-трекаемые файлы: обязательная вычистка
+# (git rm --cached + filter-repo) и ротация ВСЕХ секретов — ранбук
+# docs/SECURITY-ROTATION.md; автопроверка перед коммитом — scripts/check-secrets.sh
 .env
 .env.local
 .env.production

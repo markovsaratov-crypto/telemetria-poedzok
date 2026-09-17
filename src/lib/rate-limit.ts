@@ -1,6 +1,8 @@
 // src/lib/rate-limit.ts — sliding window, in-memory (единый инстанс; Redis —
 // заявлен конфигом, но не реализован: при включении честно логируем fallback).
 // Блокер №1 FIX: RATE_LIMIT_MAX_INGEST=120 покрывает TARGET_LOAD_RPM=100 × 1.2.
+// v2.38.1 (ревью F10): env-импорт для checkLoginRateLimit (RATE_LIMIT_MAX_AUTH).
+import { env } from "./env";
 export interface IRateLimiter {
   check(
     key: string,
@@ -101,4 +103,24 @@ export function getRateLimiterStats() {
 // Утилита: построение ключа бакета
 export function rlKey(scope: string, ...parts: (string | undefined)[]) {
   return `rl:${scope}:${parts.filter(Boolean).join(":")}`;
+}
+
+// v2.38.1 (ревью F10): логин лимитируется не только по IP (гейт прокси,
+// auth:login), но и по ПАРЕ логин+IP — brute-force одного логина не может
+// запереть окно другого аккаунта, а владелец не блокируется сканером
+// (частный случай: клиенты за CDN/ NAT делят IP, но не логин). Ключ бакета
+// ДРУГОЙ (auth:login-cred), поэтому АУДИТ C-19 не нарушается: лимит
+// auth:login прокси не списывается дважды — раньше роут проверял ТОТ ЖЕ ключ
+// rl:auth:login:<ip>, и 5 попыток/мин превращались в ~2,5.
+export async function checkLoginRateLimit(
+  login: string,
+  ip: string
+): Promise<{ allowed: boolean; retryAfter: number }> {
+  const e = env();
+  const r = await createRateLimiter().check(
+    rlKey("auth:login-cred", ip, login.trim().toLowerCase().slice(0, 64)),
+    e.RATE_LIMIT_MAX_AUTH,
+    60
+  );
+  return { allowed: r.allowed, retryAfter: r.retryAfter };
 }

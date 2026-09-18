@@ -22,6 +22,28 @@ const BACKUP_STORAGE_DIR = "/tmp/backups";
 const SETTING_SECRET_KEYS = new Set(["TWO_GIS_API_KEY"]);
 const SETTING_MASKED_VALUE = "[REDACTED-BY-BACKUP]";
 
+// v2.40.3 (ревью 19-j, C-2): ретрай снапшот-фазы бэкапа. Пост-чек снапшота
+// падает, если между SELECT Session и дампом GpsPoint инжест вписал точки
+// в СУЩЕСТВУЮЩУЮ сессию (03:30 UTC = 07:30 Саратова — как раз утренние
+// записи). Раньше это означало fail всего ночного бэкапа, а повтор — только
+// завтра (backup-джоб один в сутки). Теперь фаза повторяется до
+// SNAPSHOT_ATTEMPTS раз с паузой SNAPSHOT_RETRY_DELAY_MS — ровно то, что
+// предписывает текст ошибки («повторите бэкап»), только автоматически.
+// Fail-closed сохранён: после последней попытки бэкап failed как раньше.
+// Бюджет: 3 попытки × дамп + 2×30 с паузы ≈ +2–3 мин в худшем случае —
+// укладывается в CRON_BACKUP_TIMEOUT_MS (14 мин) шлюза.
+const SNAPSHOT_ATTEMPTS = 3;
+const SNAPSHOT_RETRY_DELAY_MS = 30_000;
+
+// Результат снапшот-фазы, потребляемый остальным runBackup (водяной знак,
+// tableCounts, dumpChildRows по срезу сессий).
+type SnapshotPhase = {
+  snapshotStartedAt: string;
+  sessionRes: Awaited<ReturnType<typeof libsql.execute>>;
+  sessionIds: string[];
+  gpsRows: Record<string, unknown>[];
+};
+
 /**
  * v2.38.1 (ревью F25): дочерние строки таблицы с FK sessionId — ТОЛЬКО по
  * срезу уже задампленных сессий, чанками ≤90 id (лимит связанных параметров
@@ -89,40 +111,71 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
     // Полные выгрузки остальных таблиц сохранены (P0-фикс v2.9.1: db-обёртки
     // имеют тихие лимиты — прямой SQL гарантирует полноту; v2.29.0: + Trip,
     // + IngestMessage (ledger идемпотентности), + _AlertState (алерты)).
-    const snapshotStartedAt = new Date().toISOString();
+    // v2.40.3 (ревью 19-j, C-2): снапшот-фаза (Session → GpsPoint → пост-чек)
+    // вынесена в runSnapshot() и ретраится при расхождении (см. комментарий
+    // у констант SNAPSHOT_*). Каждая попытка берёт НОВЫЙ срез сессий —
+    // успешной считается только полностью согласованная пара SELECT'ов.
+    const runSnapshot = async (): Promise<SnapshotPhase> => {
+      const snapshotStartedAt = new Date().toISOString();
 
-    // 1) Session — фиксирует срез снапшота.
-    // purge (retention) удаляет ТОЧКИ сессии, но НЕ обнуляет pointCount —
-    // сверка ведётся только по не-archived сессиям (purgedAt IS NULL).
-    const sessionRes = await libsql.execute("SELECT * FROM Session");
-    const sessionIds: string[] = [];
-    const liveSessionIds = new Set<string>();
-    let sumPointCount = 0;
-    for (const r of sessionRes.rows as Record<string, unknown>[]) {
-      const id = String(r.id);
-      sessionIds.push(id);
-      if (r.purgedAt == null) {
-        liveSessionIds.add(id);
-        sumPointCount += Number(r.pointCount ?? 0);
+      // 1) Session — фиксирует срез снапшота.
+      // purge (retention) удаляет ТОЧКИ сессии, но НЕ обнуляет pointCount —
+      // сверка ведётся только по не-archived сессиям (purgedAt IS NULL).
+      const sessionRes = await libsql.execute("SELECT * FROM Session");
+      const sessionIds: string[] = [];
+      const liveSessionIds = new Set<string>();
+      let sumPointCount = 0;
+      for (const r of sessionRes.rows as Record<string, unknown>[]) {
+        const id = String(r.id);
+        sessionIds.push(id);
+        if (r.purgedAt == null) {
+          liveSessionIds.add(id);
+          sumPointCount += Number(r.pointCount ?? 0);
+        }
+      }
+
+      // 2) GpsPoint — по срезу (сироты физически не попадают в дамп).
+      const gpsRows = (await dumpChildRows("GpsPoint", sessionIds, false)) as Record<string, unknown>[];
+
+      // 3) Пост-чек снапшота: каждая точка дампится ровно с одной не-archived
+      // сессией и наоборот. Расхождение = между SELECT'ами вписались новые точки
+      // (или retention удалил существующие) — дамп НЕ снапшот: бросаем,
+      // фаза ретраится (C-2), после последней попытки бэкап failed (catch ниже).
+      let livePoints = 0;
+      for (const p of gpsRows) {
+        if (liveSessionIds.has(String(p.sessionId))) livePoints++;
+      }
+      if (sumPointCount !== livePoints) {
+        throw new Error(
+          `Backup consistency check failed: Σ pointCount активных сессий (${sumPointCount}) != точек в дампе (${livePoints}) — дамп не является снапшотом (гонка с инжестом/retention), повторите бэкап`
+        );
+      }
+      return { snapshotStartedAt, sessionRes, sessionIds, gpsRows };
+    };
+
+    let snap: SnapshotPhase | undefined;
+    let snapErr: unknown = null;
+    for (let attempt = 1; attempt <= SNAPSHOT_ATTEMPTS; attempt++) {
+      try {
+        snap = await runSnapshot();
+        break;
+      } catch (err) {
+        snapErr = err;
+        if (attempt < SNAPSHOT_ATTEMPTS) {
+          // v2.40.3 (C-2): промежуточные неудачи — в лог, финальная летит дальше
+          // в существующий catch (BackupJob failed + alert-путь).
+          logger.warn("backup snapshot phase failed, retrying", {
+            attempt,
+            attemptsTotal: SNAPSHOT_ATTEMPTS,
+            retryInMs: SNAPSHOT_RETRY_DELAY_MS,
+            error: String((err as Error).message ?? err),
+          });
+          await new Promise((resolve) => setTimeout(resolve, SNAPSHOT_RETRY_DELAY_MS));
+        }
       }
     }
-
-    // 2) GpsPoint — по срезу (сироты физически не попадают в дамп).
-    const gpsRows = (await dumpChildRows("GpsPoint", sessionIds, false)) as Record<string, unknown>[];
-
-    // 3) Пост-чек снапшота: каждая точка дампится ровно с одной не-archived
-    // сессией и наоборот. Расхождение = между SELECT'ами вписались новые точки
-    // (или retention удалил существующие) — дамп НЕ снапшот: помечаем failed
-    // через существующий путь (catch ниже), оператор повторяет запуск.
-    let livePoints = 0;
-    for (const p of gpsRows) {
-      if (liveSessionIds.has(String(p.sessionId))) livePoints++;
-    }
-    if (sumPointCount !== livePoints) {
-      throw new Error(
-        `Backup consistency check failed: Σ pointCount активных сессий (${sumPointCount}) != точек в дампе (${livePoints}) — дамп не является снапшотом (гонка с инжестом/retention), повторите бэкап`
-      );
-    }
+    if (!snap) throw snapErr ?? new Error("Backup snapshot phase failed");
+    const { snapshotStartedAt, sessionRes, sessionIds, gpsRows } = snap;
 
     const rows: Record<string, unknown[]> = {
       Session: sessionRes.rows as unknown[],

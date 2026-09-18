@@ -94,7 +94,10 @@ function rateLimitKey(scope: string, request: NextRequest): string {
     const auth = request.headers.get("authorization") || "";
     const bearer = bearerToken(auth);
     if (bearer) {
-      return rlKey(scope, bearer.slice(0, 16));
+      // v2.40.3 (ревью 19-j, C-1): ключ = токен + ПУТЬ (симметрично src/proxy.ts):
+      // cron-бэкап 03:30 и backup-github 04:00 делят CRON_SECRET — общий бакет
+      // admin:heavy 1/час давал 429 воскресному GitHub-бэкапу.
+      return rlKey(scope, bearer.slice(0, 16), new URL(request.url).pathname);
     }
     return rlKey(scope, "ip", getClientIP(request));
   }

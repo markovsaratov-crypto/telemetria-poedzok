@@ -127,8 +127,16 @@ function rateLimitKey(scope: string, request: NextRequest): string {
     const auth = request.headers.get("authorization") || "";
     const bearer = bearerToken(auth);
     if (bearer) {
-      // Bearer-клиенты (админ-скрипты) — ключ по префиксу токена
-      return rlKey(scope, bearer.slice(0, 16));
+      // v2.40.3 (ревью 19-j, C-1): ключ = токен + ПУТЬ. Раньше все Bearer-клиенты
+      // с одним токеном делили ОДИН бакет admin:heavy на все дорогие роуты:
+      // cron-бэкап 03:30 (POST /api/admin/backup) съедал бакет 1/час, и
+      // backup-github 04:00 (POST /api/admin/backup/github, тот же CRON_SECRET)
+      // получал 429 — воскресный GitHub-бэкап молча не состоялся бы
+      // (d1-gateway ставит ok:false, /api/cron/... больше не ретраит).
+      // Пер-роут бакеты: каждый дорогой роут по-прежнему 1/час на токен,
+      // но разные роуты не блокируют друг друга. Множество admin:heavy-путей
+      // фиксировано (backup, backup/*, restore, backfill-trips) — рост Map исключён.
+      return rlKey(scope, bearer.slice(0, 16), new URL(request.url).pathname);
     }
     // v2.10.7: cookie-браузер без Authorization раньше давал общий бакет "no-token"
     // для ВСЕХ пользователей — лимит 1/час на admin:heavy исчерпывался чужими GET.

@@ -34,24 +34,31 @@
 // исчез; backfill в финализированную → pointCount не совпал. Итоговая
 // калибровка всегда по ПОЛНОМУ набору rates актуального корпуса (диф лишь
 // минимизирует чтения — числа тождественны полному пересчёту). Первый
-// sweep процесса (watermark пуст — рестарт/деплой) — полный, как раньше.
+// sweep процесса — v2.40.3: watermark ДОПОЛНИТЕЛЬНО персистится в Setting
+// (см. «рестарт-бёрн» ниже), поэтому «полным» остаётся только САМЫЙ первый
+// запуск сервиса; после рестарта/деплоя/эвикции изолята диф продолжается
+// с сохранённого watermark.
 import { libsql } from "./db";
 import { logger } from "./logger";
+import { upsertSetting } from "./settings";
+import {
+  CORPUS_WATERMARK_KEY,
+  CORPUS_WATERMARK_MAX_BYTES,
+  deserializeWatermark,
+  serializeWatermark,
+  watermarkSizeBytes,
+  type CorpusWatermark,
+  type SessionRates,
+} from "./eco-corpus-watermark";
 import { computeMethodologyMetrics, calibrateEcoScoreBaselinesFromCorpus, type EcoScoreBaselines } from "./metrics-methodology";
 import { haversineM } from "./geo";
 
+// ——— v2.40.3 (ревью 19-j, критик RR-2 «рестарт-бёрн»): персист watermark ———
+// ЧИСТЫЕ функции сериализации — в ./eco-corpus-watermark (без импортов,
+// покрыты tests/eco-watermark.test.ts); здесь — только работа с БД:
+// загрузка при холодном старте и fire-and-forget сохранение после sweep.
+
 const CORPUS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 минут (как прежде в stats-роуте)
-
-/** rates методологии одной записи корпуса (null — ниже gate <60, не калибрует). */
-interface SessionRates {
-  braking: number;
-  accel: number;
-  jerk: number;
-}
-
-/** Watermark инкрементального sweep (F59): rates записи + число точек, ПО
- *  КОТОРОМУ они посчитаны (изменение pointCount = backfill → пересчёт записи). */
-type CorpusWatermark = Map<string, { rates: SessionRates | null; pointCount: number }>;
 
 const g = globalThis as unknown as {
   __ecoCorpusCache?: { baselines: EcoScoreBaselines; ts: number; sig: string | null; inflight: Promise<EcoScoreBaselines> | null; perSession: CorpusWatermark | null };
@@ -62,6 +69,49 @@ function store() {
     g.__ecoCorpusCache = { baselines: calibrateEcoScoreBaselinesFromCorpus([]), ts: 0, sig: null, inflight: null, perSession: null };
   }
   return g.__ecoCorpusCache!;
+}
+
+// ——— v2.40.3 (ревью 19-j, критик RR-2 «рестарт-бёрн»): персист watermark ———
+// Watermark жил ТОЛЬКО в памяти процесса: каждый рестарт/деплой/эвикция
+// изолята (18.09: 8 эвикций за утро) запускал ПОЛНЫЙ sweep корпуса — чтение
+// всех точек всех финализированных записей (десятки тысяч строк на каждый
+// холодный инстанс). Теперь watermark переживает рестарт: после успешного
+// sweep сериализуется в Setting (компактный JSON), при холодном старте
+// читается оттуда — диф сразу продолжается инкрементально. Цена — 1 маленькая
+// строка Setting на чтение и на запись; обе операции НЕ фатальны: любой сбой
+// (нет строки, исчерпана квота, битый JSON) = деградация к прежнему поведению
+// (полный sweep). Ключ в Setting попадает и в ночной бэкап — watermark
+// восстанавливается вместе с данными.
+async function loadPersistedWatermark(): Promise<CorpusWatermark | null> {
+  try {
+    const res = await libsql.execute({
+      sql: "SELECT value FROM Setting WHERE key = ?",
+      args: [CORPUS_WATERMARK_KEY],
+    });
+    const row = res.rows[0] as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return deserializeWatermark(String(row.value));
+  } catch {
+    return null; // квота/сбой — деградация до полного sweep (прежнее поведение)
+  }
+}
+
+async function persistWatermark(wm: CorpusWatermark): Promise<void> {
+  try {
+    const json = serializeWatermark(wm);
+    if (watermarkSizeBytes(json) > CORPUS_WATERMARK_MAX_BYTES) {
+      // корпус больше лимита — остаёмся на in-memory семантике (v2.38.2/F59):
+      // каждый процесс после рестарта делает полный sweep, как раньше
+      logger.warn("corpus watermark too large to persist, keeping in-memory", { requestId: "corpus", bytes: watermarkSizeBytes(json) });
+      return;
+    }
+    // D-14: единый UPSERT Setting (копия SQL в этом файле запрещена)
+    await upsertSetting(CORPUS_WATERMARK_KEY, json, "system:eco-corpus");
+  } catch (err) {
+    // не фатально: sweep уже успешно завершён, in-memory watermark актуален;
+    // не записали — после рестарта будет полный sweep (прежнее поведение)
+    logger.warn("corpus watermark persist failed (non-fatal)", { requestId: "corpus", error: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 /** Подпись корпуса: одна агрегатная строка — меняется только при
@@ -99,13 +149,20 @@ export async function getCorpusEcoBaselines(): Promise<EcoScoreBaselines> {
       return s.baselines;
     }
     try {
-      const { baselines, perSession } = await computeCorpusBaselines(s.perSession);
+      // v2.40.3 (рестарт-бёрн): in-memory watermark пуст (холодный процесс) —
+      // пробуем продолжить диф с персистентного (1 маленькая строка Setting).
+      // Неудача загрузки = null = полный sweep, как в v2.38.2.
+      const prev = s.perSession ?? (await loadPersistedWatermark());
+      const { baselines, perSession } = await computeCorpusBaselines(prev);
       if (sig != null) s.sig = sig;
       s.baselines = baselines;
       s.ts = Date.now();
       // v2.38.2 (F59): watermark обновляется ТОЛЬКО при успехе — сбой sweep
       // оставляет прежний (следующая попытка пересчитает диф заново)
       s.perSession = perSession;
+      // v2.40.3: персист нового watermark — fire-and-forget, сбой не валит
+      // ответ (ошибки внутри persistWatermark глотаются с warn)
+      void persistWatermark(perSession);
       return baselines;
     } catch (err) {
       // сбой sweep: держим прежние базлайны, подпись НЕ запоминаем —
@@ -125,7 +182,9 @@ export async function getCorpusEcoBaselines(): Promise<EcoScoreBaselines> {
 
 /**
  * v2.38.2 (ревью F59): инкрементальная калибровка корпуса.
- * @param prev watermark прошлого sweep (null → полный, первый за процесс)
+ * @param prev watermark прошлого sweep (null → полный; v2.40.3: null теперь
+ *   только у САМОГО первого запуска — после рестарта диф продолжается
+ *   с персистентного watermark)
  * @returns baselines + НОВЫЙ watermark (пер-сессионные rates) для кэша
  */
 async function computeCorpusBaselines(prev: CorpusWatermark | null): Promise<{ baselines: EcoScoreBaselines; perSession: CorpusWatermark }> {
@@ -157,7 +216,8 @@ async function computeCorpusBaselines(prev: CorpusWatermark | null): Promise<{ b
     }
     // записи, исчезнувшие из корпуса (soft-delete), в next НЕ переносятся
   } else {
-    // первый sweep процесса — полный (watermark пуст после рестарта/деплоя)
+    // watermark пуст И персистентного нет (самый первый запуск сервиса либо
+    // корпус превысил лимит персиста) — полный, как в v2.38.2
     toCompute.push(...metas.keys());
   }
 

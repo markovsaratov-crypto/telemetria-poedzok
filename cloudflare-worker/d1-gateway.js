@@ -505,6 +505,10 @@ const CRON_ALL_JOBS = [
 ];
 const CRON_LAST_PREFIX = "cron:last:";
 const CRON_BACKUP_TIMEOUT_MS = 14 * 60_000; // дамп+GitHub-аплоад — до 14 мин (лимит cron-инвокации ~15)
+// v2.40.3 (ревью 19-j, C-1): ДОЛГИЕ крон-джобы. backup-github делает полный дамп +
+// GitHub-релиз с аплоадом — с тем же бюджетом, что и backup. Раньше получал дефолтные
+// 60 с: на реальной БД дамп не успевал даже начаться — AbortError, ok:false, без ретрая.
+const LONG_CRON_JOBS = new Set(["backup", "backup-github"]);
 
 async function callAppCron(env, path, timeoutMs = 60_000) {
   if (!env.APP_ORIGIN) return { ok: false, error: "APP_ORIGIN not configured" };
@@ -1043,7 +1047,7 @@ const worker = {
             }
           } else {
             const path = CRON_APP_PATHS[job];
-            const timeout = job === "backup" ? CRON_BACKUP_TIMEOUT_MS : 60_000;
+            const timeout = LONG_CRON_JOBS.has(job) ? CRON_BACKUP_TIMEOUT_MS : 60_000;
             const r = await callAppCron(env, path, timeout);
             results[job] = r;
             if (env.KV) {

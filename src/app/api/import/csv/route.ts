@@ -4,7 +4,7 @@
 import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.11.0: общий парсер времени (ISO/нс/мкс/мс/с)
 import { parseCsvRecords } from "@/lib/csv-records"; // v2.38.2 (ревью F49): RFC-4180-парсер — кавычки, ""-экранирование, разделители внутри кавычек
 import { NextRequest } from "next/server";
-import { db } from "@/lib/db";
+import { db, isD1QuotaError } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { dataScopeFor } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
@@ -135,6 +135,13 @@ export async function POST(request: NextRequest) {
         const startTime = new Date(g.points[0].timestamp);
         const endTime = new Date(g.points[g.points.length - 1].timestamp);
 
+        // v2.40.2 (инцидент 18.09 «ошибка импорта файла поездки»): как в
+        // ZIP-импорте — финальный `UPDATE Session SET trafficJobId…` УДАЛЁН,
+        // id джоба генерируется ДО сессии и пишется в её строку сразу.
+        // Транзакция = чистые INSERT'ы (rowsRead = 0 на D1) и не падает при
+        // исчерпанной дневной квоте чтений free tier; атомарность на месте
+        // (батч шлюза — одна D1-транзакция на чанк).
+        const trafficJobId = randomUUID();
         const session = await writeLock(async () => {
           return db.$transaction(async (tx) => {
             const s = await tx.session.create({
@@ -147,6 +154,7 @@ export async function POST(request: NextRequest) {
                 pointCount: g.points.length,
                 payloadBytes: Buffer.byteLength(JSON.stringify(g.points)),
                 status: "completed",
+                trafficJobId,
                 ...(importerUserId ? { userId: importerUserId } : {}), // v2.23.0: изоляция
               },
             });
@@ -163,36 +171,41 @@ export async function POST(request: NextRequest) {
               })),
             });
             const job = await tx.trafficJob.create({
-              data: { sessionId: String(s.id), status: "pending" },
+              data: { id: trafficJobId, sessionId: String(s.id), status: "pending" },
             });
-            await tx.session.update({ where: { id: String(s.id) }, data: { trafficJobId: String(job.id) } });
-            return s;
+            return { s, job };
           });
         });
-        imported.push({ id: String(session.id), deviceId: String(session.deviceId), points: g.points.length });
+        imported.push({ id: String(session.s.id), deviceId: String(session.s.deviceId), points: g.points.length });
         // v2.26.0 (ТЗ §7): импорт создаёт completed-запись — назначаем поездки
         // устройства (канонический пересчёт; non-fatal, ошибки не в errors[])
-        await assignTripOnSessionFinalize(String(session.id)).catch(() => null);
+        await assignTripOnSessionFinalize(String(session.s.id)).catch(() => null);
         inc("ingest_total", "Total ingest requests", 1, "csv");
       } catch (err) {
         // v2.38.2 (ревью F36): err.message наружу утекал внутренности БД/libsql
         // (имена констрейнтов, SQL) в ответе 200.errors[]. Детали — в серверный
         // лог (с deviceId и requestId), клиенту — стабильный код ошибки.
+        // v2.40.2: квота D1 — отдельный стабильный код (читается восстановимо,
+        // сброс в 00:00 UTC), чтобы клиент мог показать внятный тост.
         const detail = err instanceof Error ? err.message : String(err);
-        logger.error("CSV import: session batch failed", {
+        const quotaBlocked = isD1QuotaError(err);
+        logger.warn("CSV import: session batch failed", {
           requestId,
           deviceId: g.deviceId,
           points: g.points.length,
+          quotaBlocked,
           error: detail,
         });
-        errors.push({ deviceId: g.deviceId, error: "import_failed" });
+        errors.push({ deviceId: g.deviceId, error: quotaBlocked ? "d1_quota_exhausted" : "import_failed" });
       }
     }
 
     // v2.38.2 (ревью F37): пропущенные строки (битый таймстемп) — в ответ,
     // чтобы фальсификация времени не проходила молча
+    // v2.40.2: подсказка при квоте — сколько ждать (сброс 00:00 UTC)
+    const quotaHit = errors.some((e) => e.error === "d1_quota_exhausted");
     return json(
-      { imported: imported.length, sessions: imported, errors, skipped: { unparseableTimestamp: skippedUnparseableTs } },
+      { imported: imported.length, sessions: imported, errors, skipped: { unparseableTimestamp: skippedUnparseableTs }, ...(quotaHit ? { quota: "дневная квота чтений D1 исчерпана — сброс в 00:00 UTC" } : {}) },
       200,
       { "X-Request-Id": requestId }
     );

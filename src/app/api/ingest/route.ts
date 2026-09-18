@@ -4,7 +4,7 @@
 import { NextRequest } from "next/server";
 import { zIngestBody } from "@/lib/validation";
 import { findExistingSession } from "@/lib/idempotency";
-import { db } from "@/lib/db";
+import { db, isD1QuotaError } from "@/lib/db";
 import { payloadLimitBytes, isPayloadTooLarge } from "@/lib/payload-limit"; // v2.38.1 (ревью F20)
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
@@ -192,6 +192,11 @@ export async function POST(request: NextRequest) {
     // повторная проверка и честный ответ duplicate.
     let session: { session: Record<string, unknown>, job: Record<string, unknown> };
     try {
+      // v2.40.2 (инцидент 18.09): как в импортах — `UPDATE Session SET
+      // trafficJobId…` УДАЛЁН: id джоба генерируется ДО сессии (randomUUID) и
+      // пишется в её строку сразу. Транзакция = чистые INSERT'ы (rowsRead = 0
+      // на D1) и не падает при исчерпанной дневной квоте чтений free tier.
+      const trafficJobId = crypto.randomUUID();
       session = await db.$transaction(async (tx) => {
         const s = await tx.session.create({
           data: {
@@ -203,6 +208,7 @@ export async function POST(request: NextRequest) {
             pointCount: filtered.length,
             payloadBytes,
             status: "completed",
+            trafficJobId,
             ...(ingestUserId ? { userId: ingestUserId } : {}), // v2.23.0: изоляция данных
           },
         });
@@ -219,17 +225,14 @@ export async function POST(request: NextRequest) {
             timestamp: BigInt(p.timestampMs),
           })),
         });
-        // Создаём TrafficJob для Worker
+        // Создаём TrafficJob для Worker — с ЗАРАНЕЕ сгенерированным id (см. v2.40.2)
         const job = await tx.trafficJob.create({
           data: {
+            id: trafficJobId,
             sessionId: s.id,
             status: "pending",
             priority: 0,
           },
-        });
-        await tx.session.update({
-          where: { id: String(s.id) },
-          data: { trafficJobId: String(job.id) },
         });
         return { session: s, job };
       });
@@ -292,6 +295,21 @@ export async function POST(request: NextRequest) {
     );
   } catch (err) {
     recordIngestOutcome(false); // P2-16: 5xx участвует в ingest_error_rate
+    // v2.40.2: дневная квота D1 (free tier) — честный 429 вместо 500:
+    // SensorLogger поймёт «временно» по Retry-After (сброс в 00:00 UTC)
+    // и не будет долбить бесполезными ретраями.
+    if (isD1QuotaError(err)) {
+      const midnight = Date.UTC(
+        new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() + 1, 0, 0, 0
+      );
+      const retryAfter = String(Math.max(60, Math.round((midnight - Date.now()) / 1000)));
+      logger.warn("Ingest blocked by D1 daily quota", {
+        requestId,
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - start,
+      });
+      return json({ error: "Дневная квота D1 исчерпана — чтения заблокированы до 00:00 UTC", code: "d1_quota_exhausted" }, 429, { "X-Request-Id": requestId, "Retry-After": retryAfter });
+    }
     logger.error("Ingest error", {
       requestId,
       error: err instanceof Error ? err.message : String(err),

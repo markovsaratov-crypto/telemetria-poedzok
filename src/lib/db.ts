@@ -25,6 +25,22 @@ const globalForDb = globalThis as unknown as {
 export const USING_D1 =
   typeof process.env.D1_GATEWAY_URL === "string" && process.env.D1_GATEWAY_URL.length > 0;
 
+// v2.40.2 (инцидент 18.09 «ошибка импорта файла поездки»): прод-аккаунт D1
+// free tier исчерпал ДНЕВНУЮ квоту чтений строк — любые SELECT/UPDATE/DELETE
+// над таблицами возвращают D1_ERROR до сброса в 00:00 UTC, при этом INSERT'ы
+// (rowsRead = 0) проходят. Импорт поездок падал на ПОСЛЕДНЕМ стейтменте своей
+// транзакции — UPDATE Session SET trafficJobId…, который читает строки для
+// поиска id. Фикс: транзакции импорта/инжеста стали чистыми INSERT'ами
+// (trafficJobId генерируется ДО вставки сессии и пишется сразу), а остаточные
+// read-зависимые пути честно маппятся в 429 этим детектором.
+// Текст ошибки воркера: "Your account has exceeded D1's free tier daily row read limit. …"
+export function isD1QuotaError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    /exceeded D1'?s free tier daily row (read|write) limit/i.test(err.message)
+  );
+}
+
 // ——— v2.38.1 (ревью F3/F4/F5): ЕДИНЫЕ лимиты чанкования для D1 ———
 // Жёсткие лимиты gateway-воркера (cloudflare-worker/d1-gateway.js):
 //   • /batch — ≤500 стейтментов на вызов (400 = запас);

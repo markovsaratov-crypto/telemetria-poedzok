@@ -1,6 +1,6 @@
 // POST /api/import/zip — импорт GPS-данных из ZIP архива (SensorLogger format)
 import { NextRequest } from "next/server";
-import { db, libsql } from "@/lib/db";
+import { db, isD1QuotaError, libsql } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { dataScopeFor } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
@@ -198,16 +198,23 @@ export async function POST(request: NextRequest) {
 
     // v2.16.0 (B12): сессия + точки + джоб — АТОМАРНО в одной транзакции
     // (как в CSV-импорте). Раньше сбой между create-сессии и вставкой чанка
-    // оставлял «висячую» сессию без точек. tx.gpsPoint.createMany внутри
-    // транзакции теперь чанкует многорядными INSERT (<999 плейсхолдеров).
+    // оставлял «висячую» сессию без точек.
+    // v2.40.2 (инцидент 18.09): финальный `UPDATE Session SET trafficJobId…`
+    // УДАЛЁН — транзакция теперь ЧИСТЫЕ INSERT'ы: id джоба генерируется ДО
+    // сессии и пишется в её строку сразу. Причина: UPDATE на D1 читает строки
+    // (поиск по id), и при исчерпанной дневной квоте чтений free tier весь
+    // импорт падал «Import failed» на последнем стейтменте, хотя сам батч
+    // INSERT'ов (rowsRead = 0) квотой не ограничен. Атомарность не изменилась:
+    // /batch шлюза — одна D1-транзакция на чанк, все стейтменты в одном чанке.
     // v2.19.0: tx — честный DbTx (выводится сигнатурой $transaction; было `: any`)
     // v2.23.0: изоляция данных — импорт привязывается к импортёру (role=user);
     // владелец (userId null) — «хозяйские» данные, как раньше
     const importerScope = dataScopeFor(auth);
     const importerUserId = importerScope.mode === "own" ? importerScope.userId : null;
+    const trafficJobId = randomUUID();
     const session = await db.$transaction(async (tx) => {
       const s = await tx.session.create({
-        data: { deviceId, clientId, deviceName, startTime, endTime, pointCount: filtered.length, payloadBytes: fileBuffer.length, status: "completed", ...(importerUserId ? { userId: importerUserId } : {}) },
+        data: { deviceId, clientId, deviceName, startTime, endTime, pointCount: filtered.length, payloadBytes: fileBuffer.length, status: "completed", trafficJobId, ...(importerUserId ? { userId: importerUserId } : {}) },
       });
       await tx.gpsPoint.createMany({
         data: filtered.map((p) => ({
@@ -221,28 +228,50 @@ export async function POST(request: NextRequest) {
           timestamp: BigInt(p.timestamp),
         })),
       });
-      const job = await tx.trafficJob.create({ data: { sessionId: s.id, status: "pending" } });
-      // v2.19.0: id из TxModelApi — unknown → честный string
-      await tx.session.update({ where: { id: String(s.id) }, data: { trafficJobId: String(job.id) } });
-      return s;
+      const job = await tx.trafficJob.create({ data: { id: trafficJobId, sessionId: s.id, status: "pending" } });
+      // v2.19.0: id из TxModelApi — unknown → честный string (эхо возвращает наш trafficJobId)
+      return { s, job };
     });
     // v2.19.0: noImplicitAny — id транзакционного результата unknown → String()
-    const sessionId = String(session.id);
+    const sessionId = String(session.s.id);
     // v2.26.0 (ТЗ §7): импорт создаёт completed-запись — назначаем поездки
     // устройства (канонический пересчёт затронутой цепочки; non-fatal)
     await assignTripOnSessionFinalize(sessionId);
-    await writeAudit({ action: "session.import", targetId: sessionId, targetType: "Session", actorType: "user", actorId: "owner", sessionId, metadata: { source: "zip", fileName: file.name, pointCount: filtered.length, deviceName } });
+    // v2.40.2: аудит — non-fatal: INSERT не зависит от квоты чтений, но любой
+    // его сбой больше НЕ отдаёт 500 после УЖЕ закоммиченного импорта (раньше
+    // ответ «Import failed» при записанных данных провоцировал повторную
+    // загрузку и путаницу с дубликатами).
+    await writeAudit({ action: "session.import", targetId: sessionId, targetType: "Session", actorType: "user", actorId: "owner", sessionId, metadata: { source: "zip", fileName: file.name, pointCount: filtered.length, deviceName } }).catch((auditErr) => {
+      logger.warn("ZIP import: audit write failed (non-fatal, import already committed)", { requestId, sessionId, error: auditErr instanceof Error ? auditErr.message : String(auditErr) });
+    });
     inc("ingest_total", "Total ingest requests", 1, "zip");
     logger.info("ZIP import success", { requestId, sessionId, points: filtered.length, deviceName });
 
     return json(
-      { imported: 1, sessionId: session.id, deviceId, deviceName, pointCount: filtered.length, dropped: { inaccurate: droppedInaccurate }, startTime: startTime.toISOString(), endTime: endTime.toISOString() },
+      { imported: 1, sessionId: session.s.id, deviceId, deviceName, pointCount: filtered.length, dropped: { inaccurate: droppedInaccurate }, startTime: startTime.toISOString(), endTime: endTime.toISOString() },
       200,
       { "X-Request-Id": requestId }
     );
   } catch (err) {
+    // v2.40.2: дневная квота D1 (free tier) — честный 429 вместо 500: клиент
+    // понимает, что это временно (сброс в 00:00 UTC), и не ретраит бесполезно.
+    if (isD1QuotaError(err)) {
+      logger.warn("ZIP import blocked by D1 daily quota", { requestId, error: err instanceof Error ? err.message : String(err) });
+      return json(
+        { error: "Дневная квота D1 исчерпана — чтения заблокированы до 00:00 UTC. Импорт попробуйте после сброса или сообщите владельцу (upgrade D1).", code: "d1_quota_exhausted", requestId },
+        429,
+        { "X-Request-Id": requestId, "Retry-After": String(secondsUntilUtcMidnight()) }
+      );
+    }
     logger.error("ZIP import error", { requestId, error: err instanceof Error ? err.message : String(err) });
     // v2.11.0 (АУДИТ C-30): наружу — requestId, детали — в логах
     return json({ error: "Import failed", requestId }, 500, { "X-Request-Id": requestId });
   }
+}
+
+// v2.40.2: секунды до полуночи UTC — для Retry-After при 429 по квоте D1
+function secondsUntilUtcMidnight(): number {
+  const now = new Date();
+  const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0);
+  return Math.max(60, Math.round((midnight - now.getTime()) / 1000));
 }

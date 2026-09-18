@@ -3,7 +3,7 @@
 PWA-платформа записи и анализа телеметрии автомобильных поездок: приём GPS-батчей от Sensor Logger, 60+ метрик вождения, план-факт маршрутизации, аналитика, экспорт и администрирование.
 
 - **Продакшен:** https://poedzok.fun (origin — `telemetria-poedzok.onrender.com`, CDN TurboFlare — см. `docs/CUSTOM_DOMAIN.md`)
-- **Статус:** прод **v2.38.2** (fix-паки ревью, 88/88; откат — ветка `backup/pre-fixpacks-2026-09-17`); **v2.39.1** (18.09.2026, деплой ожиает push): этап A + B1 + **B2-сервер/§B1-монтаж на d1-gateway-воркере** — эндпоинты `/ingest` и `/kvcache`(+/invalidate) в `cloudflare-worker/d1-gateway.js`, деплой через `cloudflare-worker/wrangler.toml`; см. §0 и `docs/OPTIMIZATION-PROPOSAL.md`
+- **Статус:** прод **v2.40.0** (18.09.2026: этап A + B1 + B2 задеплоены; Turso-инцидент закрыт env-парой D1_GATEWAY_* через Render API; **§B5 Cron Triggers** — планировщик в d1-gateway-воркере (tick */1, finalize+alerts */5, retention 03:00, backup 03:30, github-backup ВС 04:00, turso-migrate */30), **§B1-complete** алиас `/api/ingest` на воркере, **§T-DELTA** самовосстанавливающийся мигратор Turso-дельты в D1, **§B6** OpenNext-сборка сайта под Cloudflare Workers; см. §0 и `docs/OPTIMIZATION-PROPOSAL.md`)
 - **Health:** `GET /health` (отдаёт версию из `package.json`)
 - **Развёртывание:** push в `main` → Render autoDeploy (см. `render.yaml`)
 - **Бекап БД:** ежедневный приватный draft-релиз `backup-*` (03:30 UTC, вместе с локальным дампом) + read-back drill (проверка восстановимости); восстановление — `POST /api/admin/restore` из локального дампа или напрямую из GitHub-релиза (`{source:"github"}`) (см. `docs/TECHNICAL.md` §14)

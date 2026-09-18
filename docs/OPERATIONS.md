@@ -558,3 +558,88 @@ p95-покрытие дашбордов и ленивый индекс `Session(
 - KV-квота free: 100k чтений/сутки, 1k записей/сутки — кэш 60с на десятке
   ключей `dash:*` укладывается с запасом; счётчик `invalidated` не растёт
   сам по себе = инвалидация не зациклена.
+
+## §9. Edge-контур v2.40.0 (18.09.2026): Cron Triggers, B1-алиас, мигратор Turso-дельты, B6 OpenNext
+
+### 9.1 Что изменилось (директива владельца «сначала идеальный продукт»)
+
+1. **Turso-инцидент закрыт** (18.09 08:10 UTC): env-пара `D1_GATEWAY_URL` +
+   `D1_GATEWAY_SECRET` выставлена в Render через Render API (PUT env-vars,
+   полный набор 36 переменных), деплой dep-damf2un40ujc73an0g70 → `/health`
+   `{"status":"ok","db":"ok"}`. Промежуточный итог: prod на D1-шлюзе, чтения/записи
+   живы, Turso больше не в горячем пути.
+2. **§B5 Cron Triggers**: d1-gateway-воркер получил `scheduled()` — расписания
+   render.yaml 1:1 (retention 03:00, alerts */5, backup 03:30, github-backup
+   ВС 04:00, finalize-sessions */5) + новый **worker-tick */1** (драйвер
+   инжест-воркера: POST /api/worker/tick → runWorkerTick() — один pollOnce-цикл;
+   атомарный claim исключает двойную обработку с in-process-интервалом) +
+   **turso-migrate */30**. Cron-сервисы Render НЕ создаются (их в Render и не
+   было — blueprint-синк не подтверждался; исполнители остались в приложении).
+   Попутный эффект: tick */1 держит Render-инстанс тёплым (нет засыпания).
+3. **§B1-complete**: алиас `POST /api/ingest` на воркере — Sensor Logger при
+   переводе на edge меняет ТОЛЬКО хост в URL:
+   `https://d1-gateway.markov-saratov.workers.dev/api/ingest` (путь и Bearer
+   INGEST_TOKEN не меняются). Личные устройства (it_-токены) остаются на
+   приложении — edge-канал их сознательно не поддерживает.
+4. **§T-DELTA мигратор**: самовосстанавливающийся перенос Turso-дельты
+   (17.09 21:06 → 18.09 08:10) в D1. Состояние — KV `turso_delta:v1`; шаг
+   ограничен (CPU-бюджет инвокации); идемпотентность: GpsPoint/IngestMessage/
+   AuditLog/Route — INSERT OR IGNORE, Session/Trip/TrafficJob/User/Setting —
+   только более свежая Turso-строка (сравнение updatedAt).
+5. **GITHUB_BACKUP_ENCRYPTION_KEY** сгенерирован и выставлен в Render env —
+   durable-копии снова шифруются (AES-256-GCM TELMENC1; до этого fail-closed
+   пропускал аплоады).
+
+### 9.2 Рунбук наблюдения (гейт — секрет шлюза)
+
+```bash
+GW=https://d1-gateway.markov-saratov.workers.dev
+SEC=<D1_GATEWAY_SECRET>
+
+# Состояние миграции + последние запуски всех cron-джоб:
+curl -s "$GW/admin/cron-status" -H "x-gateway-secret: $SEC"
+
+# Ручной шаг мигратора (до 40 фаз за запрос):
+curl -s -X POST "$GW/admin/turso-migrate" -H "x-gateway-secret: $SEC" \
+  -H 'content-type: application/json' -d '{"steps":40}'
+
+# Сброс прогресса (идемпотентно, безопасно):
+curl -s -X POST "$GW/admin/turso-migrate" -H "x-gateway-secret: $SEC" \
+  -H 'content-type: application/json' -d '{"reset":true}'
+```
+
+Статусы мигратора: `pending` (ещё не запускался) → `blocked` (квота Turso
+читается, ретрай через 30 мин — это НОРМА до сброса квоты) → `running` →
+`done` | `error`. После `done`: удалить биндинг TURSO_AUTH_TOKEN из воркера
+(см. SECURITY-ROTATION.md) и отозвать JWT в Turso.
+
+### 9.3 Перевод Sensor Logger на edge-инжест (§B1, за владельцем, 2 минуты)
+
+В приложении на телефоне: URL отправки `https://poedzok.fun/api/ingest` →
+`https://d1-gateway.markov-saratov.workers.dev/api/ingest`, Bearer-токен и
+формат тела НЕ меняются. Проверка после смены: GET
+`$GW/admin/cron-status` (ingest не виден там — смотреть метрики приложения
+`/api/metrics`: ingest-счётчики растут, `d1_rows_written_total` растёт) или
+дашборд «Записи» — новые точки появляются. Откат — вернуть старый URL.
+
+### 9.4 §B6 OpenNext: сборка и деплой сайта под CF Workers
+
+Репо: `bun add -d @opennextjs/cloudflare wrangler` → сборка
+`DATABASE_URL="file:./db/local.db" bunx opennextjs-cloudflare build` →
+деплой `CLOUDFLARE_API_TOKEN=… bunx wrangler deploy -c wrangler.web.jsonc`.
+Секреты — wrangler secret put (значения = Render env). Сайт поднимается на
+`https://<name>.<subdomain>.workers.dev`. Домен poedzok.fun переводится на
+CF владельцем (зона + смена NS у регистратора + custom domain на воркер);
+до перевода домена сайт остаётся на Render через TurboFlare, OpenNext-воркер
+работает параллельно как канареечный контур. Известные ограничения B6:
+(а) бэкап-роут использует fs (/tmp) — на Workers не работает, НО бэкап
+исполняется по cron APP_ORIGIN=poedzok.fun (Render) — не затрагивается;
+(б) bcrypt-login на CPU-лимите free-плана Workers — проверять фактически;
+(в) 10 мс CPU на инвокацию free — SSR тяжёлых страниц может упираться
+(наблюдать, при необходимости Workers Paid $5/мес или оставить сайт на Render).
+
+### 9.5 Тикет GitHub Support (purge PR-refs) — текст готов
+
+23 ссылки refs/pull/*/head держат переписанные до filter-repo коммиты до
+GitHub GC. Тикет подаёт владелец (Support API нет) — текст в отчёте ревью
+(раунд 19, Постскриптум №7) и в worklog.

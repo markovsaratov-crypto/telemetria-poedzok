@@ -1,0 +1,63 @@
+// wrangler.jsonc — §B6 (v2.40.0): деплой сайта (Next.js 16.3.3 через
+// @opennextjs/cloudflare 1.20.6) на Cloudflare Workers.
+// Сборка:  DATABASE_URL="file:./db/local.db" bunx opennextjs-cloudflare build
+// Деплой:  CLOUDFLARE_API_TOKEN=… bunx wrangler deploy
+// Секреты (PUT /accounts/{id}/workers/scripts/telemat-web/secrets или
+// `wrangler secret put`): значения = Render env — LOGIN_PASSWORD,
+// SESSION_SECRET, API_KEY, INGEST_TOKEN, CRON_SECRET, ADMIN_TOKEN,
+// TURSO_AUTH_TOKEN, GITHUB_TOKEN, D1_GATEWAY_SECRET,
+// GITHUB_BACKUP_ENCRYPTION_KEY.
+// Биндинги БД НЕ нужны: приложение ходит в D1 через HTTP-шлюз d1-gateway
+// (env D1_GATEWAY_URL) — тот же путь, что на Render. Биндинг ASSETS —
+// Workers Static Assets (статика Next без KV/R2).
+// APP_VERSION убран из env (env.ts дефолтит его из package.json — на Render
+// застывшее env-значение 2.6.0 обгоняло факт); REGISTRATION_ENABLED=false —
+// фикс blueprint-дрейфа (в дашборде было true при render.yaml false, ревью F6).
+// Домен poedzok.fun — за владельцем (зона CF + смена NS + custom domain);
+// до перевода сайт живёт на telemat-web.<subdomain>.workers.dev.
+{
+  "name": "telemat-web",
+  "main": "edge-entry.js",
+  "compatibility_date": "2024-09-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "b8e4eee2f19ba22f8d9ccce80691e719",
+  "workers_dev": true,
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "GATEWAY_SVC",
+      "service": "d1-gateway"
+    }
+  ],
+  "vars": {
+    "REGISTRATION_ENABLED": "false",
+    "GITHUB_BACKUP_CRON_UTC": "0 3 * * *",
+    "GITHUB_BACKUP_ENABLED": "true",
+    "GITHUB_REPO": "markovsaratov-crypto/telemetria-poedzok",
+    "TARGET_LOAD_RPM": "100",
+    "BACKUP_STORAGE_DIR": "/tmp/backups",
+    "EXPORT_STORAGE_DIR": "/tmp/exports",
+    "EXPORT_ASYNC_THRESHOLD": "5000",
+    "AUDIT_RETENTION_DAYS": "3650",
+    "GRACE_PERIOD_DAYS": "30",
+    "RETENTION_DAYS": "3650",
+    "CIRCUIT_BREAKER_TIMEOUT_SEC": "30",
+    "CIRCUIT_BREAKER_THRESHOLD": "5",
+    "OSRM_BASE_URL": "https://router.project-osrm.org",
+    "WORKER_MAX_CONCURRENCY": "5",
+    "WORKER_BATCH_SIZE": "10",
+    "WORKER_ID": "worker-cf-edge-01",
+    "MAX_PAYLOAD_BYTES": "262144",
+    "RATE_LIMIT_BACKEND": "memory",
+    "RATE_LIMIT_MAX_AUTH": "5",
+    "RATE_LIMIT_MAX_DEFAULT": "60",
+    "RATE_LIMIT_MAX_INGEST": "120",
+    "DATABASE_URL": "libsql://tele-markovsaratov-crypto.aws-ap-south-1.turso.io",
+    "NODE_ENV": "production",
+    "D1_GATEWAY_URL": "https://d1-gateway.markov-saratov.workers.dev",
+    "WORKER_POLL_INTERVAL_MS": "30000"
+  }
+}

@@ -18,6 +18,21 @@ compatibility_date = "2026-09-01"
 account_id = "b8e4eee2f19ba22f8d9ccce80691e719"
 workers_dev = true
 
+# v2.40.0 (§B5): Cron Triggers — расписание бывших cron-сервисов Render 1:1
+# (render.yaml) + новый */1 worker-tick (драйвер инжест-воркера приложения
+# на бессерверном рантайме) + */30 мигратор Turso-дельты (§T-DELTA).
+# Схема работы: scheduled() → POST APP_ORIGIN+путь с Bearer CRON_SECRET
+# (исполнители — в приложении; их код и расписания не менялись).
+[triggers]
+# free-план CF: ≤5 триггеров на аккаунт — turso-migrate свёрнут в */5.
+crons = [
+  "*/1 * * * *",    # worker-tick (TrafficJob/ExportJob/жнецы сессий и поездок)
+  "*/5 * * * *",    # finalize-sessions + alerts + turso-migrate (шаги троттлятся KV-состоянием)
+  "0 3 * * *",      # retention (чистка по grace/purgedAt)
+  "30 3 * * *",     # backup (дамп + GitHub durable-копия)
+  "0 4 * * SUN",    # github-backup (еженедельная страховка ВС 04:00)
+]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "telemetria"
@@ -34,3 +49,14 @@ EDGE_INGEST_ROLLUP_ENABLED = "true"
 TELEMAT_TIMEZONE = "Europe/Saratov"
 # Лимит тела /ingest (байт); дефолт модуля 1 МБ — приведён явно для прозрачности
 EDGE_INGEST_MAX_BYTES = "1048576"
+# §B5: origin приложения для cron-вызовов исполнителей (poedzok.fun → TurboFlare → Render;
+# после перевода домена на Cloudflare — тот же URL, но терминируется site-воркером)
+APP_ORIGIN = "https://poedzok.fun"
+# §T-DELTA: HTTP-endpoint Turso (libSQL over HTTP v2/pipeline — мигратор дельты)
+TURSO_URL = "https://tele-markovsaratov-crypto.aws-ap-south-1.turso.io"
+
+# Секреты (задаются ОБНОВЛЁННЫМИ значениями при ротации — Workers API или
+# `wrangler secret put`): GATEWAY_SECRET, INGEST_TOKEN, CRON_SECRET (§B5:
+# тот же секрет, что у приложения — cron-канал), TURSO_AUTH_TOKEN (§T-DELTA:
+# JWT базы Turso — только на время миграции дельты, отозвать после статуса
+# done через /admin/turso-migrate/status).

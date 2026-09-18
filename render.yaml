@@ -157,6 +157,11 @@ services:
         value: ""
       - key: GH_TOKEN
         sync: false
+      # v2.38.1 (ревью F13) + v2.40.0: AES-256-GCM ключ durable-копий GitHub
+      # (TELMENC1-формат; 64 hex-символа). До v2.40.0 был не задан — durable-копии
+      # НЕ выгружались (fail-closed). Сгенерирован и выставлен 18.09 (в Render env).
+      - key: GITHUB_BACKUP_ENCRYPTION_KEY
+        sync: false
       - key: GH_REPO
         value: markovsaratov-crypto/telemetria-poedzok
       - key: GH_BRANCH

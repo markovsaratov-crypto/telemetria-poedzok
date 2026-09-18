@@ -91,3 +91,7 @@ creds.env
 db/backups/*.json
 db/*.sqlite
 *.db
+
+# v2.40.0 (§B6): артефакты OpenNext/wrangler-сборки — не коммитим
+.open-next/
+.wrangler/

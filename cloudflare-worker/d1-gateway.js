@@ -9,6 +9,11 @@
 //   POST /ingest  (body Sensor Logger)    → §B1: см. ingest-port.js (своя auth)
 //   POST /kvcache {key, sql, params, ttlSec} → §B2: SELECT через KV-кэш
 //   POST /kvcache/invalidate {prefix}     → §B2: сброс кэша по префиксу
+//   POST /api/ingest                      → §B1 v2.40.0: алиас /ingest (host-only switch)
+//   POST /admin/turso-migrate {steps?,reset?} → §T-DELTA: шаги мигратора Turso-дельты
+//   GET  /admin/turso-migrate/status      → §T-DELTA: состояние миграции (KV)
+//   GET  /admin/cron-status               → §B5: последние запуски всех cron-джоб
+//   scheduled (Cron Triggers)             → §B5: планировщик вместо cron-сервисов Render
 //
 // Формат ответа повторяет @libsql/client ResultSet (rows как объекты,
 // rowsAffected), чтобы адаптер на стороне приложения оставался тонким.
@@ -452,6 +457,378 @@ async function handleKvInvalidate(env, body) {
   return json({ invalidated });
 }
 
+// ——— v2.40.0 (§B5 + §T-DELTA, docs/OPTIMIZATION-PROPOSAL.md): Cron Triggers ———
+// Замена cron-сервисов Render (retention 03:00 / alerts */5 / backup 03:30 /
+// github-backup ВС 04:00 / finalize-sessions */5) на Cloudflare Cron Triggers
+// воркера + новый */1 worker-tick (драйвер инжест-воркера на безынтервальном
+// рантайме — CF Workers; попутно держит приложение тёплым). Планировщик
+// живёт в воркере (schedules через Workers API / wrangler.toml [triggers]),
+// ИСПОЛНИТЕЛИ остаются в приложении: воркер делает POST APP_ORIGIN+path с
+// Bearer CRON_SECRET (те же каналы, что признавали cron-сервисы Render —
+// authorizeRequest("cron") / authorizeAdminOrCron). Расписания взяты из
+// render.yaml 1:1 ( Blueprint-синк не нужен, cron-сервисы не создаются).
+// NB: free-план CF — максимум 5 cron-триггеров на аккаунт, поэтому мигратор
+// Turso-дельты свёрнут в общий */5-триггер (шаги миграции троттлятся состоянием
+// в KV: blocked → только проба чтения; running → один шаг на тик).
+const CRON_SCHEDULES = {
+  "*/1 * * * *": ["tick"],
+  "*/5 * * * *": ["finalize-sessions", "alerts", "turso-migrate"],
+  "0 3 * * *": ["retention"],
+  "30 3 * * *": ["backup"],
+  "0 4 * * SUN": ["backup-github"],
+};
+const CRON_APP_PATHS = {
+  tick: "/api/worker/tick",
+  "finalize-sessions": "/api/cron/finalize-sessions",
+  alerts: "/api/cron/alerts",
+  retention: "/api/cron/retention",
+  backup: "/api/admin/backup",
+  "backup-github": "/api/admin/backup/github",
+};
+const CRON_ALL_JOBS = [
+  ...Object.keys(CRON_APP_PATHS),
+  "turso-migrate",
+];
+const CRON_LAST_PREFIX = "cron:last:";
+const CRON_BACKUP_TIMEOUT_MS = 14 * 60_000; // дамп+GitHub-аплоад — до 14 мин (лимит cron-инвокации ~15)
+
+async function callAppCron(env, path, timeoutMs = 60_000) {
+  if (!env.APP_ORIGIN) return { ok: false, error: "APP_ORIGIN not configured" };
+  if (!env.CRON_SECRET) return { ok: false, error: "CRON_SECRET not configured" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(env.APP_ORIGIN + path, {
+      method: "POST",
+      headers: { authorization: "Bearer " + env.CRON_SECRET, "content-type": "application/json" },
+      body: "{}",
+      signal: controller.signal,
+    });
+    const bodyText = await res.text().catch(() => "");
+    return { ok: res.ok, status: res.status, body: bodyText.slice(0, 2000) };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ——— v2.40.0 (§T-DELTA): самовосстанавливающийся мигратор Turso-дельты в D1 ———
+// ИНЦИДЕНТ 17-18.09: после деплоя v2.38.2 (21:06 17.09) env-пара D1_GATEWAY_*
+// не была выставлена в Render → приложение ушло в законный фолбэк v2.37.0 на
+// Turso; записи с 17.09 21:06 → 18.09 08:10 ушли в Turso (чтения Turso
+// блокированы квотой free — дельту нельзя вытащить руками). Инцидент закрыт
+// 18.09 08:10 (env-пара выставлена через Render API, prod на D1), дельта
+// осталась заморожена в Turso ДО сброса квоты чтений.
+// Этот конвейер переносит дельту САМ: Cron Trigger каждые 30 мин (и ручной
+// POST /admin/turso-migrate {steps:N}) делает ограниченные шаги (лимит строк
+// на шаг — под CPU-бюджет инвокации): проба чтения Turso (BLOCKED → статус
+// "blocked", ретрай через 30 мин) → выгрузка пачки дельта-строк →
+// идемпотентная запись в D1 → прогресс в KV (turso_delta:v1).
+// Идемпотентность: GpsPoint/IngestMessage/AuditLog/Route — INSERT OR IGNORE
+// по PK; Session/Trip/TrafficJob/User/Setting — сравнение updatedAt, пишется
+// ТОЛЬКО более свежая Turso-строка (защита от отката D1-изменений, сделанных
+// ПОСЛЕ возвращения прода на D1). Маркер окна = 21:00 17.09 (запас 6 мин до
+// реального разъезда); строка «на стыке» идемпотентно дедуплицируется.
+const TURSO_STATE_KEY = "turso_delta:v1";
+const TURSO_SPLIT_ISO = "2026-09-17T21:00:00.000Z";
+const TURSO_SPLIT_MS = Date.parse(TURSO_SPLIT_ISO);
+const TURSO_GPS_PAGE = 1500; // строк на шаг GpsPoint (1500 × ~10 колонок ≈ 15k параметров чанками)
+const TURSO_SMALL_LIMIT = 5000; // верхний порог «малой» таблицы (один шаг целиком)
+const TURSO_PHASES = [
+  { table: "User", mode: "compare", where: null },
+  { table: "Setting", mode: "compare", where: null },
+  { table: "Session", mode: "compare", where: "updatedAt > ?", args: [TURSO_SPLIT_ISO] },
+  { table: "Trip", mode: "compare", where: "updatedAt > ?", args: [TURSO_SPLIT_ISO] },
+  { table: "TrafficJob", mode: "compare", where: "updatedAt > ?", args: [TURSO_SPLIT_ISO] },
+  { table: "Route", mode: "ignore", where: "createdAt > ?", args: [TURSO_SPLIT_ISO] },
+  { table: "IngestMessage", mode: "ignore", where: "firstSeenAt > ?", args: [TURSO_SPLIT_ISO] },
+  { table: "AuditLog", mode: "ignore", where: "createdAt > ?", args: [TURSO_SPLIT_ISO] },
+  { table: "GpsPoint", mode: "ignore-keyset", where: null },
+];
+
+function newTursoState() {
+  return {
+    status: "pending",
+    phase: 0,
+    lastTs: TURSO_SPLIT_MS,
+    lastId: "",
+    stats: {},
+    blockedCount: 0,
+    attempts: 0,
+    startedAt: null,
+    finishedAt: null,
+    lastAttemptAt: null,
+    lastError: null,
+  };
+}
+
+async function loadTursoState(env) {
+  if (!env.KV) return { ...newTursoState(), status: "no-kv" };
+  try {
+    const raw = await env.KV.get(TURSO_STATE_KEY);
+    if (!raw) return newTursoState();
+    const s = JSON.parse(raw);
+    if (s && typeof s === "object" && typeof s.phase === "number" && s.stats && typeof s.stats === "object") {
+      return { ...newTursoState(), ...s };
+    }
+  } catch {
+    // битая запись KV — начинаем сначала (идемпотентность миграции это позволяет)
+  }
+  return newTursoState();
+}
+
+async function saveTursoState(env, state) {
+  if (!env.KV) return;
+  try {
+    await env.KV.put(TURSO_STATE_KEY, JSON.stringify(state));
+  } catch {
+    // KV недоступен — состояние живёт только в памяти текущей инвокации
+  }
+}
+
+// Turso libSQL-over-HTTP (v2/pipeline, чистый fetch — без клиентов):
+// толерантный парсер значений — v2-формат {type,value} и сырые JSON-скаляры.
+function tursoValueToJs(v) {
+  if (v == null) return null;
+  if (typeof v !== "object") return v;
+  const t = String(v.type || "");
+  const val = v.value;
+  if (t === "integer" || t === "float") return val == null ? null : Number(val);
+  if (t === "text") return val == null ? null : String(val);
+  if (t === "blob") {
+    if (typeof val !== "string" || val === "") return null;
+    try {
+      const bin = atob(val);
+      return Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
+    } catch {
+      return null;
+    }
+  }
+  return val ?? null;
+}
+
+async function tursoExecute(env, sql, args = []) {
+  const url = env.TURSO_URL || "";
+  const token = env.TURSO_AUTH_TOKEN || "";
+  if (!url || !token) return { ok: false, code: "CONFIG", error: "TURSO_URL/TURSO_AUTH_TOKEN not configured" };
+  try {
+    const res = await fetch(String(url).replace(/\/+$/, "") + "/v2/pipeline", {
+      method: "POST",
+      headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+      body: JSON.stringify({ requests: [{ type: "execute", stmt: { sql, args } }] }),
+    });
+    if (!res.ok) return { ok: false, code: "HTTP_" + res.status, error: "turso http " + res.status };
+    const data = await res.json();
+    const first = data && data.results && data.results[0];
+    if (!first) return { ok: false, code: "EMPTY", error: "turso: empty pipeline response" };
+    if (first.type === "error") {
+      const e = first.error || {};
+      return { ok: false, code: String(e.code || "ERROR"), error: String(e.message || "turso error") };
+    }
+    const result = (first.response && first.response.result) || {};
+    const cols = (result.cols || []).map((c) => c.name);
+    const rows = (result.rows || []).map((raw) => {
+      const row = {};
+      cols.forEach((c, i) => {
+        row[c] = tursoValueToJs(raw[i]);
+      });
+      return row;
+    });
+    return { ok: true, rows, cols };
+  } catch (err) {
+    return { ok: false, code: "NETWORK", error: String((err && err.message) || err) };
+  }
+}
+
+// D1-значения для bind: BigInt→Number (эпоха-мс < 2^53, см. backup.ts),
+// Uint8Array→ArrayBuffer, прочее как есть.
+function d1BindValue(v) {
+  if (v == null) return null;
+  if (typeof v === "number" || typeof v === "string" || typeof v === "boolean") return v;
+  if (typeof v === "bigint") return Number(v);
+  if (v instanceof Uint8Array) return v.buffer && v.byteLength ? v : null;
+  return String(v);
+}
+
+// Идентификаторы колонок приходят из СХЕМЫ Turso (SELECT *) — доверенные,
+// но валидируем паттерном перед интерполяцией в SQL-текст (defense-in-depth).
+const SAFE_IDENT_RE = /^[A-Za-z0-9_]+$/;
+
+// Многострочный INSERT (OR IGNORE|OR REPLACE) чанками ≤90 параметров на
+// стейтмент (лимит D1 — 100; запас — как в db.ts/multiRowInsertChunk).
+function d1InsertChunks(table, rows, mode) {
+  if (!rows.length) return [];
+  const cols = Object.keys(rows[0]).filter((c) => SAFE_IDENT_RE.test(c));
+  if (!cols.length) return [];
+  const rowsPerStmt = Math.max(1, Math.floor(90 / cols.length));
+  const action = mode === "replace" ? "INSERT OR REPLACE" : "INSERT OR IGNORE";
+  const colList = cols.map((c) => '"' + c + '"').join(",");
+  const out = [];
+  for (let i = 0; i < rows.length; i += rowsPerStmt) {
+    const slice = rows.slice(i, i + rowsPerStmt);
+    const placeholders = slice.map(() => "(" + cols.map(() => "?").join(",") + ")").join(",");
+    const params = [];
+    for (const r of slice) {
+      for (const c of cols) params.push(d1BindValue(r[c]));
+    }
+    out.push({ sql: action + ' INTO "' + table + '" (' + colList + ") VALUES " + placeholders, params });
+  }
+  return out;
+}
+
+async function d1RunInserts(env, table, rows, mode) {
+  const chunks = d1InsertChunks(table, rows, mode);
+  let written = 0;
+  for (let i = 0; i < chunks.length; i += 100) {
+    const batch = chunks.slice(i, i + 100).map((s) => {
+      const st = env.DB.prepare(s.sql);
+      return s.params.length ? st.bind(...s.params) : st;
+    });
+    const results = await env.DB.batch(batch);
+    for (const r of results) written += Number((r.meta && r.meta.changes) || 0);
+  }
+  return written;
+}
+
+function bumpTableStat(state, table, key, n) {
+  if (!state.stats[table]) state.stats[table] = { scanned: 0, written: 0 };
+  state.stats[table][key] = (state.stats[table][key] || 0) + n;
+}
+
+// Фаза «compare»: таблицы с updatedAt (User/Setting/Session/Trip/TrafficJob).
+// Из Turso — строки дельта-окна (или все), из D1 — текущие updatedAt тех же id;
+// переносим ТОЛЬКО строки, которых в D1 нет ИЛИ где Turso-строка свежее.
+async function migrateCompareTable(env, phase, state) {
+  const sql = phase.where
+    ? 'SELECT * FROM "' + phase.table + '" WHERE ' + phase.where
+    : 'SELECT * FROM "' + phase.table + '"';
+  const t = await tursoExecute(env, sql, phase.args || []);
+  if (!t.ok) return t;
+  const rows = t.rows.slice(0, TURSO_SMALL_LIMIT);
+  const idCol = phase.table === "Setting" ? "key" : "id";
+  const d1map = new Map();
+  for (let i = 0; i < rows.length; i += 400) {
+    const slice = rows.slice(i, i + 400).map((r) => String(r[idCol]));
+    if (!slice.length) continue;
+    const st = env.DB.prepare(
+      'SELECT "' + idCol + '" AS k, "updatedAt" AS u FROM "' + phase.table + '" WHERE "' + idCol + '" IN (' + slice.map(() => "?").join(",") + ")"
+    ).bind(...slice);
+    const res = await st.all();
+    for (const r of res.results || []) d1map.set(String(r.k), r.u == null ? null : String(r.u));
+  }
+  const fresh = rows.filter((r) => {
+    const id = String(r[idCol]);
+    if (!d1map.has(id)) return true;
+    const d1u = d1map.get(id) || "";
+    const tu = r.updatedAt == null ? "" : String(r.updatedAt);
+    return tu > d1u; // Turso свежее → перенос; D1 уже обновлён после разъезда → пропускаем
+  });
+  const written = await d1RunInserts(env, phase.table, fresh, "replace");
+  bumpTableStat(state, phase.table, "scanned", rows.length);
+  bumpTableStat(state, phase.table, "written", written);
+  return { ok: true, phaseDone: true, scanned: rows.length, written };
+}
+
+// Фаза «ignore»: immutable-таблицы по PK (Route/IngestMessage/AuditLog).
+async function migrateIgnoreTable(env, phase, state) {
+  const t = await tursoExecute(env, 'SELECT * FROM "' + phase.table + '" WHERE ' + phase.where, phase.args || []);
+  if (!t.ok) return t;
+  const rows = t.rows.slice(0, TURSO_SMALL_LIMIT);
+  const written = await d1RunInserts(env, phase.table, rows, "ignore");
+  bumpTableStat(state, phase.table, "scanned", rows.length);
+  bumpTableStat(state, phase.table, "written", written);
+  return { ok: true, phaseDone: true, scanned: rows.length, written };
+}
+
+// Фаза «ignore-keyset»: GpsPoint — страницы по (timestamp, id) от маркера.
+async function migrateGpsPointsStep(env, state) {
+  const lastTs = typeof state.lastTs === "number" && Number.isFinite(state.lastTs) ? state.lastTs : TURSO_SPLIT_MS;
+  const lastId = typeof state.lastId === "string" ? state.lastId : "";
+  const t = await tursoExecute(
+    env,
+    "SELECT * FROM GpsPoint WHERE timestamp > ? OR (timestamp = ? AND id > ?) ORDER BY timestamp, id LIMIT " + TURSO_GPS_PAGE,
+    [lastTs, lastTs, lastId]
+  );
+  if (!t.ok) return t;
+  const rows = t.rows;
+  const written = rows.length ? await d1RunInserts(env, "GpsPoint", rows, "ignore") : 0;
+  bumpTableStat(state, "GpsPoint", "scanned", rows.length);
+  bumpTableStat(state, "GpsPoint", "written", written);
+  if (rows.length < TURSO_GPS_PAGE) {
+    return { ok: true, phaseDone: true, scanned: rows.length, written };
+  }
+  const last = rows[rows.length - 1];
+  state.lastTs = Number(last.timestamp) || lastTs;
+  state.lastId = String(last.id || "");
+  return { ok: true, phaseDone: false, scanned: rows.length, written };
+}
+
+// Один вызов = до maxSteps фазовых шагов (каждый ограничен по строкам —
+// CPU-бюджет инвокации воркера). Проба чтения Turso ДО работы: BLOCKED →
+// статус "blocked" (cron повторит через 30 мин), состояние не портится.
+async function runTursoMigrationStep(env, maxSteps = 1) {
+  const state = await loadTursoState(env);
+  if (state.status === "done") return { state, alreadyDone: true };
+  state.attempts = (state.attempts || 0) + 1;
+  state.lastAttemptAt = new Date().toISOString();
+  const probe = await tursoExecute(env, "SELECT 1 AS ok");
+  if (!probe.ok) {
+    if (probe.code === "BLOCKED") {
+      state.status = "blocked";
+      state.blockedCount = (state.blockedCount || 0) + 1;
+      state.lastError = "turso read quota still blocked (probe)";
+    } else {
+      state.status = "error";
+      state.lastError = probe.error;
+    }
+    await saveTursoState(env, state);
+    return { state, probe: probe.code };
+  }
+  if (!state.startedAt) state.startedAt = new Date().toISOString();
+  state.status = "running";
+  state.lastError = null;
+  let steps = 0;
+  let last = null;
+  while (steps < maxSteps && state.phase < TURSO_PHASES.length) {
+    const phase = TURSO_PHASES[state.phase];
+    if (phase.mode === "ignore-keyset") last = await migrateGpsPointsStep(env, state);
+    else if (phase.mode === "compare") last = await migrateCompareTable(env, phase, state);
+    else last = await migrateIgnoreTable(env, phase, state);
+    if (!last.ok) {
+      state.status = "error";
+      state.lastError = last.error || "unknown migration step error";
+      break;
+    }
+    steps++;
+    if (last.phaseDone) state.phase++;
+  }
+  if (state.phase >= TURSO_PHASES.length && state.status !== "error") {
+    state.status = "done";
+    state.finishedAt = new Date().toISOString();
+  }
+  await saveTursoState(env, state);
+  return { state, steps, last };
+}
+
+async function readCronStatus(env) {
+  const cron = {};
+  for (const job of CRON_ALL_JOBS) {
+    const raw = env.KV ? await env.KV.get(TURSO_CRON_LAST_KEY(job)) : null;
+    try {
+      cron[job] = raw ? JSON.parse(raw) : null;
+    } catch {
+      cron[job] = null;
+    }
+  }
+  return cron;
+}
+
+// cron:last:<job> — KV-запись последнего прогона (наблюдаемость без дашборда CF)
+function TURSO_CRON_LAST_KEY(job) {
+  return CRON_LAST_PREFIX + job;
+}
+
 // v2.38.2 (линт): воркер вынесен в именованную переменную ДО export default
 // (import/no-anonymous-default-export) — поведение идентично module-syntax.
 const worker = {
@@ -466,8 +843,23 @@ const worker = {
     // v2.39.1 (§B1): edge-инжест — ДО гейта X-Gateway-Secret: канал имеет
     // собственную авторизацию (INGEST_TOKEN Bearer/?token= Sensor Logger
     // ИЛИ X-Gateway-Secret приложения). Метод/лимит/идемпотентность — внутри.
-    if (url.pathname === "/ingest") {
+    // v2.40.0 (§B1-complete): алиас /api/ingest — Sensor Logger при переводе
+    // на edge меняет ТОЛЬКО хост (https://d1-gateway.<sub>.workers.dev),
+    // путь и токен остаются как у приложения — меньше мест для ошибки.
+    if (url.pathname === "/ingest" || url.pathname === "/api/ingest") {
       return await handleEdgeIngest(request, env);
+    }
+
+    // v2.40.0 (§B5/§T-DELTA): статус-эндпоинты наблюдаемости (GET, свой
+    // секрет-гейт — до общего метод-чека POST-канала).
+    if (url.pathname === "/admin/turso-migrate/status" || url.pathname === "/admin/cron-status") {
+      if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
+      if (!env.GATEWAY_SECRET || !(await secretEquals(request.headers.get("x-gateway-secret") ?? "", env.GATEWAY_SECRET))) {
+        return json({ error: "unauthorized" }, 401);
+      }
+      const turso = await loadTursoState(env);
+      const cron = await readCronStatus(env);
+      return json({ turso, cron, schedules: CRON_SCHEDULES, appPaths: CRON_APP_PATHS });
     }
 
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
@@ -541,6 +933,20 @@ const worker = {
         return await handleKvInvalidate(env, body);
       }
 
+      // v2.40.0 (§T-DELTA): ручной запуск мигратора Turso-дельты (шаги
+      // ограничены телом {steps:1..40}; {reset:true} — сброс прогресса KV).
+      // Гейты те же: секрет шлюза + rate-limit + лимит тела.
+      if (url.pathname === "/admin/turso-migrate") {
+        if (body && body.reset === true) {
+          const state = newTursoState();
+          await saveTursoState(env, state);
+          return json({ state, reset: true });
+        }
+        const steps = Math.min(Math.max(Number((body && body.steps) || 1) || 1, 1), 40);
+        const result = await runTursoMigrationStep(env, steps);
+        return json(result);
+      }
+
       if (url.pathname === "/batch") {
         const { statements } = body ?? {};
         if (!Array.isArray(statements) || statements.length === 0) {
@@ -586,6 +992,64 @@ const worker = {
     } catch (err) {
       return json({ error: String(err?.message ?? err), d1: true }, 500);
     }
+  },
+
+  // v2.40.0 (§B5): Cron Triggers — планировщик бывших cron-сервисов Render.
+  // Каждый тик: разбор расписания → вызов исполнителей приложения (или
+  // внутренний шаг мигратора Turso) → запись cron:last:<job> в KV
+  // (наблюдаемость через GET /admin/cron-status) + структурный лог.
+  async scheduled(controller, env, ctx) {
+    const jobs = CRON_SCHEDULES[controller.cron] ?? [];
+    const run = (async () => {
+      const results = {};
+      for (const job of jobs) {
+        try {
+          if (job === "turso-migrate") {
+            const r = await runTursoMigrationStep(env, 1);
+            results[job] = {
+              ok: r.state.status !== "error",
+              state: {
+                status: r.state.status,
+                phase: r.state.phase,
+                stats: r.state.stats,
+                blockedCount: r.state.blockedCount,
+                lastError: r.state.lastError,
+              },
+            };
+            if (env.KV) {
+              try {
+                await env.KV.put(
+                  TURSO_CRON_LAST_KEY(job),
+                  JSON.stringify({ at: new Date().toISOString(), ok: results[job].ok, state: results[job].state })
+                );
+              } catch {}
+            }
+          } else {
+            const path = CRON_APP_PATHS[job];
+            const timeout = job === "backup" ? CRON_BACKUP_TIMEOUT_MS : 60_000;
+            const r = await callAppCron(env, path, timeout);
+            results[job] = r;
+            if (env.KV) {
+              try {
+                await env.KV.put(
+                  TURSO_CRON_LAST_KEY(job),
+                  JSON.stringify({
+                    at: new Date().toISOString(),
+                    ok: r.ok,
+                    status: r.status ?? null,
+                    error: r.error ?? null,
+                  })
+                );
+              } catch {}
+            }
+          }
+        } catch (err) {
+          results[job] = { ok: false, error: String((err && err.message) || err) };
+        }
+      }
+      console.log(JSON.stringify({ level: "info", msg: "d1-gateway cron run", cron: controller.cron, jobs, results }));
+    })();
+    ctx.waitUntil(run);
   },
 };
 

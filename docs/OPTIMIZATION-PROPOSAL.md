@@ -1,11 +1,15 @@
 # Системное предложение: оптимизация потоков данных, снижение нагрузки и ускорение
 
-> **Статус (v3 от 18.09.2026): ЭТАП A + B1 + B2-СЕРВЕР ИСПОЛНЕНЫ в коде v2.39.1**
-> (локальная ветка, prod приложения — пока 2.38.2 до push; 155/155 юнит-тестов,
-> tsc/eslint чисто). Воркер d1-gateway получил `/ingest` (§B1-монтаж) и
-> `/kvcache`+`/kvcache/invalidate` (§B2-сервер, KV-кэш SELECT с TTL-полом 60с),
-> конфиг деплоя — `cloudflare-worker/wrangler.toml` (D1 «telemetria» + KV
-> `telemetria-kvcache-probe`).
+> **Статус (v4 от 18.09.2026): ЭТАП A + B1 + B2 + B5 + §T-DELTA ИСПОЛНЕНЫ (v2.40.0); B6 — OpenNext-сборка под CF Workers**
+> Turso-инцидент 17-18.09 ЗАКРЫТ (18.09 08:10 UTC): env-пара D1_GATEWAY_*
+> выставлена через Render API, prod снова на D1-шлюзе. Воркер d1-gateway v2.40.0:
+> `/ingest` + алиас `/api/ingest` (§B1-complete: Sensor Logger меняет только хост),
+> `/kvcache`+`/kvcache/invalidate` (§B2, KV-кэш SELECT), **scheduled() Cron Triggers**
+> (§B5: tick */1 + finalize/alerts */5 + retention 03:00 + backup 03:30 +
+> github-backup ВС 04:00 + turso-migrate */30 — расписания render.yaml 1:1,
+> cron-сервисы Render не создаются), **§T-DELTA мигратор Turso-дельты**
+> (состояние в KV, ручной POST /admin/turso-migrate, статус /admin/cron-status),
+> конфиг — `cloudflare-worker/wrangler.toml` [triggers].
 > Исполнено: §A1 (StatsRollup + инкременты инжеста + фоновый heal + бэкфилл),
 > §A2 (ETag/304 + SWR на /api/stats и /api/trips/batch), §A3 (смарт-опрос 60 с,
 > пауза скрытых вкладок, backoff ×2), §A4 (warmup после старта), §A5 (окна

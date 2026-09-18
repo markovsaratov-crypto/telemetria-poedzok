@@ -942,3 +942,26 @@ export function startWorkerRuntime(): WorkerRuntime {
 export function getWorkerRuntime(): WorkerRuntime | null {
   return g[GLOBAL_KEY] ?? null;
 }
+
+// v2.40.0 (§B5): одноразовый тик воркера по HTTP — драйвер для Cron Triggers
+// d1-gateway-воркера (Cloudflare Workers: setInterval в instrumentation.ts
+// не переживает eviction изолейта; cron */1 вызывает POST /api/worker/tick,
+// который запускает ОДИН pollOnce-цикл — TrafficJob/ExportJob/жнец сессий/
+// жнец поездок). Атомарный claim в pollJobs (UPDATE…RETURNING + lockedBy)
+// исключает двойную обработку, когда in-process-интервал и cron-тик живут
+// одновременно: джоб достаётся ровно одному владельцу. Лёгкий rt БЕЗ
+// globalThis-регистрации и таймера — чистый одноразовый прогон.
+export async function runWorkerTick(): Promise<{ ran: true; workerId: string }> {
+  const e = env();
+  const rt: WorkerRuntime = {
+    startedAt: Date.now(),
+    inFlight: new Set(),
+    shuttingDown: false,
+    pollTimer: null,
+    pollIntervalMs: e.WORKER_POLL_INTERVAL_MS,
+    workerId: `${e.WORKER_ID}-tick`,
+    stop: () => {},
+  };
+  await pollOnce(rt);
+  return { ran: true, workerId: rt.workerId };
+}

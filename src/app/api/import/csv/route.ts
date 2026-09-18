@@ -13,6 +13,7 @@ import { inc } from "@/lib/metrics";
 import pLimit from "p-limit";
 import { randomUUID } from "crypto";
 import { assignTripOnSessionFinalize } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): поездки после импорта
+import { csvFallbackClientId, isUniqueConstraintError } from "@/lib/import-idempotency"; // v2.40.4 (ревью M-1): идемпотентность
 
 const writeLock = pLimit(1);
 
@@ -79,8 +80,11 @@ export async function POST(request: NextRequest) {
     // каждую строку в СВОЮ сессию через `${deviceId}:${randomUUID()}` — тысячи
     // одно-точечных сессий, каждой — TrafficJob. Комментарий выше утверждал
     // обратное («группируем по deviceId»); ZIP-импорт делал это правильно.
-    const fallbackClientId = randomUUID();
-    const groups = new Map<string, { deviceId: string; clientId: string; deviceName?: string; points: { lat: number; lon: number; speed?: number; altitude?: number; accuracy?: number; timestamp: number; bearing?: number }[] }>();
+    // v2.40.4 (ревью M-1): сам fallback больше НЕ randomUUID() на запрос —
+    // тот же файл дважды = два «разных» clientId = полные дубликаты. Группируем
+    // по deviceId с плейсхолдером, детерминированный clientId считается
+    // ПОСЛЕ сортировки группы — из её контента (csvFallbackClientId).
+    const groups = new Map<string, { deviceId: string; clientId: string | null; deviceName?: string; points: { lat: number; lon: number; speed?: number; altitude?: number; accuracy?: number; timestamp: number; bearing?: number }[] }>();
     // v2.38.2 (ревью F37): строки с непарсящимся таймстемпом больше НЕ получают
     // Date.now() (фальсификация времени: «сейчас» ломало startTime/сортировку/
     // дату поездки — фикс D-6 для sensorlogger не был применён здесь). Как в
@@ -102,8 +106,11 @@ export async function POST(request: NextRequest) {
         continue;
       }
       const deviceId = iDevice >= 0 ? row[iDevice] || "csv-import" : "csv-import";
-      const clientId = iClient >= 0 && row[iClient] ? row[iClient] : fallbackClientId;
-      const key = `${deviceId}:${clientId}`;
+      // v2.40.4: clientId из файла — детерминирован сам по себе (повторный
+      // импорт честно ловит @@unique); без колонки — плейсхолдер (одна группа
+      // на deviceId), реальный clientId посчитается из контента группы.
+      const clientId = iClient >= 0 && row[iClient] ? row[iClient] : null;
+      const key = `${deviceId}:${clientId ?? "__fallback__"}`;
       if (!groups.has(key)) {
         groups.set(key, { deviceId, clientId, deviceName: iDeviceName >= 0 ? row[iDeviceName] : undefined, points: [] });
       }
@@ -125,6 +132,9 @@ export async function POST(request: NextRequest) {
 
     const imported: { id: string; deviceId: string; points: number }[] = [];
     const errors: { deviceId: string; error: string }[] = [];
+    // v2.40.4 (ревью M-1): дубликаты (тот же файл уже импортирован) —
+    // НЕ ошибка, отдельный счётчик с внятным статусом в ответе.
+    const duplicates: string[] = [];
     // v2.23.0: изоляция данных — импорт привязывается к импортёру (role=user)
     const importerScope = dataScopeFor(auth);
     const importerUserId = importerScope.mode === "own" ? importerScope.userId : null;
@@ -132,6 +142,11 @@ export async function POST(request: NextRequest) {
     for (const [, g] of groups) {
       try {
         g.points.sort((a, b) => a.timestamp - b.timestamp);
+        // v2.40.4 (ревью M-1): детерминированный clientId из контента группы —
+        // ПОСЛЕ сортировки (нужны первый/последний таймстемпы).
+        if (g.clientId == null) {
+          g.clientId = csvFallbackClientId(g.deviceId, g.points);
+        }
         const startTime = new Date(g.points[0].timestamp);
         const endTime = new Date(g.points[g.points.length - 1].timestamp);
 
@@ -182,6 +197,14 @@ export async function POST(request: NextRequest) {
         await assignTripOnSessionFinalize(String(session.s.id)).catch(() => null);
         inc("ingest_total", "Total ingest requests", 1, "csv");
       } catch (err) {
+        // v2.40.4 (ревью M-1): нарушение @@unique([deviceId, clientId]) —
+        // этот файл/группа уже импортированы. Не ошибка: дубликат не создаётся
+        // (транзакция атомарна), пользователь получает честный статус.
+        if (isUniqueConstraintError(err)) {
+          duplicates.push(g.deviceId);
+          logger.info("CSV import: duplicate group skipped", { requestId, deviceId: g.deviceId, points: g.points.length });
+          continue;
+        }
         // v2.38.2 (ревью F36): err.message наружу утекал внутренности БД/libsql
         // (имена констрейнтов, SQL) в ответе 200.errors[]. Детали — в серверный
         // лог (с deviceId и requestId), клиенту — стабильный код ошибки.
@@ -205,7 +228,17 @@ export async function POST(request: NextRequest) {
     // v2.40.2: подсказка при квоте — сколько ждать (сброс 00:00 UTC)
     const quotaHit = errors.some((e) => e.error === "d1_quota_exhausted");
     return json(
-      { imported: imported.length, sessions: imported, errors, skipped: { unparseableTimestamp: skippedUnparseableTs }, ...(quotaHit ? { quota: "дневная квота чтений D1 исчерпана — сброс в 00:00 UTC" } : {}) },
+      {
+        imported: imported.length,
+        sessions: imported,
+        errors,
+        skipped: { unparseableTimestamp: skippedUnparseableTs },
+        // v2.40.4 (ревью M-1): дубликаты — отдельным полем (UI показывает
+        // «уже импортировано», а не молчаливую ошибку или новый дубликат)
+        duplicates: duplicates.length,
+        duplicateDevices: [...new Set(duplicates)],
+        ...(quotaHit ? { quota: "дневная квота чтений D1 исчерпана — сброс в 00:00 UTC" } : {}),
+      },
       200,
       { "X-Request-Id": requestId }
     );

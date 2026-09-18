@@ -9,7 +9,7 @@ import * as React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { UploadCloud, FileArchive, CheckCircle2, XCircle, Loader2, MapPin } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api-client";
+import { api, ApiError } from "@/lib/api-client";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   Card,
@@ -86,7 +86,13 @@ export function ZipImport() {
       qc.invalidateQueries({ queryKey: ["stats"] });
       qc.invalidateQueries({ queryKey: ["device-stats"] });
     } catch (e) {
-      toast.error("Ошибка импорта", { description: (e as Error).message });
+      // v2.40.4 (ревью M-1): 409 already_imported — это НЕ ошибка: тот же архив
+      // уже импортирован, дубликат не создан. Жёлтый тост вместо красного.
+      if (e instanceof ApiError && e.status === 409) {
+        toast.warning("Уже импортировано", { description: (e as Error).message });
+      } else {
+        toast.error("Ошибка импорта", { description: (e as Error).message });
+      }
     } finally {
       setLoading(false);
     }

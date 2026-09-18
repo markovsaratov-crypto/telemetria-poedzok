@@ -12,6 +12,7 @@ import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.11.0 (C-12): ISO-�
 import { parseCsvRecords } from "@/lib/csv-records"; // v2.38.2 (ревью F49): RFC-4180-парсер — кавычки, ""-экранирование, разделители внутри кавычек
 import { MAX_TRUSTED_ACCURACY_M } from "@/lib/kpi"; // v2.38.2 (ревью F45): единый порог точности точек (100 м)
 import { z } from "zod"; // v2.38.2 (ревью F45): валидация deviceId/deviceName из Metadata.csv
+import { zipDefaultDeviceId, zipImportClientId, isUniqueConstraintError } from "@/lib/import-idempotency"; // v2.40.4 (ревью M-1): идемпотентность
 import AdmZip from "adm-zip";
 import { assignTripOnSessionFinalize } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): поездки после импорта
 
@@ -102,19 +103,24 @@ export async function POST(request: NextRequest) {
 
     // Parse metadata
     let deviceName = "ZIP Import";
-    let deviceId = "zip-" + randomUUID().slice(0, 8);
+    // v2.40.4 (ревью M-1): дефолтный deviceId больше НЕ randomUUID() на каждый
+    // запрос (тот же архив дважды = два «разных устройства» = полные дубликаты).
+    // Пока null — посчитается детерминированно из контента точек после парса.
+    let metaDeviceId: string | null = null;
     if (metadataCsv) {
       const meta = parseCsvRecords(metadataCsv);
       if (meta.headers.length > 0 && meta.rows.length > 0) {
         const dnIdx = findCol(meta.headers, ["device name", "device_name", "devicename"]);
         const diIdx = findCol(meta.headers, ["device id", "device_id", "deviceid"]);
         if (dnIdx >= 0) deviceName = meta.rows[0][dnIdx] || deviceName;
-        if (diIdx >= 0) deviceId = meta.rows[0][diIdx] || deviceId;
+        if (diIdx >= 0) metaDeviceId = meta.rows[0][diIdx] || metaDeviceId;
       }
     }
     // v2.38.2 (ревью F45): zod-валидация значений из Metadata.csv (дефолты
-    // "zip-…"/"ZIP Import" проходят всегда; мусор из файла — честный 400)
-    const metaCheck = zZipImportMeta.safeParse({ deviceId, deviceName });
+    // "zip-…"/"ZIP Import" проходят всегда; мусор из файла — честный 400).
+    // v2.40.4: валидируем deviceId только из файла; детерминированный дефолт
+    // подставляется позже и паттерну DEVICE_ID_RE удовлетворяет всегда.
+    const metaCheck = zZipImportMeta.safeParse({ deviceId: metaDeviceId ?? "zip-default", deviceName });
     if (!metaCheck.success) {
       return json(
         { error: "Invalid deviceId/deviceName in Metadata.csv", details: metaCheck.error.flatten().fieldErrors },
@@ -194,7 +200,11 @@ export async function POST(request: NextRequest) {
 
     const startTime = new Date(filtered[0].timestamp);
     const endTime = new Date(filtered[filtered.length - 1].timestamp);
-    const clientId = randomUUID();
+    // v2.40.4 (ревью M-1): детерминированные identity из контента — повторный
+    // импорт того же архива даёт тот же (deviceId, clientId) и честно ловится
+    // @@unique([deviceId, clientId]) вместо нового дубликата.
+    const deviceId = metaDeviceId ?? zipDefaultDeviceId(filtered);
+    const clientId = zipImportClientId(deviceId, filtered);
 
     // v2.16.0 (B12): сессия + точки + джоб — АТОМАРНО в одной транзакции
     // (как в CSV-импорте). Раньше сбой между create-сессии и вставкой чанка
@@ -253,6 +263,17 @@ export async function POST(request: NextRequest) {
       { "X-Request-Id": requestId }
     );
   } catch (err) {
+    // v2.40.4 (ревью M-1): нарушение @@unique([deviceId, clientId]) — этот
+    // архив уже импортирован. Честный 409 с внятным текстом (тост в UI),
+    // а не 500 «Import failed» при УЖЕ существующих данных.
+    if (isUniqueConstraintError(err)) {
+      logger.info("ZIP import: duplicate archive skipped", { requestId });
+      return json(
+        { error: "Этот архив уже импортирован — дубликат не создан (повторное содержимое распознано по точкам).", code: "already_imported", requestId },
+        409,
+        { "X-Request-Id": requestId }
+      );
+    }
     // v2.40.2: дневная квота D1 (free tier) — честный 429 вместо 500: клиент
     // понимает, что это временно (сброс в 00:00 UTC), и не ретраит бесполезно.
     if (isD1QuotaError(err)) {

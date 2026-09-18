@@ -37,6 +37,11 @@ interface ImportResult {
   imported: number;
   sessions: Array<{ id: string; deviceId: string; points: number }>;
   errors: Array<{ deviceId: string; error: string }>;
+  // v2.40.4 (ревью M-1): дубликаты (файл уже импортирован) и подсказка по квоте
+  duplicates?: number;
+  duplicateDevices?: string[];
+  quota?: string;
+  skipped?: { unparseableTimestamp?: number };
 }
 
 export function CsvImport() {
@@ -252,12 +257,19 @@ export function CsvImport() {
               <div className="text-sm space-y-1">
                 <div className="font-medium">
                   Импортировано {result.imported} сессий
+                  {/* v2.40.4 (ревью M-1): дубликаты — в заголовок результата */}
+                  {(result.duplicates ?? 0) > 0 &&
+                    ` · дубликатов: ${result.duplicates}`}
                 </div>
                 <div className="text-xs text-muted-foreground">
                   Точек суммарно:{" "}
                   {result.sessions.reduce((a, s) => a + s.points, 0)}
                   {result.errors.length > 0 && ` · ошибок: ${result.errors.length}`}
                 </div>
+                {/* v2.40.2 (ревью A-8/C-8): подсказка по квоте D1 — теперь видна в UI */}
+                {result.quota && (
+                  <div className="text-xs text-amber-600 dark:text-amber-400">{result.quota}</div>
+                )}
               </div>
             </div>
 
@@ -283,6 +295,16 @@ export function CsvImport() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+
+            {/* v2.40.4 (ревью M-1): дубликаты — отдельный нейтральный блок:
+                это не ошибка, повторный импорт ничего не сломал */}
+            {(result.duplicates ?? 0) > 0 && (
+              <div className="rounded-lg border border-stone-400/40 bg-stone-500/5 p-2">
+                <div className="text-xs font-medium text-stone-600 dark:text-stone-300">
+                  Уже импортировано (дубликат не создан): {result.duplicateDevices?.join(", ")}
+                </div>
               </div>
             )}
 

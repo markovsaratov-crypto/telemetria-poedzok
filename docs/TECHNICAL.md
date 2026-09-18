@@ -1,7 +1,7 @@
 # «Телемат» — Техническая документация
 
 **Продукт:** Телемат — PWA-платформа записи и анализа телеметрии автомобильных поездок.
-**Версия:** 2.38.2 (деплой на прод 17.09.2026 21:06 UTC — fix-паки ревью v2.38.1 + v2.38.2, 88/88; откат — ветка `backup/pre-fixpacks-2026-09-17`, v2.38.0)
+**Версия:** 2.39.0 (18.09.2026 — этап A+B1 оптимизации: §A1 rollup StatsRollup, §A2 ETag/SWR, §A3 смарт-опрос 60с+backoff, §A4 warmup, §A6 алерт квоты D1, §B1 порт edge-инжеста cloudflare-worker/ingest-port.js; НА ПРОДУ пока 2.38.2 — v2.39.0 в локальной ветке до деплоя; откат — ветка backup/pre-fixpacks-2026-09-17)
 **Продакшен:** https://poedzok.fun (пользовательский домен через TurboFlare CDN; origin — https://telemetria-poedzok.onrender.com, ранбук — `docs/CUSTOM_DOMAIN.md`)
 **Репозиторий:** https://github.com/markovsaratov-crypto/telemetria-poedzok (ветка `main`; вся документация — в папке `docs/`: https://github.com/markovsaratov-crypto/telemetria-poedzok/tree/main/docs)
 **Документ:** полная техническая документация для передачи в управление технической поддержке и администратору. Описывает текущее состояние системы «как есть», без истории изменений.

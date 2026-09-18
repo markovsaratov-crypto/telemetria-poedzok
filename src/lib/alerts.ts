@@ -1,6 +1,9 @@
 // src/lib/alerts.ts — P2-16: AlertManager-правила по спеке §14.4 поверх починенных
 // счётчиков (P1-10). Шесть правил: ingest_error_rate, traffic_job_dead_rate,
 // backup_failure, db_size_growth, api_latency_p95, worker_stuck.
+// v2.39.0 (§A6, docs/OPTIMIZATION-PROPOSAL.md): + седьмое правило d1_quota_70 —
+// дневная корзина чтений строк D1 ≥ 70% лимита (инцидент квоты ловится ДО
+// деградации, а не по факту «db degraded»).
 // Ограничения честно задокументированы в docs/OPERATIONS.md:
 //   - кольцевые буферы живут в памяти инстанса (рестарт обнуляет историю);
 //   - db_size_growth хранит последнюю выборку в таблице _AlertState (SQLite);
@@ -8,6 +11,7 @@
 import { libsql } from "@/lib/db";
 import { env } from "@/lib/env";
 import { latencyP95Ms } from "@/lib/latency";
+import { counterValue, D1_ROWS_READ_TOTAL } from "@/lib/metrics"; // v2.39.0 §A6: расход квоты
 
 export interface AlertRule {
   rule: string;
@@ -254,6 +258,100 @@ async function ruleWorkerStuck(): Promise<AlertRule> {
   };
 }
 
+// ——— v2.39.0 (§A6): дневная корзина чтений D1 ———
+
+/** UTC-день (YYYY-MM-DD) — корзина квоты Cloudflare сбрасывается в 00:00 UTC. */
+function utcDayKey(now = Date.now()): string {
+  return new Date(now).toISOString().slice(0, 10);
+}
+
+interface QuotaDayState {
+  /** Дата сохранённой корзины (YYYY-MM-DD UTC); null — состояния нет/битое. */
+  date: string | null;
+  /** Свернутый в _AlertState расход прошлых оценок/инстансов (строк). */
+  base: number;
+  /** Значение счётчика на момент последней свёртки (текущий процесс). */
+  seen: number;
+}
+
+const QUOTA_STATE_KEY = "d1_quota.day";
+
+/** Чистый парсинг состояния корзины (unit-тестируется): битая строка = нет состояния. */
+export function parseQuotaDayState(raw: { value: string; updatedAt: string } | null): QuotaDayState {
+  if (raw == null) return { date: null, base: 0, seen: 0 };
+  try {
+    const parsed = JSON.parse(raw.value) as { date?: string; base?: number; seen?: number };
+    if (
+      typeof parsed?.date === "string" &&
+      Number.isFinite(Number(parsed.base)) &&
+      Number.isFinite(Number(parsed.seen))
+    ) {
+      return { date: parsed.date, base: Number(parsed.base), seen: Number(parsed.seen) };
+    }
+  } catch {
+    // битое состояние = нет состояния
+  }
+  return { date: null, base: 0, seen: 0 };
+}
+
+/**
+ * v2.39.0 (§A6): дневной расход чтений строк D1 ≥ D1_QUOTA_ALERT_PCT% от
+ * D1_DAILY_READ_LIMIT (free tier 5 млн). Метрика d1_rows_read_total —
+ * per-process counter (рестарт обнуляет): дневная корзина сворачивается в
+ * _AlertState {date, base, seen} — переживает рестарты/сны Render free.
+ * Кулдаун уведомлений — общий механизм дедупа ALERT_DEDUP_COOLDOWN_MIN
+ * (дефолт 60 мин = требуемый «1 час» §A6). Деградирует мягко: не-D1 режим
+ * или отсутствие метрики → firing:false с detail, правило не падает.
+ */
+async function ruleD1Quota70(): Promise<AlertRule> {
+  const limit = env().D1_DAILY_READ_LIMIT;
+  const pctThreshold = env().D1_QUOTA_ALERT_PCT;
+  const base: Omit<AlertRule, "firing" | "value"> = {
+    rule: "d1_quota_70",
+    description: `дневные чтения строк D1 ≥ ${pctThreshold}% от ${limit}`,
+    threshold: `≥ ${pctThreshold}% дневного лимита`,
+    action: "Проверить /api/metrics (d1_rows_read_total), включить STATS_ROLLUP_ENABLED/edge-KV, снизить частоту опроса (§A3)",
+  };
+
+  const counter = counterValue(D1_ROWS_READ_TOTAL);
+  if (counter == null) {
+    // метрика не инициализирована (не D1-режим / модуль не загружен) — мягкая деградация
+    return { ...base, firing: false, value: null, detail: "метрика d1_rows_read_total недоступна (не D1-режим?)" };
+  }
+
+  const today = utcDayKey();
+  let state: QuotaDayState;
+  try {
+    state = parseQuotaDayState(await stateGet(QUOTA_STATE_KEY));
+  } catch {
+    state = { date: null, base: 0, seen: 0 };
+  }
+
+  // Смена дня (00:00 UTC): корзина обнуляется. seen := counter — чтения,
+  // случившиеся до полуночи в живом процессе, в новую корзину не попадают
+  // (потеря ≤ интервала cron-оценок, задокументировано).
+  if (state.date !== today) {
+    state = { date: today, base: 0, seen: counter };
+  }
+  // рестарт процесса: счётчик с нуля — «хвост» seen прошлого инстанса не мешает
+  const delta = Math.max(0, counter - state.seen);
+  const total = state.base + delta;
+  const isNewDay = delta === 0 && state.base === 0;
+
+  // свёртка корзины (best-effort: сбой записи = пересчёт с того же base)
+  try {
+    await stateSet(QUOTA_STATE_KEY, JSON.stringify({ date: today, base: total, seen: counter }));
+  } catch { /* мягкая деградация — value всё равно честный на этой оценке */ }
+
+  const pct = (total / limit) * 100;
+  return {
+    ...base,
+    firing: pct >= pctThreshold,
+    value: `${Math.round(total).toLocaleString("ru-RU")} строк (${pct.toFixed(1)}% от лимита)`,
+    detail: isNewDay ? "новая дневная корзина (00:00 UTC)" : undefined,
+  };
+}
+
 /** Полная оценка всех правил §14.4. Не бросает исключений — правило с ошибкой помечается detail. */
 export async function evaluateAlerts(): Promise<AlertEvaluation> {
   const defs: Array<() => Promise<AlertRule>> = [
@@ -263,6 +361,7 @@ export async function evaluateAlerts(): Promise<AlertEvaluation> {
     ruleDbSizeGrowth,
     ruleApiLatencyP95,
     ruleWorkerStuck,
+    ruleD1Quota70, // v2.39.0 (§A6): квота чтений D1
   ];
   const alerts: AlertRule[] = [];
   for (const run of defs) {

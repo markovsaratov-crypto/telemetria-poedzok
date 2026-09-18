@@ -22,6 +22,8 @@ import {
 } from "./api-client";
 // v2.9.9: офлайн-снимок статистики для PWA-заглушки (public/offline.html)
 import { saveOfflineSummary } from "./offline-summary";
+// v2.39.0 (§A3): смарт-опрос — 60 с база, пауза при hidden, backoff при 429/5xx
+import { useSmartPollInterval } from "./poll-controller";
 
 // ===== Auth =====
 export function useAuth() {
@@ -143,11 +145,15 @@ export interface StatsResponse {
 }
 
 export function useStats() {
+  // v2.39.0 (§A3): смарт-интервал (база 60 с — см. POLL_BASE_INTERVAL_MS,
+  // было refetchInterval: 60_000; логика запросов/staleTime прежние)
+  const tzOffset = new Date().getTimezoneOffset();
+  const poll = useSmartPollInterval([["stats", tzOffset]]);
   return useQuery({
-    queryKey: ["stats", new Date().getTimezoneOffset()],
+    queryKey: ["stats", tzOffset],
     queryFn: async () => {
       // v2.16.0 (B-7): ?tzOffsetMin — «сегодня» в поясе клиента (как у батя-статс)
-      const data = await api.get<StatsResponse>(`/api/stats?tzOffsetMin=${new Date().getTimezoneOffset()}`);
+      const data = await api.get<StatsResponse>(`/api/stats?tzOffsetMin=${tzOffset}`);
       // v2.9.9: офлайн-снимок — обновляем после каждого успешного запроса
       saveOfflineSummary({
         version: data.version,
@@ -156,7 +162,7 @@ export function useStats() {
       });
       return data;
     },
-    refetchInterval: 60_000,
+    refetchInterval: poll,
     staleTime: 30_000,
   });
 }
@@ -208,6 +214,9 @@ export interface SessionsQuery {
 }
 
 export function useSessions(params: SessionsQuery, opts?: { enabled?: boolean }) {
+  // v2.39.0 (§A3): смарт-интервал (база 60 с, было 30 с; полная пауза при
+  // hidden, backoff ×2 при 429/5xx — см. poll-controller.ts)
+  const poll = useSmartPollInterval([["sessions", params]]);
   return useQuery({
     queryKey: ["sessions", params],
     // v2.26.0 (ТЗ §11): enabled=false — вкладка «Поездки» перешла на серверные
@@ -230,12 +239,13 @@ export function useSessions(params: SessionsQuery, opts?: { enabled?: boolean })
       return data;
     },
     staleTime: 15_000,
-    // v2.14.0 (Ф2): живое обновление списка — опрос каждые 30с, ПОКА ВКЛАДКА
-    // АКТИВНА (refetchIntervalInBackground=false по умолчанию — свёрнутая
-    // вкладка не расходует батарею/трафик). Закрывает кейс «вечерняя поездка
-    // не появилась»: вкладка, открытая днём, показывала дневной снапшот до
-    // ручной перезагрузки (refetchOnWindowFocus был выключен ещё в v2.9).
-    refetchInterval: 30_000,
+    // v2.14.0 (Ф2): живое обновление списка — опрос, ПОКА ВКЛАДКА
+    // АКТИВНА. v2.39.0 (§A3): интервал из смарт-контроллера (60 с база,
+    // пауза скрытой вкладки — надёжнее прежнего refetchIntervalInBackground=false:
+    // возврат видимости теперь НЕМЕДЛЕННО рефоучит список, а не ждёт таймера).
+    // Закрывает кейс «вечерняя поездка не появилась»: вкладка, открытая днём,
+    // показывала дневной снапшот до ручной перезагрузки.
+    refetchInterval: poll,
   });
 }
 

@@ -3,7 +3,7 @@
 PWA-платформа записи и анализа телеметрии автомобильных поездок: приём GPS-батчей от Sensor Logger, 60+ метрик вождения, план-факт маршрутизации, аналитика, экспорт и администрирование.
 
 - **Продакшен:** https://poedzok.fun (origin — `telemetria-poedzok.onrender.com`, CDN TurboFlare — см. `docs/CUSTOM_DOMAIN.md`)
-- **Статус:** прод **v2.38.2** (задеплоена 17.09.2026 21:06 UTC — оба fix-пака ревью, 88/88 закрыто; откат — ветка `backup/pre-fixpacks-2026-09-17`); план развития — `docs/OPTIMIZATION-PROPOSAL.md` (предложение, не исполнено)
+- **Статус:** прод **v2.38.2** (fix-паки ревью, 88/88; откат — ветка `backup/pre-fixpacks-2026-09-17`); в разработке (локально, не задеплоено) — **v2.39.0**: этап A + B1 из `docs/OPTIMIZATION-PROPOSAL.md` (rollup-агрегаты, ETag/SWR, смарт-опрос, edge-инжест-порт; см. §0 этого документа)
 - **Health:** `GET /health` (отдаёт версию из `package.json`)
 - **Развёртывание:** push в `main` → Render autoDeploy (см. `render.yaml`)
 - **Бекап БД:** ежедневный приватный draft-релиз `backup-*` (03:30 UTC, вместе с локальным дампом) + read-back drill (проверка восстановимости); восстановление — `POST /api/admin/restore` из локального дампа или напрямую из GitHub-релиза (`{source:"github"}`) (см. `docs/TECHNICAL.md` §14)

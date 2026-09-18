@@ -23,6 +23,8 @@ import { trackLatency } from "@/lib/latency"; // v2.38.2 · F40: замер api_
 import { finalizeSession } from "@/lib/session-finalize"; // v2.14.0 (Ф3): shared с воркером-«жнецом»
 import { joinNewSessionToTrip, extendTripOnPoints } from "@/lib/trip-grouping"; // v2.26.0 (ТЗ §7): живое вливание записи в поездку
 import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.16.0 (D-6): единый парсер времени
+// v2.39.0 (§A1.5): инкремент rollup-дня при append точек/создании записи
+import { bumpRollup, localDayKey } from "@/lib/stats-rollup";
 import pLimit from "p-limit";
 import { randomUUID } from "crypto";
 
@@ -627,6 +629,16 @@ export async function POST(request: NextRequest) {
       // (сессия привязана — поездка «дышит» вместе с записью; состав/кэши — при
       // финализации). Под тем же writeLock; сбой — не роняет инжест.
       await extendTripOnPoints(sessionId, lastTs);
+      // v2.39.0 (§A1.5): инкремент rollup дня последней точки батча (TELEMAT-бакет;
+      // батч, пересёкший полночь, целиком ложится в день последней точки —
+      // доминирующий вес, расхождение лечится пересчётом при полнота-сверке).
+      // Идемпотентность уже проведена повторной проверкой messageId под lock —
+      // сюда ретрай-дубль не доходит. Fire-and-forget: сбой глотается внутри bumpRollup,
+      // writeLock не держится (UPSERT-инкремент атомарен и без порядка).
+      void bumpRollup(localDayKey(lastTs), ingestUserId, {
+        points: points.length,
+        sessions: isNewSession ? 1 : 0,
+      });
       // v2.16.0 (R2): идемпотентность-запись — ПОСЛЕ успешной вставки точек
       // (atomic INSERT OR IGNORE — защита и от межинстансовых гонок)
       if (msgId != null && (typeof msgId === "number" || typeof msgId === "string")) {

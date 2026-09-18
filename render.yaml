@@ -106,6 +106,24 @@ services:
         value: "2"
         # v2.38.2 (ревью F65): приведено к методологии §7.3 — штраф в квадрате;
         # прежнее значение 1.5 было расхождением код/дока
+      # ——— v2.39.0 (docs/OPTIMIZATION-PROPOSAL.md, этап A): все дефолты в env.ts
+      # применимы и без явной записи; здесь — для прозрачности Blueprint-синка ———
+      - key: STATS_ROLLUP_ENABLED
+        value: "true"
+        # §A1: дневные rollup-агрегаты StatsRollup; false = прежний путь v2.38.2
+      - key: WARMUP_ENABLED
+        value: "true"
+        # §A4: прогрев кэшей после старта инстанса (бюджет 10 с, ошибки глотаются)
+      - key: EDGE_KVCACHE_ENABLED
+        value: "true"
+        # §B2-клиент: KV-кэш SELECT через d1-gateway /kvcache (до обновления
+        # воркера эндпоинт 404 → тихий фолбэк на прямой D1-путь)
+      - key: D1_DAILY_READ_LIMIT
+        value: "5000000"
+        # §A6: дневная корзина квоты чтений D1 (free tier 5 млн; сброс 00:00 UTC)
+      - key: D1_QUOTA_ALERT_PCT
+        value: "70"
+        # §A6: порог алерта d1_quota_70 (процент корзины)
       - key: ECO_SCORE_MIN_CALIBRATION_CORPUS
         value: "30"
       - key: ECO_SCORE_MIN_BASELINE_VALUE

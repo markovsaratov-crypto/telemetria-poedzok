@@ -158,6 +158,25 @@ const schema = z.object({
   // v2.32.0: дедуп Slack-уведомлений алертов — одно и то же горящее правило
   // не чаще раза в cooldown (мин). 0 = дедуп выключен (прежнее поведение).
   ALERT_DEDUP_COOLDOWN_MIN: z.coerce.number().int().min(0).default(60),
+  // ——— v2.39.0 (docs/OPTIMIZATION-PROPOSAL.md, Вариант A) ———
+  // §A1: rollup-таблица StatsRollup (дневные агрегаты сессий/точек). false —
+  // дашборд возвращается к прямым COUNT(*) по GpsPoint (путь v2.38.2); записи
+  // инкрементов/refresh глотаются и при true — любое исключение rollup-ветки
+  // = fallback на прежний запрос, дашборд не падает никогда.
+  STATS_ROLLUP_ENABLED: z.string().default("true"),
+  // §A4: прогрев кэшей после старта инстанса (top-20 сессий/поездок + rollup
+  // 7 дней, общий бюджет времени 10 с, ошибки глотаются — при исчерпанной
+  // квоте D1 прогрев тихо деградирует).
+  WARMUP_ENABLED: z.string().default("true"),
+  // §B2: KV-кэш тяжёлых SELECT на гейтвей-воркере (POST /kvcache). Работает
+  // только в паре с D1_GATEWAY_URL; до обновления воркера эндпоинт /kvcache
+  // ответит 404 — клиент фолбэчится на прямой libsql.execute (kv:"error"),
+  // поведение приложения не меняется.
+  EDGE_KVCACHE_ENABLED: z.string().default("true"),
+  // §A6: дневной лимит чтений строк D1 (free tier = 5 000 000) и порог алерта
+  // d1_quota_70 в процентах. Сброс корзины — 00:00 UTC (как у Cloudflare).
+  D1_DAILY_READ_LIMIT: z.coerce.number().int().positive().default(5_000_000),
+  D1_QUOTA_ALERT_PCT: z.coerce.number().int().min(1).max(100).default(70),
 });
 
 export type Env = z.infer<typeof schema>;

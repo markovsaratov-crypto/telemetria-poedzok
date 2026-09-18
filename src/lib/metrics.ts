@@ -54,6 +54,15 @@ export function set(name: string, value: number, help = "") {
   gg.value = value;
 }
 
+// v2.39.0 (§A6): чтение текущего значения counter'а — правило алертов
+// d1_quota_70 суммирует дневную корзину по d1_rows_read_total. null = метрика
+// не инициализирована (не D1-режим / модуль не подключён) — правило деградирует мягко.
+export function counterValue(name: string): number | null {
+  const { counters } = registry();
+  const c = counters.get(name);
+  return c ? c.value : null;
+}
+
 export function metricsText(): string {
   const { counters, gauges } = registry();
   const lines: string[] = [];

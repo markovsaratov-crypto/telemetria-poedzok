@@ -26,4 +26,14 @@ export async function register(): Promise<void> {
   } catch (err) {
     console.error(JSON.stringify({ time: new Date().toISOString(), level: "error", msg: "worker start failed", error: err instanceof Error ? err.message : String(err) }));
   }
+  // v2.39.0 (§A4, docs/OPTIMIZATION-PROPOSAL.md): бюджетный прогрев после
+  // старта — top-20 сессий/поездок + rollup 7 дней + ensure StatsRollup DDL.
+  // Fire-and-forget: любые ошибки глотаются ВНУТРИ (при исчерпанной квоте D1
+  // прогрев тихо деградирует — старт не место для падений).
+  try {
+    const { runStartupWarmup } = await import("./lib/warmup");
+    void runStartupWarmup().catch(() => {});
+  } catch {
+    // сам импорт упал (битый бандл) — молча: прогрев опционален
+  }
 }

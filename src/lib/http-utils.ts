@@ -150,3 +150,65 @@ export function maskIp(ip: string): string {
   }
   return ip.length > 12 ? `${ip.slice(0, 8)}…` : ip;
 }
+
+// ——— v2.39.0 (§A2, docs/OPTIMIZATION-PROPOSAL.md): HTTP-кэширование ответов ———
+// Слабый ETag + Cache-Control: private, max-age=30, stale-while-revalidate=60
+// на GET /api/stats и /api/trips/batch: при совпадении If-None-Match — 304 с
+// пустым телом (почти бесплатный ответ и для клиента, и для квоты D1: кэш
+// роута не пересчитывается). Хэш считается ОДИН РАЗ при заполнении TTL-кэша
+// роута (не на каждом ответе) — helpers ниже принимают готовую строку.
+// Прежняя json() НЕ меняется (no-store по умолчанию для приватных ответов —
+// F12): ETag-ответы — отдельный, оптически явный слой для двух кэшируемых роутов.
+
+/** Значение Cache-Control для кэшируемых приватных GET (§A2). */
+export const CACHE_CONTROL_PRIVATE_SWR = "private, max-age=30, stale-while-revalidate=60";
+
+/**
+ * Слабый ETag по строке-входу (скоп + «сегодня»-корзина + сериализованный JSON
+// ответа — вызывающий склеивает их сам). SHA-256 → 16 байт hex, префикс W/.
+ * Web Crypto — Edge-safe (тот же приём, что db.ts v2.9.10).
+ */
+export async function computeWeakEtag(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  const hex = Array.from(new Uint8Array(digest).slice(0, 16))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `W/"${hex}"`;
+}
+
+/**
+ * Совпадение If-None-Match с ETag (RFC 9110 §13.1.2, мягкий разбор):
+ * список через запятую, необязательные W/-префиксы сравниваются без учёта
+ * слабости (слабые сравнения — легальны для If-None-Match), «*» матчит всё.
+ */
+export function ifNoneMatchMatches(headerValue: string | null, etag: string): boolean {
+  if (!headerValue) return false;
+  const raw = headerValue.trim();
+  if (raw === "*") return true;
+  const stripWeak = (s: string) => s.trim().replace(/^W\//, "");
+  const target = stripWeak(etag);
+  return raw.split(",").some((candidate) => stripWeak(candidate) === target);
+}
+
+/**
+ * JSON-ответ с ETag/Cache-Control ЛИБО 304 при If-None-Match-совпадении
+ * (пустое тело, заголовки ETag/Cache-Control сохраняются — §A2). 304 не
+ * допускает тела; X-Request-Id и прочие headers сохраняются в обоих ветках.
+ */
+export function jsonWithEtag(
+  body: unknown,
+  etag: string,
+  request: NextRequest,
+  status = 200,
+  headers?: Record<string, string>
+): NextResponse {
+  const baseHeaders: Record<string, string> = {
+    Etag: etag,
+    "Cache-Control": CACHE_CONTROL_PRIVATE_SWR,
+    ...headers,
+  };
+  if (ifNoneMatchMatches(request.headers.get("if-none-match"), etag)) {
+    return new NextResponse(null, { status: 304, headers: baseHeaders });
+  }
+  return NextResponse.json(body, { status, headers: { ...baseHeaders } });
+}

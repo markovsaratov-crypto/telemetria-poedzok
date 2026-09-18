@@ -26,9 +26,10 @@
 "use client";
 
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query"; // v2.39.0 (§A5): prefetch статов при hover
 import { ZipImport } from "@/components/zip-import";
 import { useSessions, useSessionStats, useSessionsStatsBatch, isStatsBatchCovered, useReverseGeocode, SESSION_STATUS_RU, type SessionStats } from "@/lib/hooks";
-import type { SessionListItem } from "@/lib/api-client";
+import { api, type SessionListItem } from "@/lib/api-client"; // v2.39.0 (§A5): api — prefetch trip-stats
 import { useTrips, useTripsStatsBatch, useTripStats, useDeleteTrip } from "@/lib/trip-hooks"; // v2.26.0: ПОЕЗДКИ сервера; v2.30.0: удаление
 import { ShareButton } from "@/components/v4/share-button"; // v2.38.1 (ревью F22): вход в share-фичу
 import { ecoCls, ecoBandLabel, ecoBadgeTip } from "@/lib/v4-utils";
@@ -148,6 +149,8 @@ export function TripsView({
   const isError = sessions.isError;
   // v2.14.0 (Ф1): группы-поездки — мемо, чтобы не пересчитывать на каждый рендер
   const groups = React.useMemo(() => groupIntoTrips(list), [list]);
+  // v2.39.0 (§A5): окно рендера легаси-списка групп
+  const [visibleGroups, showMoreGroups] = useWindowedCount(groups.length, TRIPS_WINDOW_INITIAL, TRIPS_WINDOW_STEP);
 
   // v2.17.0 (батч-статс): статы ВСЕХ записей вкладки — одним GET /api/stats/batch
   // (вместо N× /api/sessions/[id]/stats, что на проде давало 40–60 с полной
@@ -248,7 +251,10 @@ export function TripsView({
         <>
           <StaleDataBanner list={list} onGoAdmin={onGoAdmin} />
           <TripsSummary list={list} groups={groups} />
-          {groups.map((g) =>
+          {/* v2.39.0 (§A5): окно рендера легаси-списка (группы записей) —
+              серверный список выше приоритетен, фолбэк-режим тоже не должен
+              рендерить всё сразу при росте лимита */}
+          {groups.slice(0, visibleGroups).map((g) =>
             g.sessions.length === 1 ? (
               <TripCard
                 key={g.sessions[0].id}
@@ -269,6 +275,9 @@ export function TripsView({
               />
             )
           )}
+          {visibleGroups < groups.length ? (
+            <LoadMore onMore={showMoreGroups} remaining={groups.length - visibleGroups} />
+          ) : null}
         </>
       )}
       {/* v2.26.2: импорт ZIP для зарегистрированных пользователей — восстановление
@@ -475,6 +484,68 @@ function TripsSummary({
 }
 
 // Hidden helper — fetches per-session stats and aggregates totals.
+// ——— v2.39.0 (§A5, docs/OPTIMIZATION-PROPOSAL.md): фронтенд-скорость ———
+// Длинные списки рендерятся ОКНОМ (первые N карточек, автодозагрузка
+// IntersectionObserver'ом + кнопкой-фолбэком) без новых npm-пакетов; строки
+// получают CSS content-visibility:auto + contain-intrinsic-size — браузер
+// пропускает layout/paint карточек вне вьюпорта (INP/LCP на мобильных).
+// Константы §A5 (окно/шаг/запас прогрева скролла):
+const TRIPS_WINDOW_INITIAL = 50; // первые N карточек списка
+const TRIPS_WINDOW_STEP = 50; // дозагрузка порциями
+const FRAGMENTS_WINDOW_INITIAL = 40; // строки-фрагменты раскрытой группы
+const FRAGMENTS_WINDOW_STEP = 40;
+const LOAD_MORE_ROOT_MARGIN = "600px"; // предзагрузка до появления в вьюпорте
+
+/** Общий style-объект карточки: content-visibility + стабильный скроллбар. */
+const TRIP_CARD_CV_STYLE: React.CSSProperties = {
+  contentVisibility: "auto",
+  containIntrinsicSize: "auto 96px",
+};
+/** Строка-фрагмент (легче карточки — меньше intrinsic). */
+const FRAG_ROW_CV_STYLE: React.CSSProperties = {
+  contentVisibility: "auto",
+  containIntrinsicSize: "auto 36px",
+};
+
+/** Окно рендера: [visibleCount, showMore]; реакция на рост/смену источника. */
+function useWindowedCount(total: number, initial: number, step: number): [number, () => void] {
+  const [count, setCount] = React.useState(Math.min(initial, Math.max(total, 1)));
+  React.useEffect(() => {
+    setCount((c) => (total < initial ? Math.max(c, total) : Math.min(Math.max(c, initial), Math.max(total, initial))));
+  }, [total, initial]);
+  return [Math.min(count, total), () => setCount((c) => Math.min(c + step, total))];
+}
+
+/** Автодозагрузка: IntersectionObserver на сентинеле + кнопка-фолбэк. */
+function LoadMore({ onMore, remaining }: { onMore: () => void; remaining: number }) {
+  const ref = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) onMore();
+      },
+      { rootMargin: LOAD_MORE_ROOT_MARGIN }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [onMore]);
+  return (
+    <div style={{ display: "flex", justifyContent: "center", padding: "14px 0" }}>
+      <button
+        type="button"
+        className="stale-banner-btn"
+        onClick={onMore}
+        aria-label={`Показать ещё ${remaining} ${pluralRu(remaining, ["запись", "записи", "записей"])}`}
+      >
+        Показать ещё {remaining}
+      </button>
+      <div ref={ref} aria-hidden="true" style={{ width: 1, height: 1 }} />
+    </div>
+  );
+}
+
 function SummaryAggregator({
   list,
   onAgg,
@@ -614,7 +685,10 @@ function TripCard({
     );
 
   return (
-    <div className={`trip ${isOpen ? "open" : ""}`}>
+    <div
+      className={`trip ${isOpen ? "open" : ""}`}
+      style={TRIP_CARD_CV_STYLE} /* v2.39.0 (§A5): пропуск рендера вне вьюпорта */
+    >
       <div
         className="trip-head"
         onClick={onToggle}
@@ -752,7 +826,10 @@ function GroupedTripCard({
     );
 
   return (
-    <div className={`trip ${isOpen ? "open" : ""}`}>
+    <div
+      className={`trip ${isOpen ? "open" : ""}`}
+      style={TRIP_CARD_CV_STYLE} /* v2.39.0 (§A5): пропуск рендера вне вьюпорта */
+    >
       <GroupStatsAggregator sessions={sessions} onAgg={setAgg} />
       <div
         className="trip-head"
@@ -1056,12 +1133,18 @@ function GroupedTripBody({
 
 // Строки-фрагменты: время · дистанция · точки · статус. Дистанция подтягивается
 // теми же stats-запросами (queryKey session-stats), точки — из списка сессий.
+// v2.39.0 (§A5): окно рендера (раскрытая группа рабочего дня — десятки строк)
+// + content-visibility на строках.
 function FragmentRows({ sessions }: { sessions: SessionListItem[] }) {
+  const [visible, showMore] = useWindowedCount(sessions.length, FRAGMENTS_WINDOW_INITIAL, FRAGMENTS_WINDOW_STEP);
   return (
     <>
-      {sessions.map((s) => (
+      {sessions.slice(0, visible).map((s) => (
         <FragmentRow key={s.id} session={s} />
       ))}
+      {visible < sessions.length ? (
+        <LoadMore onMore={showMore} remaining={sessions.length - visible} />
+      ) : null}
     </>
   );
 }
@@ -1077,6 +1160,7 @@ function FragmentRow({ session }: { session: SessionListItem }) {
   return (
     <div
       className="frag-row"
+      style={FRAG_ROW_CV_STYLE} /* v2.39.0 (§A5): пропуск рендера вне вьюпорта */
       data-tip={`Запись ${session.id.slice(0, 8)} | ${fmtNumber(pts)} ${pluralRu(pts, ["точка", "точки", "точек"])} GPS · ${SESSION_STATUS_RU[session.status] ?? session.status}`}
     >
       <b className="mono">
@@ -1383,6 +1467,11 @@ function TripsServerView({
   openId: string | null;
   setOpenId: (id: string | null) => void;
 }) {
+  // v2.39.0 (§A5): окно рендера — до условных return'ов (правила хуков);
+  // первые TRIPS_WINDOW_INITIAL карточек, автодозагрузка сентинелом + кнопка
+  // (список обычно ≤50 с сервера — окно страховка роста лимита/легаси-групп:
+  // рендер не должен быть O(всего))
+  const [visibleTrips, showMoreTrips] = useWindowedCount(trips.length, TRIPS_WINDOW_INITIAL, TRIPS_WINDOW_STEP);
   if (isError) {
     return (
       <div className="card" style={{ padding: "20px", color: "var(--red)", fontSize: 13 }}>
@@ -1395,7 +1484,7 @@ function TripsServerView({
     <>
       <StaleTripsBanner trips={trips} onGoAdmin={onGoAdmin} />
       <TripSummaryServer trips={trips} />
-      {trips.map((t) => (
+      {trips.slice(0, visibleTrips).map((t) => (
         <TripEntryCard
           key={t.id}
           trip={t}
@@ -1403,6 +1492,9 @@ function TripsServerView({
           onToggle={() => setOpenId(openId === t.id ? null : t.id)}
         />
       ))}
+      {visibleTrips < trips.length ? (
+        <LoadMore onMore={showMoreTrips} remaining={trips.length - visibleTrips} />
+      ) : null}
     </>
   );
 }
@@ -1526,6 +1618,18 @@ function TripEntryCard({
   const st = stats.data ?? null;
   const dest = useReverseGeocode(trip.endLat ?? null, trip.endLon ?? null);
   const destShort = dest.data?.short ?? null;
+  const qc = useQueryClient();
+  // v2.39.0 (§A5): prefetch ДАННЫХ поездки при hover/touchstart — статы
+  // оказываются в кэше react-query к моменту раскрытия карточки (страниц
+  // поездок в SPA нет — router.prefetch неприменим; кэш запросов — тот же
+  // эффект без задержки раскрытия). Идемпотентно: prefetchQuery не дублирует
+  // летящие запросы.
+  const prefetchTripStats = React.useCallback(() => {
+    void qc.prefetchQuery({
+      queryKey: ["trip-stats", trip.id],
+      queryFn: () => api.get(`/api/trips/${trip.id}`),
+    }).catch(() => {});
+  }, [qc, trip.id]);
 
   const start = new Date(trip.spanStart);
   const dd = String(start.getDate()).padStart(2, "0");
@@ -1568,10 +1672,15 @@ function TripEntryCard({
       : undefined;
 
   return (
-    <div className={`trip ${isOpen ? "open" : ""}`}>
+    <div
+      className={`trip ${isOpen ? "open" : ""}`}
+      style={TRIP_CARD_CV_STYLE} /* v2.39.0 (§A5): пропуск рендера вне вьюпорта */
+    >
       <div
         className="trip-head"
         onClick={onToggle}
+        onPointerEnter={prefetchTripStats} /* v2.39.0 (§A5): prefetch статов при наведении */
+        onTouchStart={prefetchTripStats} /* (touch — предварительная загрузка до тапа) */
         role="button"
         tabIndex={0}
         onKeyDown={(e) => {

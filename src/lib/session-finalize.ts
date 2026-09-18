@@ -14,6 +14,12 @@ import { libsql } from "./db";
 import { logger } from "./logger";
 import { assignTripOnSessionFinalize } from "./trip-grouping"; // v2.26.0 (ТЗ §7): назначение поездок при финализации
 import { warmSessionCache } from "./session-cache"; // v2.27.0: фоновый прогрев кэша предрасчёта
+// v2.39.0 (§A1.5/§B2): инкрементальное обновление rollup дня финализируемой
+// сессии (полный пересчёт мягких полей из statsCache ПОСЛЕ прогрева кэша —
+// дистанция/длительность/эко появляются в rollup) + инвалидация edge-KV
+// префиксом dash: (§B2 — гейтвей-кэш тяжёлых дашборд-запросов).
+import { localDayKey, recomputeRollupRange, todayKey } from "./stats-rollup";
+import { edgeKvInvalidate } from "./edge-gateway";
 
 /**
  * Гарантирует наличие TrafficJob для сессии. Вставляет pending-джоб ТОЛЬКО если
@@ -84,6 +90,31 @@ export async function finalizeSession(sessionId: string): Promise<void> {
         error: err instanceof Error ? err.message : String(err),
       });
     });
+    // v2.39.0 (§A1.5): фоновый пересчёт rollup-дня сессии — обновление мягких
+    // полей (дистанция/длительность/эко из подогретого statsCache; points/sessions
+    // уже посчитаны инкрементами инжеста — полный пересчёт идемпотентно перезапишет).
+    // Инвалидация edge-KV (§B2): тяжёлые дашборд-запросы пересчитаются, TTL-кэш
+    // роута (60с) истечёт сам. Всё fire-and-forget, ошибки глотаются — финализацию
+    // не ронять НИКОГДА.
+    void libsql
+      .execute({ sql: `SELECT startTime, userId FROM Session WHERE id = ?`, args: [sessionId] })
+      .then(async (row) => {
+        const r = row.rows[0] as Record<string, unknown> | undefined;
+        if (!r || r.startTime == null) return;
+        const startMs = Date.parse(String(r.startTime));
+        if (!Number.isFinite(startMs)) return;
+        const day = localDayKey(startMs);
+        // пересчёт небольшого окна (день ± 1 — сессия, начатая до полночи)
+        const from = day < todayKey() ? day : todayKey();
+        await recomputeRollupRange(from, todayKey(), r.userId == null ? null : String(r.userId), {
+          withStatsCache: true,
+        });
+      })
+      .catch(() => {
+        // сбой rollup-обновления не роняет финализацию — полнота восстановится
+        // фоновым heal'ом по полнота-сверке (§A1.4)
+      });
+    edgeKvInvalidate("dash:"); // §B2: fire-and-forget, ошибки глотаются внутри
   }
   logger.info("Session finalized", { sessionId });
 }

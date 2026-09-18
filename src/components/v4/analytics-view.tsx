@@ -49,6 +49,17 @@ import { bindTips } from "./use-v4-tipbox";
 import { SESSIONS_LIST_QUERY } from "./telematika-layout";
 import { BulletChart } from "./widgets/bullet-chart";
 
+// ——— v2.39.0 (§A5, docs/OPTIMIZATION-PROPOSAL.md): фронтенд-скорость ———
+// Тяжёлые секции (спидограмма/карта/G-G — сотни SVG-точек и тайлов) получают
+// content-visibility:auto + contain-intrinsic-size: вне вьюпорта браузер
+// пропускает layout/paint (INP/LCP ↓ на мобильных). Значение 380px — рост
+// секции с картой; auto-префикс запоминает фактический размер после рендера,
+// скроллбар не прыгает.
+const HEAVY_SECTION_CV_STYLE: React.CSSProperties = {
+  contentVisibility: "auto",
+  containIntrinsicSize: "auto 380px",
+};
+
 // v2.10.0 R2: Leaflet MapTrack — dynamic import с ssr: false (Leaflet требует window).
 const V4MapTrack = dynamic(
   () => import("./widgets/map-track").then((m) => m.V4MapTrack),
@@ -1085,7 +1096,9 @@ function SpeedProfileBlock({
   const normalizedBuckets = buckets.map((v) => Math.round((v / totalPct) * 1000) / 10);
 
   return (
-    <section>
+    <section
+      style={HEAVY_SECTION_CV_STYLE} /* v2.39.0 (§A5): тяжёлая секция — пропуск рендера вне вьюпорта */
+    >
       <div className="sec-head">
         <span className="sec-num">03</span>
         <span className="sec-title">Скоростной профиль{aggregated ? " · все поездки" : ""}</span>
@@ -1551,7 +1564,9 @@ function MapBlock({
   aggregated?: boolean;
 }) {
   return (
-    <section>
+    <section
+      style={HEAVY_SECTION_CV_STYLE} /* v2.39.0 (§A5): тяжёлая секция (карта+трек) — вне вьюпорта */
+    >
       <div className="sec-head">
         <span className="sec-num">05</span>
         <span className="sec-title">{aggregated ? "Карта поездок за период" : "Карта поездки"}</span>
@@ -1620,7 +1635,9 @@ function BehaviorBlock({
   const ggPointsCount = events?.gg?.points?.length ?? 0;
 
   return (
-    <section>
+    <section
+      style={HEAVY_SECTION_CV_STYLE} /* v2.39.0 (§A5): тяжёлая секция (G-G/события) — вне вьюпорта */
+    >
       <div className="sec-head">
         <span className="sec-num">06</span>
         <span className="sec-title">Поведение и манёвры</span>

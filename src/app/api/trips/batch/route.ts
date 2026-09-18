@@ -11,7 +11,7 @@
 import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
 import { dataScopeFor } from "@/lib/scope";
-import { json } from "@/lib/http-utils";
+import { json, jsonWithEtag, computeWeakEtag } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { getCorpusEcoBaselines } from "@/lib/eco-corpus";
 import { parseBatchIds, batchCacheKey } from "@/lib/batch-points";
@@ -20,7 +20,14 @@ import { trackLatency } from "@/lib/latency";
 import { tripsEnabled } from "@/lib/trip-grouping";
 import { loadTripById, computeTripStats, type TripStatsPayload } from "@/lib/trip-stats";
 
-const CACHE = getTtlCache<{ stats: Record<string, unknown>[]; missing: string[] }>("trips-stats-batch", 30_000);
+// v2.39.0 (§A2): кэш хранит {body, etag} — слабый ETag считается один раз при
+// заполнении TTL-кэша; ответы отдаются через jsonWithEtag (If-None-Match → 304,
+// заголовки ETag + Cache-Control: private, max-age=30, stale-while-revalidate=60).
+interface TripsBatchCacheEntry {
+  body: { stats: Record<string, unknown>[]; missing: string[] };
+  etag: string;
+}
+const CACHE = getTtlCache<TripsBatchCacheEntry>("trips-stats-batch", 30_000);
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -44,7 +51,9 @@ export async function GET(request: NextRequest) {
     const cached = CACHE.get(cacheKey);
     if (cached) {
       trackLatency(request);
-      return json(cached, 200, { "X-Request-Id": requestId, "X-Cache": "ttl" });
+      // v2.39.0 (§A2): 304 при совпадении If-None-Match — повторный опрос вкладки
+      // «Поездки» почти бесплатен (квота D1 не тратится на пересчёт)
+      return jsonWithEtag(cached.body, cached.etag, request, 200, { "X-Request-Id": requestId, "X-Cache": "ttl" });
     }
 
     const baselines = await getCorpusEcoBaselines(); // ОДНА corpus-калибровка на батч (§7.3)
@@ -74,9 +83,11 @@ export async function GET(request: NextRequest) {
     }
 
     const body = { stats, missing };
-    CACHE.set(cacheKey, body);
+    // v2.39.0 (§A2): хэш — скоуп+ids+JSON, считается при заполнении кэша один раз
+    const etag = await computeWeakEtag(`${cacheKey}|${JSON.stringify(body)}`);
+    CACHE.set(cacheKey, { body, etag });
     trackLatency(request);
-    return json(body, 200, { "X-Request-Id": requestId });
+    return jsonWithEtag(body, etag, request, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Trips batch error", { requestId, error: err instanceof Error ? err.message : String(err) });
     return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });

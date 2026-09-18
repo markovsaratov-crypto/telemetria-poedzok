@@ -10,6 +10,8 @@
 
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api, type TripListItem, type TripStats } from "./api-client";
+// v2.39.0 (§A3): смарт-опрос — база 60 с (было 30 с), пауза при hidden, backoff
+import { useSmartPollInterval } from "./poll-controller";
 
 export interface TripsListResponse {
   trips: TripListItem[];
@@ -23,11 +25,14 @@ interface TripsBatchResponse {
 }
 
 export function useTrips(params?: { limit?: number }) {
+  // v2.39.0 (§A3): смарт-интервал (база 60 с — квота D1 живёт дольше; полная
+  // пауза при hidden, backoff ×2 при 429/5xx; логика запроса прежняя)
+  const poll = useSmartPollInterval([["trips", "list", params?.limit ?? 50]]);
   return useQuery<TripsListResponse>({
     queryKey: ["trips", "list", params?.limit ?? 50],
     queryFn: () => api.get<TripsListResponse>("/api/trips", { limit: params?.limit ?? 50 }),
-    staleTime: 30_000, // как useSessions: живое обновление вкладки — 30с poll
-    refetchInterval: 30_000,
+    staleTime: 30_000, // живое обновление вкладки — смарт-опрос (§A3)
+    refetchInterval: poll,
     retry: 1,
   });
 }

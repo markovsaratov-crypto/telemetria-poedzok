@@ -16,6 +16,8 @@ import { parseTimestamp } from "@/lib/parse-timestamp"; // v2.38.2 (ревью F
 import { MAX_TRUSTED_ACCURACY_M } from "@/lib/kpi"; // v2.38.2 (ревью F38): единый порог точности точек (100 м, AUDIT B-5)
 // v2.38.1 (ревью F11): extractBearer + resolveIngestToken — единая проверка инжест-токенов
 import { extractBearer, resolveIngestToken } from "@/lib/auth";
+// v2.39.0 (§A1.5): инкремент rollup-дня при создании сессии (sessions+1, points+N)
+import { bumpRollup, localDayKey } from "@/lib/stats-rollup";
 
 // v2.38.2 (ревью F38): окно правдоподобия времени точки (±24 ч от серверного
 // now) — зеркально sensorlogger-каналу (R7): таймстемы 1970/будущего больше
@@ -246,6 +248,14 @@ export async function POST(request: NextRequest) {
     }
 
     inc("ingest_total", "Total ingest requests", 1);
+    // v2.39.0 (§A1.5): инкремент rollup дня старта сессии (TELEMAT-бакет) —
+    // fire-and-forget, сбой глотается (день доберёт фоновый heal/бэкфилл);
+    // идемпотентность инжеста по (deviceId, clientId) уже отсекла дубли —
+    // повторный ретрай сюда не доходит.
+    void bumpRollup(localDayKey(filtered[0].timestampMs), ingestUserId, {
+      sessions: 1,
+      points: filtered.length,
+    });
     recordIngestAttempt({
       at: new Date().toISOString(), route: "ingest", deviceId,
       // v2.38.2 (ревью F38): dropped — ЧЕСТНЫЙ счётчик отброшенных точек

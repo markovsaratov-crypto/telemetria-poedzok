@@ -10,7 +10,7 @@ import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { authorizeRequest } from "@/lib/auth";
 import { dataScopeFor, sessionScopeWhere } from "@/lib/scope";
-import { json } from "@/lib/http-utils";
+import { json, jsonWithEtag, computeWeakEtag } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { env } from "@/lib/env";
 import { readIngestTrace, readIngestRaw } from "@/lib/ingest-trace"; // DIAG-1: трассировка; v2.10.8: сырой дамп по ?ingestRaw=1
@@ -19,6 +19,14 @@ import { libsql } from "@/lib/db";
 import type { DataScope } from "@/lib/scope";
 import { getTtlCache } from "@/lib/ttl-cache"; // v2.38.2 · F46: TTL-кэш тяжёлых агрегатов
 import { trackLatency } from "@/lib/latency"; // v2.38.2 · F43: p95 дашбордных роутов
+// v2.39.0 (§A1/§B2): rollup-агрегаты и edge-KV тяжёлых SELECT
+import {
+  readRollupSummary,
+  rollupIsUsable,
+  sessionScopeCounters,
+  healRollupInBackground,
+} from "@/lib/stats-rollup";
+import { edgeKvQuery } from "@/lib/edge-gateway";
 
 // v2.38.2 · F46: короткий TTL-кэш (60 с) ответа дашборда. Каждый вызов без кэша —
 // COUNT(*) по ВСЕМ GpsPoint живых сессий + heatmap до 5000 строк + 7 параллельных
@@ -33,7 +41,19 @@ import { trackLatency } from "@/lib/latency"; // v2.38.2 · F43: p95 дашбо�
 // переворачиваются мгновенно, не через TTL. Рестарт/мультиинстанс — кэш холодный
 // (in-memory, как у батч-роутов). ingestTrace отдаётся с лагом ≤ 60 с —
 // приемлемо для дебаг-канала.
-const STATS_CACHE = getTtlCache<Record<string, unknown>>("stats-dashboard", 60_000, 64);
+// v2.39.0 (§A2): значение кэша теперь {payload, etag} — слабый ETag считается
+// ОДИН РАЗ при заполнении кэша (вход: ключ кэша + сериализованный JSON), ответ
+// отдаётся через jsonWithEtag: If-None-Match-совпадение → 304 (пустое тело,
+// ETag + Cache-Control сохраняются).
+interface StatsCacheEntry {
+  payload: Record<string, unknown>;
+  etag: string;
+}
+const STATS_CACHE = getTtlCache<StatsCacheEntry>("stats-dashboard", 60_000, 64);
+
+// v2.39.0 (§B2): версия схемы KV-ключей edge-кэша (инфраструктурная: смена
+// формата ответа тяжёлых запросов → bump, старые KV-записи игнорируются).
+const EDGE_CACHE_VERSION = 1;
 
 // v2.26.0: число поездок в зоне видимости (опционально от fromMs — «сегодня»)
 async function countTripsForScope(scope: DataScope, from?: Date): Promise<number> {
@@ -100,6 +120,116 @@ async function countRoutesForScope(scope: DataScope): Promise<number> {
   return Number((res.rows[0] as Record<string, unknown>).c);
 }
 
+// v2.39.0 (§A1/§B2): каскад тяжёлых счётчиков дашборда — rollup → edge-KV →
+// прежний прямой путь v2.38.2. ЛЮБОЙ сбой верхних слоёв тихо деградирует вниз;
+// дашборд не имеет права упасть (главное требование задачи).
+//   1. StatsRollup (§A1): SUM(points) O(дней) вместо COUNT(*) по GpsPoint.
+//      Честность гарантируется сверкой с лёгким счётчиком маленькой таблицы
+//      Session: SUM(rollup.sessions)==COUNT(Session) И rollup свежее
+//      MAX(Session.updatedAt). При расхождении — фоновый heal + fallback.
+//   2. edgeKvQuery (§B2): тот же тяжёлый COUNT, но 30 с в KV гейтвея
+//      (квота D1 не тратится на промахах повторов).
+//   3. Прежний db.gpsPoint.count (v2.38.2) — последний эшелон.
+async function computeTotalPoints(scope: DataScope, scopeKey: string, dayBucket: number): Promise<number> {
+  // — 1. rollup —
+  try {
+    const [summary, sessionCounters] = await Promise.all([
+      readRollupSummary(scope),
+      sessionScopeCounters(scope),
+    ]);
+    if (summary != null && sessionCounters != null) {
+      if (rollupIsUsable(summary, sessionCounters.count, sessionCounters.maxUpdatedAt)) {
+        return summary.points;
+      }
+      // неполон/несвеж — фоновое самолечение (кулдаун 60с внутри), ответ прежним путём
+      healRollupInBackground(scope);
+    }
+  } catch {
+    // rollup-ветка обязана молчать (внутри уже warn-лог), дашборд не падает
+  }
+  // — 2. edge-KV (только SELECT; гейтвей до обновления ответит 404 → kv:"error") —
+  try {
+    const res = await edgeKvQuery(
+      `dash:${scopeKey}:${dayBucket}:points:v${EDGE_CACHE_VERSION}`,
+      `SELECT COUNT(*) AS c FROM GpsPoint WHERE sessionId IN (SELECT id FROM Session WHERE deletedAt IS NULL${
+        scope.mode === "own" ? " AND userId = ?" : scope.mode === "unclaimed" ? " AND userId IS NULL" : ""
+      })`,
+      scope.mode === "own" ? [scope.userId] : [],
+      30
+    );
+    const c = Number((res.rows[0] as Record<string, unknown> | undefined)?.c);
+    if (res.kv !== "error" && Number.isFinite(c)) return c;
+  } catch {
+    // edge-KV и прямой путь не ответили — идём в прежний путь ниже
+  }
+  // — 3. прежний путь v2.38.2 —
+  return db.gpsPoint.count({ where: { session: { deletedAt: null, ...sessionScopeWhere(scope) } } });
+}
+
+// v2.39.0 (§A1): heatmap за 12 недель — из rollup O(дней) (при полноте) — по дневным
+// строкам {day → startTime+pointCount}; fallback — прежний findMany (до 5000 строк).
+// Поле НИГДЕ на фронте не потребляется (0 потребителей, проверено v2.18.0
+// и повторно v2.39.0) — формат {startTime, pointCount} сохранён для обратной
+// совместимости внешних потребителей: одна «сессия» = один день rollup.
+async function computeHeatmap(
+  scope: DataScope,
+  scopeKey: string,
+  dayBucket: number,
+  twelveWeeksAgo: Date
+): Promise<Array<{ startTime: string; pointCount: number }>> {
+  // — 1. rollup (достаточно полноты — те же критерии, что totalPoints) —
+  try {
+    const [summary, sessionCounters] = await Promise.all([
+      readRollupSummary(scope),
+      sessionScopeCounters(scope),
+    ]);
+    if (summary != null && sessionCounters != null) {
+      if (rollupIsUsable(summary, sessionCounters.count, sessionCounters.maxUpdatedAt)) {
+        // строки дней: локальная полночь дня в TELEMAT → ISO (дата видна той же,
+        // что у прежних сессий этого дня)
+        return summary.recentDays.map((d) => ({
+          startTime: `${d.day}T00:00:00.000Z`,
+          pointCount: d.points,
+        }));
+      }
+      healRollupInBackground(scope);
+    }
+  } catch {
+    // молча: ниже edge-KV и прежний путь
+  }
+  // — 2. edge-KV прежнего запроса —
+  try {
+    const sc =
+      scope.mode === "own"
+        ? { clause: " AND userId = ?", args: [scope.userId] as unknown[] }
+        : scope.mode === "unclaimed"
+          ? { clause: " AND userId IS NULL", args: [] as unknown[] }
+          : { clause: "", args: [] as unknown[] };
+    const res = await edgeKvQuery(
+      `dash:${scopeKey}:${dayBucket}:heatmap:v${EDGE_CACHE_VERSION}`,
+      `SELECT startTime, pointCount FROM Session WHERE deletedAt IS NULL AND startTime >= ?${sc.clause} ORDER BY startTime ASC LIMIT 5000`,
+      [twelveWeeksAgo.toISOString(), ...sc.args],
+      30
+    );
+    if (res.kv !== "error") {
+      return (res.rows as Record<string, unknown>[]).map((r) => ({
+        startTime: String(r.startTime ?? ""),
+        pointCount: Number(r.pointCount ?? 0),
+      }));
+    }
+  } catch {
+    // ниже прежний путь
+  }
+  // — 3. прежний путь v2.38.2 (включая лимит АУДИТ C-7) —
+  const rows = await db.session.findMany({
+    where: { startTime: { gte: twelveWeeksAgo }, deletedAt: null, ...sessionScopeWhere(scope) },
+    select: { startTime: true, pointCount: true },
+    orderBy: { startTime: "asc" },
+    take: 5000,
+  });
+  return rows.map((s) => ({ startTime: String(s.startTime ?? ""), pointCount: Number(s.pointCount ?? 0) }));
+}
+
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   try {
@@ -128,13 +258,17 @@ export async function GET(request: NextRequest) {
 
     // v2.38.2 · F46: ключ = скоуп + «сегодня»-корзина клиента (переворот в
     // полночь tz) + параметры. Попадание — готовый ответ без агрегатов.
+    // v2.39.0 (§A2): кэш хранит {payload, etag}; 304 отдаётся прямо из кэша.
     const dayBucket = Math.floor((Date.now() - tzMs) / 86_400_000);
     const scopeKey = scope.mode === "own" ? `own:${scope.userId}` : scope.mode === "unclaimed" ? "unclaimed" : "all";
     const cacheKey = `${scopeKey}|day:${dayBucket}|tz:${tzOffsetMin}|raw:${wantRaw ? 1 : 0}`;
     const cached = STATS_CACHE.get(cacheKey);
     if (cached) {
       trackLatency(request); // v2.38.2 · F43: кэшированный ответ тоже в p95
-      return json(cached, 200, { "X-Request-Id": requestId, "X-Cache": "ttl" });
+      return jsonWithEtag(cached.payload, cached.etag, request, 200, {
+        "X-Request-Id": requestId,
+        "X-Cache": "ttl",
+      });
     }
 
     // All-time stats
@@ -145,15 +279,18 @@ export async function GET(request: NextRequest) {
     // v2.26.0 (ТЗ §10): + счётчики ПОЕЗДОК (tripsCount) — «поездки» = Trip;
     // totalSessions/todaySessions сохраняются как «записи» (обратная совместимость).
     // v2.29.0 (MI-4): totalRoutes/TrafficJob — тоже в скоупе запрашивающего.
-    const [totalSessions, totalPoints, totalRoutes, totalTrafficJobs, deadJobs, pendingJobs, totalTrips] = await Promise.all([
+    // v2.39.0 (§A1): totalPoints/heatmap ВЫНЕСЕНЫ из Promise.all — каскад
+    // rollup → edge-KV → прямой (см. computeTotalPoints/computeHeatmap); лёгкие
+    // счётчики маленьких таблиц (Session/Trip/Route/TrafficJob) не рефакторятся.
+    const [totalSessions, totalRoutes, totalTrafficJobs, deadJobs, pendingJobs, totalTrips] = await Promise.all([
       db.session.count({ where: { deletedAt: null, ...scopeW } }),
-      db.gpsPoint.count({ where: { session: { deletedAt: null, ...scopeW } } }),
       countRoutesForScope(scope),
       countTrafficJobsForScope(scope, null),
       countTrafficJobsForScope(scope, "dead"),
       countTrafficJobsForScope(scope, "pending"),
       tripsEnabled() ? countTripsForScope(scope) : Promise.resolve(0),
     ]);
+    const totalPoints = await computeTotalPoints(scope, scopeKey, dayBucket);
 
     // Today
     // v2.16.0 (I4): независимые запросы — параллельно (было 4
@@ -162,7 +299,7 @@ export async function GET(request: NextRequest) {
     twelveWeeksAgo.setDate(twelveWeeksAgo.getDate() - 84); // v2.16.0 (V4): имя = суть (12 недель, не «30 дней»)
     // v2.29.0 (MI-3 кодревью): recentSessions (findMany до 5000 строк) удалён —
     // выбирался на каждый 30-сек poll и НИГДЕ не использовался (0 потребителей).
-    const [todaySessions, totalBytesResult, heatmapSessions, ingestTrace, todayTrips] = await Promise.all([
+    const [todaySessions, totalBytesResult, ingestTrace, todayTrips] = await Promise.all([
       db.session.count({
         where: { startTime: { gte: new Date(todayStartMs) }, deletedAt: null, ...scopeW },
       }),
@@ -170,14 +307,6 @@ export async function GET(request: NextRequest) {
       db.session.aggregate({
         _sum: { payloadBytes: true },
         ...(scope.mode === "own" ? { where: { userId: scope.userId } } : scope.mode === "unclaimed" ? { where: { userId: null } } : {}),
-      }),
-      db.session.findMany({
-        where: { startTime: { gte: twelveWeeksAgo }, deletedAt: null, ...scopeW },
-        select: { startTime: true, pointCount: true },
-        orderBy: { startTime: "asc" },
-        // v2.11.0 (АУДИТ C-7): явный лимит — тихий дефолт 20 в обёртке резал
-        // 12-недельную тепловую карту до 20 сессий
-        take: 5000,
       }),
       // v2.23.0: трейс инжеста — только владельцу/админу (это дебаг-канал
       // владельца: deviceId и сырое тело батчей его телефона)
@@ -190,6 +319,9 @@ export async function GET(request: NextRequest) {
         ? countTripsForScope(scope, new Date(todayStartMs))
         : Promise.resolve(0),
     ]);
+    // v2.39.0 (§A1/§B2): heatmap — каскадом rollup → edge-KV → прежний findMany
+    // (до 84 строк дней из rollup вместо до 5000 сессий)
+    const heatmapSessions = await computeHeatmap(scope, scopeKey, dayBucket, twelveWeeksAgo);
 
     // v2.10.8: полный дамп последнего нераспознанного батча — ТОЛЬКО по
     // ?ingestRaw=1 (см. разбор параметров выше — v2.38.2 · F46)
@@ -210,10 +342,9 @@ export async function GET(request: NextRequest) {
         totalTrips,
         todayTrips,
         totalPayloadBytes: totalBytesResult._sum.payloadBytes || 0,
-        heatmapSessions: heatmapSessions.map((s) => ({
-          startTime: String(s.startTime ?? ""),
-          pointCount: Number(s.pointCount ?? 0),
-        })),
+        // v2.39.0 (§A1): при rollup-пути — дневные агрегаты (до 84 строк),
+        // при fallback — прежние посессионные; формат идентичен
+        heatmapSessions,
         // Capacity info (блокер №1 — отображение в UI)
         capacity: {
           targetLoadRpm: env().TARGET_LOAD_RPM,
@@ -227,14 +358,14 @@ export async function GET(request: NextRequest) {
         ...(wantRaw ? { ingestRaw } : {}),
       };
 
-    STATS_CACHE.set(cacheKey, payload); // v2.38.2 · F46: revalidate-on-miss — следующий запрос в окне уже из кэша
+    // v2.39.0 (§A2): ETag — считается ОДИН раз при заполнении TTL-кэша
+    // (вход: ключ кэша (скоп+корзина+параметры) + сериализованный JSON);
+    // кэш хранит {payload, etag} — повторные ответы и 304 из кэша бесплатны.
+    const etag = await computeWeakEtag(`${cacheKey}|${JSON.stringify(payload)}`);
+    STATS_CACHE.set(cacheKey, { payload, etag }); // v2.38.2 · F46: revalidate-on-miss — следующий запрос в окне уже из кэша
     trackLatency(request); // v2.38.2 · F43: свежевычисленный ответ дашборда в p95
 
-    return json(
-      payload,
-      200,
-      { "X-Request-Id": requestId }
-    );
+    return jsonWithEtag(payload, etag, request, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Stats error", { requestId, error: err instanceof Error ? err.message : String(err) });
     return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });

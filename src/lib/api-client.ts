@@ -3,6 +3,10 @@
 // 401 → выставляем auth-флаг через callback (page.tsx слушает), 429 → toast, 500 → toast с requestId.
 
 import { toast } from "sonner";
+// v2.39.0 (§A3): доклады об исходах запросов в poll-controller — смарт-опрос
+// (backoff ×2 при 429/5xx, сброс при успехе). Только слой опроса — рабочая
+// логика запросов/стора не меняется.
+import { reportPollFailure, reportPollSuccess } from "./poll-controller";
 
 export class ApiError extends Error {
   status: number;
@@ -139,6 +143,8 @@ async function apiFetch<T = unknown>(
       credentials: "include",
     });
   } catch (err) {
+    // v2.39.0 (§A3): сетевая недоступность — тоже backoff-событие (status 0)
+    reportPollFailure(0);
     toastErrorThrottled("Сеть недоступна", {
       description: err instanceof Error ? err.message : "Не удалось связаться с сервером",
     });
@@ -162,6 +168,8 @@ async function apiFetch<T = unknown>(
   if (res.status === 429) {
     const body = (await parseBody(res, expect)) as { error?: string; retryAfter?: number } | null;
     const retryAfter = body?.retryAfter || Number(res.headers.get("retry-after")) || 60;
+    // v2.39.0 (§A3): опрос узнаёт о throttling — backoff уважает Retry-After
+    reportPollFailure(429, retryAfter * 1000);
     toastErrorThrottled("Слишком много запросов", {
       description: `Повторите через ${humanizeRetryAfter(retryAfter)}.`,
     });
@@ -170,6 +178,8 @@ async function apiFetch<T = unknown>(
 
   // 5xx
   if (res.status >= 500) {
+    // v2.39.0 (§A3): сервер в outage — backoff опроса ×2
+    reportPollFailure(res.status);
     const body = (await parseBody(res, expect)) as { error?: string } | null;
     toastErrorThrottled("Ошибка сервера", {
       description: requestId ? `Request ID: ${requestId}` : body?.error || "Внутренняя ошибка",
@@ -191,6 +201,8 @@ async function apiFetch<T = unknown>(
   }
 
   const data = await parseBody(res, expect);
+  // v2.39.0 (§A3): успех сбрасывает backoff опроса к базовым 60 с
+  reportPollSuccess();
   return data as T;
 }
 

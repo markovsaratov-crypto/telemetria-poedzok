@@ -316,3 +316,34 @@ model IngestMessage {
   @@id([deviceId, messageId])
   @@index([firstSeenAt])
 }
+
+// v2.39.0 (§A1, docs/OPTIMIZATION-PROPOSAL.md Вариант A): дневные rollup-агрегаты
+// дашборда — materialized-rollup паттерн (CQRS-lite): дашборд читает O(дней) строк
+// StatsRollup вместо COUNT(*) по всей GpsPoint (главный удар по дневной квоте
+// чтений D1). day — YYYY-MM-DD в TZ владельца (TELEMAT_TIMEZONE, паттерн TZ-бакетов
+// v2.38.2 §F68); userId NULL = «все/unclaimed» (как Session.userId, модель
+// владения v2.23.0). Пишется: (а) инкрементами инжеста (points+N, sessions+N),
+// (б) ленивым cache-aside-заполнением/бэкфиллом из Session (SUM(pointCount) —
+// денормализация v2.26+, дистанция/длительность/эко — из Session.statsCache).
+// РЕАЛЬНОЕ DDL — идемпотентный ensure-on-boot в src/lib/stats-rollup.ts
+// (паттерн _AlertState/ensureSessionIndexes F50: вайтлист DDL шлюза может
+// требовать расширения; Prisma здесь — только типы, как у рантайм-таблиц).
+// NB: в ТЗ §A1 поле значилось как `userId String?` (NULL = unclaimed), но
+// SQLite не детектит ON CONFLICT по NULL-компоненте PK (NULL ≠ NULL → дубли
+// и потерянные инкременты) — поэтому НЕ-NULL с sentinel-пустой строкой:
+// userId = "" означает «unclaimed/все» (семантика Session.userId IS NULL
+// сохранена на уровне API-конвертации rollupUserId(scope) ниже по стеку).
+model StatsRollup {
+  day         String   // YYYY-MM-DD в TELEMAT_TIMEZONE
+  userId      String   @default("") // "" = все/unclaimed (см. NB выше)
+  sessions    Int      @default(0)
+  points      Int      @default(0)
+  distanceM   Float    @default(0)
+  durationSec Int      @default(0)
+  ecoSum      Float    @default(0)
+  ecoCount    Int      @default(0)
+  updatedAt   DateTime
+
+  @@id([day, userId])
+  @@index([userId, day])
+}

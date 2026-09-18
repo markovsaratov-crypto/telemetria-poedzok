@@ -488,6 +488,9 @@ const CRON_SCHEDULES = {
   "30 3 * * *": ["backup"],
   "0 4 * * SUN": ["backup-github"],
 };
+const CRON_SCHEDULES_BY_NORM = new Map(
+  Object.entries(CRON_SCHEDULES).map(([expr, jobs]) => [normalizeCron(expr), jobs])
+);
 const CRON_APP_PATHS = {
   tick: "/api/worker/tick",
   "finalize-sessions": "/api/cron/finalize-sessions",
@@ -1010,7 +1013,10 @@ const worker = {
   // внутренний шаг мигратора Turso) → запись cron:last:<job> в KV
   // (наблюдаемость через GET /admin/cron-status) + структурный лог.
   async scheduled(controller, env, ctx) {
-    const jobs = CRON_SCHEDULES[normalizeCron(controller.cron)] ?? [];
+    // нормализуем ОБЕ стороны (ключи карты и controller.cron): CF может
+    // прислать выражение как в канонической форме («* * * * *»), так и
+    // дословно («*/1 * * * *») — точное сравнение ненадёжно в обе стороны.
+    const jobs = CRON_SCHEDULES_BY_NORM.get(normalizeCron(controller.cron)) ?? [];
     const run = (async () => {
       const results = {};
       for (const job of jobs) {

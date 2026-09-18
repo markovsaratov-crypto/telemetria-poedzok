@@ -45,7 +45,10 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-useless-escape": "off",
   },
 }, {
-  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills"]
+  // v2.40.0 (§B6): + артефакты OpenNext/wrangler-сборки (локальный eslint
+  // сканировал 86k-строчные минифицированные бандлы .open-next и падал OOM;
+  // на CI их нет — .gitignore)
+  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills", ".open-next/**", ".wrangler/**"]
 }];
 
 export default eslintConfig;

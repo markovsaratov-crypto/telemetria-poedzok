@@ -470,6 +470,17 @@ async function handleKvInvalidate(env, body) {
 // NB: free-план CF — максимум 5 cron-триггеров на аккаунт, поэтому мигратор
 // Turso-дельты свёрнут в общий */5-триггер (шаги миграции троттлятся состоянием
 // в KV: blocked → только проба чтения; running → один шаг на тик).
+// Нормализация: CF присылает controller.cron в канонической форме («* * * * *»
+// вместо «*/1 * * * *», «0» вместо «SUN») — сверяем через нормализатор обе
+// стороны, чтобы диспетчер не промахнулся по формату строки.
+function normalizeCron(expr) {
+  const parts = String(expr).trim().split(/\s+/);
+  if (parts.length !== 5) return String(expr);
+  const dowMap = { SUN: "0", MON: "1", TUE: "2", WED: "3", THU: "4", FRI: "5", SAT: "6" };
+  const fixed = parts.map((p) => (p === "*/1" ? "*" : p));
+  const dow = dowMap[String(fixed[4]).toUpperCase()] ?? fixed[4];
+  return [fixed[0], fixed[1], fixed[2], fixed[3], dow].join(" ");
+}
 const CRON_SCHEDULES = {
   "*/1 * * * *": ["tick"],
   "*/5 * * * *": ["finalize-sessions", "alerts", "turso-migrate"],
@@ -999,7 +1010,7 @@ const worker = {
   // внутренний шаг мигратора Turso) → запись cron:last:<job> в KV
   // (наблюдаемость через GET /admin/cron-status) + структурный лог.
   async scheduled(controller, env, ctx) {
-    const jobs = CRON_SCHEDULES[controller.cron] ?? [];
+    const jobs = CRON_SCHEDULES[normalizeCron(controller.cron)] ?? [];
     const run = (async () => {
       const results = {};
       for (const job of jobs) {

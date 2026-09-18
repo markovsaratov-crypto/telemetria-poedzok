@@ -364,6 +364,45 @@ describe("§B1 монтаж /ingest в роутер d1-gateway", () => {
   });
 });
 
+describe("§A1 StatsRollup в вайтлисте (v2.39.1)", () => {
+  it("/query SELECT из StatsRollup разрешён (для v2.39.0-приложения)", async () => {
+    const { db, calls } = makeDb();
+    const res = await post("/query", { sql: "SELECT day, points FROM StatsRollup", params: [] }, { DB: db });
+    expect(res.status).toBe(200);
+    expect(calls.length).toBe(1);
+  });
+
+  it("/query CREATE TABLE IF NOT EXISTS StatsRollup (ленивый DDL приложения)", async () => {
+    const { db, calls } = makeDb();
+    const ddl = `CREATE TABLE IF NOT EXISTS StatsRollup (\n  day TEXT NOT NULL,\n  userId TEXT NOT NULL DEFAULT '',\n  PRIMARY KEY (day, userId)\n)`;
+    const res = await post("/query", { sql: ddl, params: [] }, { DB: db });
+    expect(res.status).toBe(200);
+    expect(calls.length).toBe(1);
+  });
+
+  it("/query INSERT INTO StatsRollup разрешён (инкременты §A1.5)", async () => {
+    const { db } = makeDb();
+    const res = await post("/query", {
+      sql: "INSERT INTO StatsRollup (day, userId, sessions, points) VALUES (?, ?, 1, 1)",
+      params: ["2026-09-18", ""],
+    }, { DB: db });
+    expect(res.status).toBe(200);
+  });
+
+  it("/kvcache SELECT из StatsRollup проходит read-only гейт", async () => {
+    const { db } = makeDb();
+    const res = await post("/kvcache", { key: "dash:rollup", sql: "SELECT SUM(points) AS p FROM StatsRollup", params: [] }, { DB: db });
+    expect(res.status).toBe(200);
+  });
+
+  it("CREATE TABLE для прочих имён по-прежнему 403", async () => {
+    const { db, calls } = makeDb();
+    const res = await post("/query", { sql: "CREATE TABLE IF NOT EXISTS Evil (x TEXT)", params: [] }, { DB: db });
+    expect(res.status).toBe(403);
+    expect(calls.length).toBe(0);
+  });
+});
+
 describe("Регрессия /query + /health", () => {
   it("/query SELECT с секретом работает как прежде", async () => {
     const { db, calls } = makeDb();

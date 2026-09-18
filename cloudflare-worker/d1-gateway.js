@@ -82,6 +82,10 @@ const ALLOWED_TABLES = new Set(
     "Setting",
     "IngestMessage",
     "_AlertState",
+    // v2.39.1 (§A1): дневные агрегаты — /query читает/пишет её ПОСЛЕ деплоя
+    // v2.39.0-приложения; /ingest-порт пишет независимо от вайтлиста
+    // (стейтменты фиксированы), строка нужна для /query и create-index.
+    "StatsRollup",
   ].map((t) => t.toLowerCase())
 );
 
@@ -93,6 +97,10 @@ const ALLOWED_TABLES = new Set(
 //    существующей таблице, существующие данные не трогает.
 const PRAGMA_RE = /^PRAGMA\s+(page_count|page_size)\s*$/i;
 const CREATE_ALERTSTATE_RE = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?_AlertState"?\s*\(/i;
+// v2.39.1 (§A1): ленивое самовосстановление StatsRollup-таблицы приложением
+// (src/lib/stats-rollup.ts ensureStatsRollupTable — идемпотентный DDL, тот же
+// паттерн что _AlertState: IF NOT EXISTS = no-op на существующей).
+const CREATE_STATSROLLUP_RE = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?StatsRollup"?\s*\(/i;
 // v2.38.2 (ревью F50): идемпотентные индексы ensure-on-boot. Приложение
 // создаёт Session_userId_startTime_idx лениво при первом списковом запросе
 // (db.ts, fire-and-forget). IF NOT EXISTS = no-op на существующем индексе;
@@ -240,6 +248,7 @@ function validateStatement(sql, readOnly) {
   }
   if (verb === "CREATE") {
     if (CREATE_ALERTSTATE_RE.test(clean)) return null;
+    if (CREATE_STATSROLLUP_RE.test(clean)) return null;
     // v2.38.2 (F50): CREATE [UNIQUE] INDEX IF NOT EXISTS <idx> ON <allowed-table>
     const idxMatch = clean.match(CREATE_INDEX_RE);
     if (idxMatch && ALLOWED_TABLES.has(idxMatch[3].toLowerCase())) return null;

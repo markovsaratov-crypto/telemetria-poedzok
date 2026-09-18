@@ -504,3 +504,57 @@ p95-покрытие дашбордов и ленивый индекс `Session(
 Системное предложение по оптимизации потоков данных/нагрузки/скорости —
 `docs/OPTIMIZATION-PROPOSAL.md` (статус: ПРЕДЛОЖЕНИЕ, не исполнено;
 варианты A/B/C по мировым практикам, сравнение и метрики успеха).
+
+## §8. Edge-воркер v2.39.1 (18.09.2026): /ingest, /kvcache, деплой-рунбук
+
+### Что добавилось на d1-gateway-воркере (v2.39.1)
+- **§B1 `/ingest`** — edge-инжест Sensor Logger: монтируется ДО общего гейта
+  `X-Gateway-Secret`, своя авторизация `INGEST_TOKEN` (Bearer или `?token=`).
+  Паритет ответов с `/api/ingest` (201/200-duplicate/401/405/413/400/500),
+  идемпотентность (deviceId, clientId) канала владельца, rollup-инкременты
+  StatsRollup (§A1.5) прямо на границе. it_/apiKey-канал (личные устройства) —
+  осознанно только через Render (см. шапку `ingest-port.js`).
+- **§B2 `/kvcache`** — KV-кэш тяжёлых SELECT (cache-aside): body
+  `{key, sql, params, ttlSec}`, ответ `{rows, meta, kv:hit|miss|passthrough}`.
+  Гейты: общий секрет, rate-limit, лимит тела 64 КБ, валидация ключа
+  `^[A-Za-z0-9_:.-]{1,128}$`, ttl 1..3600, **только SELECT по вайтлисту
+  таблиц** (403 на DML/чужие таблицы ДО исполнения), значение ≤512 КБ,
+  TTL-пол платформы 60с (клиентский ttlSec меньше — округляется вверх).
+  **`/kvcache/invalidate`** — сброс по префиксу (пагинация list, параллельные
+  delete, ответ `{invalidated: N}`); вызывается приложением при финализации
+  сессии (`edgeKvInvalidate("dash:")`, fire-and-forget).
+- Обратная совместимость: биндинг KV отсутствует → `/kvcache` исполняет SQL
+  напрямую с `kv:"passthrough"`; `/query` и `/batch` не изменились.
+
+### Деплой воркера (рунбук, ~5 минут)
+1. Код: `cloudflare-worker/d1-gateway.js` (импортирует `./ingest-port.js`) —
+   деплоятся ОБА файла как модули.
+2. Конфиг: `cloudflare-worker/wrangler.toml` — имя `d1-gateway`, биндинги
+   DB (D1 «telemetria») + KV (`telemetria-kvcache-probe`), vars
+   (`EDGE_INGEST_ROLLUP_ENABLED`, `TELEMAT_TIMEZONE=Europe/Saratov`,
+   `EDGE_INGEST_MAX_BYTES`), `workers_dev = true`
+   (URL `https://d1-gateway.markov-saratov.workers.dev`).
+3. Токен CF: право `Workers Scripts:Edit` (права D1 API не нужны — доступ
+   через биндинг). `CLOUDFLARE_API_TOKEN=… bunx wrangler deploy` из папки
+   `cloudflare-worker/`.
+4. Секреты: `bunx wrangler secret put GATEWAY_SECRET` и
+   `bunx wrangler secret put INGEST_TOKEN` — значения ДОЛЖНЫ совпадать с
+   Render-инстансом приложения (`D1_GATEWAY_SECRET`, `INGEST_TOKEN`).
+5. Проверка: `GET /health` → `{ok:true, gateway:"d1", db:"bound"}`;
+   `POST /query {sql:"SELECT 1"}` с секретом → 200; `POST /ingest` без
+   авторизации → 401; `POST /kvcache` без секрета → 401.
+6. Откат: повторный деплой прошлой версии (копия кода воркера хранится в
+   `/home/z/backups/d1-gateway-worker-v2.38.1.js` до подтверждения стабильности;
+   при самостоятельном деплое — сохранить `GET …/workers/scripts/d1-gateway`
+   перед обновлением).
+
+### Мониторинг после включения B2 (метрики `/api/metrics`)
+- `edge_kv_hit_total` / `edge_kv_miss_total` — кэш-эффективность (цель §B2:
+  hit ≥60% на дашбордных запросах после прогрева);
+- `edge_kv_error_total` — деградации в прямой D1 (норма ≤ единиц в час при
+  KK-сбоях; рост = смотреть квоту/биндинг KV);
+- `d1_rows_read_total` — главный индикатор эффекта: до/после деплоя v2.39.1
+  на одинаковой нагрузке (цель §B2: −30–50% на дашбордных SELECT).
+- KV-квота free: 100k чтений/сутки, 1k записей/сутки — кэш 60с на десятке
+  ключей `dash:*` укладывается с запасом; счётчик `invalidated` не растёт
+  сам по себе = инвалидация не зациклена.

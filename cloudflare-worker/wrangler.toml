@@ -1,0 +1,36 @@
+# cloudflare-worker/wrangler.toml — v2.39.1 (§B1+§B2): конфиг деплоя
+# d1-gateway-воркера. Актуален для wrangler v4: `bunx wrangler deploy`
+# из этой папки (требует CLOUDFLARE_API_TOKEN с правом Workers Scripts:Edit;
+# D1-API-прав у токена НЕ нужно — доступ к БД идёт через биндинг).
+#
+# Биндинги:
+#   DB             — Cloudflare D1 «telemetria» (9dec0a90-…, см. docs/OPERATIONS.md §5)
+#   KV             — неймспейс telemetria-kvcache-probe (§B2: кэш SELECT 60с+)
+#   GATEWAY_SECRET — секрет шлюза (секрет, задаётся `wrangler secret put`)
+#   INGEST_TOKEN   — токен Sensor Logger для /ingest (§B1, `wrangler secret put`)
+#
+# Секреты ЗДЕСЬ не хранятся: `bunx wrangler secret put GATEWAY_SECRET` и
+# `bunx wrangler secret put INGEST_TOKEN` (значения — из рунбука ротации
+# docs/SECURITY-ROTATION.md; должны совпадать с Render-инстансом приложения).
+name = "d1-gateway"
+main = "d1-gateway.js"
+compatibility_date = "2026-09-01"
+account_id = "b8e4eee2f19ba22f8d9ccce80691e719"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "telemetria"
+database_id = "9dec0a90-7d38-46ae-9921-29eb83706b3d"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "be49735094b14ad3a41e053c4b1cd308"
+
+[vars]
+# §B1: rollup-инкременты edge-инжеста (OFF → Session/GpsPoint пишутся, StatsRollup нет)
+EDGE_INGEST_ROLLUP_ENABLED = "true"
+# §A1.5: TZ оператора для rollup-дня (должен совпадать с TELEMAT_TIMEZONE приложения)
+TELEMAT_TIMEZONE = "Europe/Saratov"
+# Лимит тела /ingest (байт); дефолт модуля 1 МБ — приведён явно для прозрачности
+EDGE_INGEST_MAX_BYTES = "1048576"

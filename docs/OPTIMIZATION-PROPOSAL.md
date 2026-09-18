@@ -1,7 +1,11 @@
 # Системное предложение: оптимизация потоков данных, снижение нагрузки и ускорение
 
-> **Статус (v2 от 18.09.2026): ЭТАП A + B1 ИСПОЛНЕНЫ в коде v2.39.0** (локальная
-> ветка, prod — пока 2.38.2 до деплоя; 132/132 юнит-тестов, tsc/eslint чисто).
+> **Статус (v3 от 18.09.2026): ЭТАП A + B1 + B2-СЕРВЕР ИСПОЛНЕНЫ в коде v2.39.1**
+> (локальная ветка, prod приложения — пока 2.38.2 до push; 155/155 юнит-тестов,
+> tsc/eslint чисто). Воркер d1-gateway получил `/ingest` (§B1-монтаж) и
+> `/kvcache`+`/kvcache/invalidate` (§B2-сервер, KV-кэш SELECT с TTL-полом 60с),
+> конфиг деплоя — `cloudflare-worker/wrangler.toml` (D1 «telemetria» + KV
+> `telemetria-kvcache-probe`).
 > Исполнено: §A1 (StatsRollup + инкременты инжеста + фоновый heal + бэкфилл),
 > §A2 (ETag/304 + SWR на /api/stats и /api/trips/batch), §A3 (смарт-опрос 60 с,
 > пауза скрытых вкладок, backoff ×2), §A4 (warmup после старта), §A5 (окна
@@ -9,7 +13,9 @@
 > §B2-клиент (src/lib/edge-gateway.ts — до обновления воркера тихо фолбэчится),
 > §B1-ПОРТ (cloudflare-worker/ingest-port.js — валидация+стейтменты для
 > edge-инжеста; монтаж в d1-gateway и деплой — за владельцем, как и раньше).
-> НЕ исполнено: B2-сервер (эндпоинты /kvcache на воркере), B3–B7, Вариант C.
+> НЕ исполнено: B3–B7 (Durable Objects/Queues/Cron/OpenNext/Analytics Engine),
+> Вариант C. §B2-сервер и §B1-монтаж ИСПОЛНЕНЫ (v2.39.1); B2-клиент включён
+> дефолтом (EDGE_KVCACHE_ENABLED=true) и работает после деплоя воркера.
 > Основа — мировые практики: Google SRE (бюджеты ошибок/USE-RED), CQRS-lite
 > (разделение путей записи/чтения), materialized-rollup паттерн, edge-first
 > архитектуры Cloudflare, cache-aside + stale-while-revalidate, backpressure

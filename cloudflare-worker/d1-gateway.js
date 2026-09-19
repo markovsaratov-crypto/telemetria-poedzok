@@ -510,6 +510,62 @@ const CRON_BACKUP_TIMEOUT_MS = 14 * 60_000; // дамп+GitHub-аплоад — 
 // 60 с: на реальной БД дамп не успевал даже начаться — AbortError, ok:false, без ретрая.
 const LONG_CRON_JOBS = new Set(["backup", "backup-github"]);
 
+// ——— v2.40.5 (квота-M-13 Pack B, аудит Task 22): троттлинг KV-записей ———
+// Проблема: шлюз писал в KV ~2600–3000 раз/день при квоте free-плана 1000
+// записей/день: cron:last:tick 1440 + cron:last:{finalize,alerts,turso} 864
+// + turso-state 288 (пробы «blocked»). С ~10:00 UTC квота записи исчерпана →
+// ЗАМИРАЕТ и /kvcache-populate (те же KV-put) → edge-кэш не наполняется →
+// каскад: read-пути идут напрямую в D1 и жгут квоту чтений (та самая
+// деградация 19.09). Решение: «мусорные» записи (одинаковый успех подряд)
+// пишутся редко, информативные (смена ok↔fail, статусы мигратора) — сразу:
+//   • cron:last:<job> — минимальный интервал между записями ПРИ НЕИЗМЕННОМ
+//     ok-статусе (map ниже); смена статуса всегда пишется мгновенно;
+//   • turso-state — только статус «blocked» (счётчик проб) пишется не чаще
+//     раза в 15 мин; «running»/переходы статусов — каждую запись (прогресс
+//     миграции не теряем).
+// Бюджет после: tick ≤288 + прочие ≤173 + turso ≤96 + суточные ~3 ≈ ≤560/день
+// — запас ~44% квоты записи остаётся под /kvcache-populate. Читаемость
+// cron-status почти не страдает: «последний успешный прогон ≤5 мин назад»
+// (tick) / «≤25 мин назад» (5-минутные джобы) — свежее и не нужно.
+const CRON_LAST_WRITE_MIN_MS = {
+  tick: 4.5 * 60_000, // ~каждый 5-й тик при стабильном ok
+  "finalize-sessions": 24 * 60_000, // ~каждый 5-й прогон */5
+  alerts: 24 * 60_000,
+  "turso-migrate": 24 * 60_000,
+  // retention / backup / backup-github — суточные, всегда пишутся (0)
+};
+const TURSO_STATE_BLOCKED_SAVE_MIN_MS = 15 * 60_000;
+
+/** cron:last:<job> с троттлингом: при неизменном ok-статусе и свежей записи
+ *  (интервал из CRON_LAST_WRITE_MIN_MS) — KV.put пропускается (одна лишняя
+ *  KV.get на промах-проверку — квота чтений KV 100k/день, неузаметна).
+ *  Смена ok↔fail или истечение интервала — запись как раньше. */
+async function putCronLastThrottled(env, job, record) {
+  if (!env.KV || typeof env.KV.put !== "function") return;
+  try {
+    const intervalMs = CRON_LAST_WRITE_MIN_MS[job] ?? 0;
+    if (intervalMs > 0) {
+      const raw = await env.KV.get(TURSO_CRON_LAST_KEY(job)).catch(() => null);
+      if (raw) {
+        try {
+          const prev = JSON.parse(raw);
+          const prevAt = Date.parse(prev && prev.at);
+          if (
+            Number.isFinite(prevAt) &&
+            prev.ok === record.ok &&
+            Date.now() - prevAt < intervalMs
+          ) {
+            return; // тот же исход недавно — не тратим квоту записи
+          }
+        } catch {}
+      }
+    }
+    await env.KV.put(TURSO_CRON_LAST_KEY(job), JSON.stringify(record));
+  } catch {
+    // KV сбой — не мешает cron-прогону (как прежде)
+  }
+}
+
 async function callAppCron(env, path, timeoutMs = 60_000) {
   if (!env.APP_ORIGIN) return { ok: false, error: "APP_ORIGIN not configured" };
   if (!env.CRON_SECRET) return { ok: false, error: "CRON_SECRET not configured" };
@@ -599,11 +655,24 @@ async function loadTursoState(env) {
 async function saveTursoState(env, state) {
   if (!env.KV) return;
   try {
+    // v2.40.5 (M-13): статус «blocked» (Turso-квота, пробы каждые 5 мин) —
+    // persist не чаще раза в 15 мин: между ними меняется только blockedCount.
+    // Прочие статусы/переходы (running/done/error/pending) — каждая запись:
+    // прогресс миграции дороже KV-квоты.
+    if (
+      state &&
+      state.status === "blocked" &&
+      Date.now() - lastTursoBlockedSaveAt < TURSO_STATE_BLOCKED_SAVE_MIN_MS
+    ) {
+      return;
+    }
     await env.KV.put(TURSO_STATE_KEY, JSON.stringify(state));
+    lastTursoBlockedSaveAt = Date.now();
   } catch {
     // KV недоступен — состояние живёт только в памяти текущей инвокации
   }
 }
+let lastTursoBlockedSaveAt = 0; // globalThis-область изолейта; рестарт → одна лишняя запись
 
 // Turso libSQL-over-HTTP (v2/pipeline, чистый fetch — без клиентов):
 // толерантный парсер значений — v2-формат {type,value} и сырые JSON-скаляры.
@@ -855,7 +924,9 @@ const worker = {
 
     if (url.pathname === "/health") {
       if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
-      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding" });
+      // v2.40.5 (Pack B): version — маркер деплоя шлюза (как APP_VERSION у
+      // приложения): верификация «в воркере новый код» без wrangler tail.
+      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.40.5" });
     }
 
     // v2.39.1 (§B1): edge-инжест — ДО гейта X-Gateway-Secret: канал имеет
@@ -1038,12 +1109,10 @@ const worker = {
               },
             };
             if (env.KV) {
-              try {
-                await env.KV.put(
-                  TURSO_CRON_LAST_KEY(job),
-                  JSON.stringify({ at: new Date().toISOString(), ok: results[job].ok, state: results[job].state })
-                );
-              } catch {}
+              // v2.40.5 (M-13): троттлинг записи — см. putCronLastThrottled
+              await putCronLastThrottled(env, job, {
+                at: new Date().toISOString(), ok: results[job].ok, state: results[job].state
+              });
             }
           } else {
             const path = CRON_APP_PATHS[job];
@@ -1051,17 +1120,13 @@ const worker = {
             const r = await callAppCron(env, path, timeout);
             results[job] = r;
             if (env.KV) {
-              try {
-                await env.KV.put(
-                  TURSO_CRON_LAST_KEY(job),
-                  JSON.stringify({
-                    at: new Date().toISOString(),
-                    ok: r.ok,
-                    status: r.status ?? null,
-                    error: r.error ?? null,
-                  })
-                );
-              } catch {}
+              // v2.40.5 (M-13): троттлинг записи — см. putCronLastThrottled
+              await putCronLastThrottled(env, job, {
+                at: new Date().toISOString(),
+                ok: r.ok,
+                status: r.status ?? null,
+                error: r.error ?? null,
+              });
             }
           }
         } catch (err) {

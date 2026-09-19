@@ -9,6 +9,7 @@ import { haversineM } from "./geo";
 import { computeMovingTime, computeActiveTrip, type MethodologyPoint, type ActiveTrip } from "./active-trip";
 import { maxSpeedMs, normalizeSessionSpeeds } from "./kpi";
 import { tokenMatches } from "./token-check"; // v2.16.0 (D-16): timing-safe сверка сигнатуры
+import { getTtlCache } from "./ttl-cache"; // v2.40.5 · M-9: TTL-кэш публичного payload
 
 export const SHARE_DEFAULT_TTL_HOURS = 168; // 7 дней
 // v2.38.1 (ревью F14): максимум срока — 30 дней (было 8760 = 1 год: утёкшая
@@ -145,8 +146,29 @@ function shareIntervalInActiveLegs(activeTrip: ActiveTrip, prevTs: number, ts: n
   return ts >= activeTrip.activeStartTime && prevTs <= activeTrip.activeEndTime;
 }
 
+// ——— v2.40.5 (квота-M-9, аудит Task 22): TTL-кэш публичного share-payload ———
+// Проблема: каждое открытие share-ссылки (публичный роут, без rate-limit
+// на чтения) перекачивало ВСЕ GpsPoint записи + полный конвейер KPI — на
+// free-плане D1 это квотный DoS-вектор: атакующему дёшево дёргать F5, каждой
+// «свежей» вкладке — десятки тысяч rows_read. TTL 30с поглощает повторные
+// открытия/рефреши/префетчи (первый визит честно вычисляет и кэширует).
+// 30с (а не больше): ревокация токена проверяется ВЫШЕ кэша (verifyShareToken
+// — не кэшируется), но soft-delete сессии проверяется ВНУТРИ payload — окно
+// устаревания ≤30с при удалении «только что расшаренной» сессии — осознанный
+// трейд (крайний случай, а «горячая» ссылка = почти всегда кэш-хит).
+// Ключ = sessionId+expiresAt: две ссылки на одну сессию с разными сроками —
+// разные записи (expiresAt в payload — не путаются).
+const SHARE_PAYLOAD_CACHE = getTtlCache<{ payload: Record<string, unknown> }>("share-payload", 30_000, 64);
+
 // Общий payload для обоих share-GET-роутов (sessions/[id]/share и /api/share)
 export async function sharePayload(sessionId: string, expiresAt: number, requestId: string) {
+  // v2.40.5 (M-9): кэш-хит — без единой строки чтения из БД
+  const cacheKey = `${sessionId}:${expiresAt}`;
+  const cached = SHARE_PAYLOAD_CACHE.get(cacheKey);
+  if (cached) {
+    return json(cached.payload, 200, { "X-Request-Id": requestId, "X-Cache": "ttl" });
+  }
+
   const session = await db.session.findUnique({
     where: { id: sessionId },
     include: {
@@ -220,34 +242,35 @@ export async function sharePayload(sessionId: string, expiresAt: number, request
     sharePoints.push(points[points.length - 1]); // финиш — всегда
   }
 
-  return json(
-    {
-      sessionId: session.id,
-      deviceId: session.deviceId,
-      deviceName: session.deviceName,
-      startTime: session.startTime,
-      endTime: session.endTime,
-      pointCount: session.pointCount,
-      points: sharePoints.map((p) => ({
-        lat: p.lat,
-        lon: p.lon,
-        speed: p.speed,
-        altitude: p.altitude,
-        timestamp: p.timestamp,
-      })),
-      // FIX-C3: серверные KPI (активная часть) — клиент только отображает
-      distanceM: Math.round(distanceM),
-      rawDistanceM: Math.round(rawDistanceM),
-      activeDurationSec: Math.round(activeDurationSec),
-      preTripIdleSec: Math.round(preTripIdleSec),
-      postTripIdleSec: Math.round(postTripIdleSec),
-      hasActiveTrip,
-      maxSpeedMs: Math.round(maxSpeed * 10) / 10,
-      shared: true,
-      expiresAt: new Date(expiresAt).toISOString(),
-    },
-    200,
-    { "X-Request-Id": requestId }
-  );
+  const shareResultPayload: Record<string, unknown> = {
+    sessionId: session.id,
+    deviceId: session.deviceId,
+    deviceName: session.deviceName,
+    startTime: session.startTime,
+    endTime: session.endTime,
+    pointCount: session.pointCount,
+    points: sharePoints.map((p) => ({
+      lat: p.lat,
+      lon: p.lon,
+      speed: p.speed,
+      altitude: p.altitude,
+      timestamp: p.timestamp,
+    })),
+    // FIX-C3: серверные KPI (активная часть) — клиент только отображает
+    distanceM: Math.round(distanceM),
+    rawDistanceM: Math.round(rawDistanceM),
+    activeDurationSec: Math.round(activeDurationSec),
+    preTripIdleSec: Math.round(preTripIdleSec),
+    postTripIdleSec: Math.round(postTripIdleSec),
+    hasActiveTrip,
+    maxSpeedMs: Math.round(maxSpeed * 10) / 10,
+    shared: true,
+    expiresAt: new Date(expiresAt).toISOString(),
+  };
+
+  // v2.40.5 (M-9): успешный payload — в TTL-кэш (см. блок выше)
+  SHARE_PAYLOAD_CACHE.set(cacheKey, { payload: shareResultPayload });
+
+  return json(shareResultPayload, 200, { "X-Request-Id": requestId });
 }
 

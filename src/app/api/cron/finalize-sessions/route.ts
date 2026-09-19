@@ -14,7 +14,7 @@
 // оставался в голове очереди (ORDER BY updatedAt ASC) и ГЛОДИЛ каждый
 // следующий запуск — лайвнесс-клин всей финализации.
 import { NextRequest } from "next/server";
-import { libsql } from "@/lib/db";
+import { libsql, isD1QuotaError } from "@/lib/db";
 import { extractBearer } from "@/lib/auth";
 import { tokenMatches } from "@/lib/token-check"; // AUDIT B-16: timing-safe сравнение
 import { env } from "@/lib/env";
@@ -73,6 +73,25 @@ async function staleCandidates(staleMs: number): Promise<string[]> {
   return stale.rows.map((row) => String((row as Record<string, unknown>).id));
 }
 
+// v2.40.5 (квота-M-8): единый 429-ответ для квотных ошибок роута (паттерн
+// инжеста v2.40.2): Retry-After до следующей 00:00 UTC, код d1_quota_exhausted,
+// наружу без внутренностей БД.
+function quota429Response(err: unknown, requestId: string, extra?: Record<string, unknown>): Response {
+  const midnight = Date.UTC(
+    new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() + 1, 0, 0, 0
+  );
+  const retryAfter = String(Math.max(60, Math.round((midnight - Date.now()) / 1000)));
+  logger.warn("finalize-sessions blocked by D1 daily quota", {
+    requestId,
+    error: err instanceof Error ? err.message : String(err),
+  });
+  return json(
+    { error: "Дневная квота D1 исчерпана — операции чтения заблокированы до 00:00 UTC", code: "d1_quota_exhausted", ...extra },
+    429,
+    { "X-Request-Id": requestId, "Retry-After": retryAfter }
+  );
+}
+
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   try {
@@ -84,11 +103,21 @@ export async function POST(request: NextRequest) {
 
     const finalized: string[] = [];
     const failed: Array<{ sessionId: string; error: string }> = [];
+    // v2.40.5 (квота-M-8): флаг квотного сбоя — при исчерпанной квоте чтений
+    // каждое per-item finalize упадёт той же ошибкой: продолжать батч = жечь
+    // время и логи; честный 429 + Retry-After (до 00:00 UTC) даёт шлюзу/
+    // мониторингу правильный сигнал «не инцидент — ждите» (паттерн инжеста
+    // v2.40.2; квотный сбой staleCandidates ловится внешним catch ниже).
+    let quotaBlocked: unknown = null;
     for (const sessionId of candidates) {
       try {
         await finalizeSession(sessionId);
         finalized.push(sessionId);
       } catch (err) {
+        if (isD1QuotaError(err)) {
+          quotaBlocked = err;
+          break; // все последующие тоже упадут — не штормим
+        }
         // Изоляция сбоя: остальные сессии батча финализируются, сбойная — в отчёт
         // (и в логи с sessionId — репетиция идёт по ORDER BY updatedAt ASC,
         // чтобы упорный сбой не блокировал хвост очереди вечно).
@@ -96,6 +125,10 @@ export async function POST(request: NextRequest) {
         failed.push({ sessionId, error: msg });
         logger.error("finalize-sessions: per-item failure", { requestId, sessionId, error: msg });
       }
+    }
+
+    if (quotaBlocked != null) {
+      return quota429Response(quotaBlocked, requestId, { finalizedSoFar: finalized.length });
     }
 
     if (finalized.length > 0) {
@@ -107,6 +140,9 @@ export async function POST(request: NextRequest) {
       { "X-Request-Id": requestId }
     );
   } catch (err) {
+    // v2.40.5 (M-8): квота чтений — 429 с Retry-After до 00:00 UTC (как инжест
+    // v2.40.2): ночной cron шлюза поймёт «временно» и не пометит окно инцидентом.
+    if (isD1QuotaError(err)) return quota429Response(err, requestId);
     logger.error("Cron finalize-sessions error", {
       requestId,
       error: err instanceof Error ? err.message : String(err),
@@ -150,6 +186,8 @@ export async function GET(request: NextRequest) {
       { "X-Request-Id": requestId }
     );
   } catch (err) {
+    // v2.40.5 (M-8): квота — 429 (симметрия с POST; GET-отчёт тоже читает БД)
+    if (isD1QuotaError(err)) return quota429Response(err, requestId);
     logger.error("Cron finalize-sessions GET error", {
       requestId,
       error: err instanceof Error ? err.message : String(err),

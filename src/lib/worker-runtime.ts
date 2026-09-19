@@ -1,6 +1,6 @@
 // src/lib/worker-runtime.ts — In-process Worker (runs inside Next.js via instrumentation.ts).
 import pLimit from "p-limit";
-import { libsql, toCamel } from "./db"; // v2.16.0: toCamel — единая реализация (была локальная копия)
+import { libsql, toCamel, isD1QuotaError } from "./db"; // v2.16.0: toCamel — единая реализация (была локальная копия); v2.40.5: isD1QuotaError — квотный breaker M-6
 import { env } from "./env";
 import { logger } from "./logger";
 import { inc, set } from "./metrics";
@@ -674,6 +674,41 @@ function prewarmCorpusBaselines(): void {
   void getCorpusEcoBaselines(); // ошибки логируются внутри (fallback на дефолты)
 }
 
+// ——— v2.40.5 (квота-M-6): квотный circuit-breaker инжест-воркера ———
+// Проблема (аудит Task 22, M-6): при исчерпании дневной квоты чтений D1
+// (~08:30 UTC в тяжёлые дни) poll-циклы продолжались каждые 5–30 с ДО 00:00
+// UTC: pollJobs/pollExportJobs/оба жнеца/counts-запрос — каждый об ошибку
+// «exceeded D1's free tier daily row read limit» = ~17 000 бесполезных ошибочных
+// циклов/день. Счётчики БД не двигаются, квота не восстанавливается — только
+// шум в логах и лишние HTTP-раундтрипы к шлюзу.
+// Решение: первый квотный сбой в цикле открывает окно бэкоффа 10 минут
+// (QUOTA_BACKOFF_MS): до истечения окна poll-таймер спит ОСТАТОК окна, а не
+// базовые 5 с. 10-минутная ретро-проба (а не «до 00:00 UTC») выбрана
+// осознанно: квота D1 считается поминутно, окно исчерпания может закрыться
+// раньше полуночи (буфер восстанавливается), а полная пауза до полуночи
+// потребовала бы предположений о таймзоне биллинга. Цена ретро-пробы — один
+// ошибочный цикл раз в 10 мин (144/день против 17 280) — пренебрежима.
+const QUOTA_BACKOFF_MS = 10 * 60_000;
+let quotaBackoffUntil = 0;
+let quotaBackoffLoggedAt = 0;
+
+/** Логирует сбой этапа poll-цикла; при квотной ошибке — открывает окно breaker'а.
+ *  Возвращает true, если ошибка квотная (вызывающий может пропустить обычный error-лог). */
+function noteWorkerDbError(stage: string, err: unknown, requestId: string): boolean {
+  if (!isD1QuotaError(err)) return false;
+  const now = Date.now();
+  quotaBackoffUntil = Math.max(quotaBackoffUntil, now + QUOTA_BACKOFF_MS);
+  if (now - quotaBackoffLoggedAt > 5 * 60_000) { // не чаще раза в 5 мин — лог не штормит
+    quotaBackoffLoggedAt = now;
+    logger.warn("worker D1 quota backoff opened (10 min)", {
+      requestId,
+      stage,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return true;
+}
+
 async function pollOnce(rt: WorkerRuntime) {
   const requestId = crypto.randomUUID();
   try {
@@ -694,12 +729,14 @@ async function pollOnce(rt: WorkerRuntime) {
       })));
     }
   } catch (err) {
+    noteWorkerDbError("poll cycle", err, requestId); // v2.40.5 (M-6): квота → breaker
     logger.error("poll cycle failed", { requestId, error: err instanceof Error ? err.message : String(err) });
   }
   // P1-8: обработка ExportJob (раньше навсегда оставались pending → «вечные 202»)
   try {
     await pollExportJobs();
   } catch (err) {
+    noteWorkerDbError("export poll", err, requestId); // v2.40.5 (M-6)
     logger.error("export poll failed", { requestId, error: err instanceof Error ? err.message : String(err) });
   }
   // v2.14.0 (Ф3): закрытие зависших recording-сессий (тишина > 10 мин).
@@ -710,6 +747,7 @@ async function pollOnce(rt: WorkerRuntime) {
       logger.info("reaped stale recording sessions", { requestId, count: reaped });
     }
   } catch (err) {
+    noteWorkerDbError("recording reaper", err, requestId); // v2.40.5 (M-6)
     logger.error("recording reaper failed", { requestId, error: err instanceof Error ? err.message : String(err) });
   }
   // v2.26.0 (ТЗ §7-п.4): «жнец» ПОЕЗДОК — закрытие trip.status=recording при
@@ -721,6 +759,7 @@ async function pollOnce(rt: WorkerRuntime) {
       logger.info("closed stale trips", { requestId, count: closedTrips });
     }
   } catch (err) {
+    noteWorkerDbError("trip reaper", err, requestId); // v2.40.5 (M-6)
     logger.error("trip reaper failed", { requestId, error: err instanceof Error ? err.message : String(err) });
   }
   // v2.17.1: фоновый прогрев corpus-калибровки EcoScore (см. комментарий выше)
@@ -900,8 +939,17 @@ export function startWorkerRuntime(): WorkerRuntime {
   // адаптивного интервала на КАЖДОМ тике (раньше хардкод 2000/5000/30000
   // брал верх после первого тика — env действовал один раз). Загрузка/норма =
   // base (быстрее настроенного не уходим: оператор, которому нужен быстрый
-  // дрейн бэклога, ставит меньший env); простой = 6×base (дефолт 5 с → 30 с,
-  // как прежде); сбой подсчёта → base, а не хардкод-5000.
+  // дрейн бэклога, ставит меньший env); простой = 12×base (дефолт 5 с → 60 с);
+  // сбой подсчёта → base, а не хардкод-5000.
+  // v2.40.5 (квота-M-6, аудит Task 22): 6× → 12×. Простой = 60 с при дефолтном
+  // WORKER_POLL_INTERVAL_MS=5000: пустой counts-запрос раз в минуту вместо
+  // раз в 30 с — вдвое меньше фоновых чтений TrafficJob при длительных
+  // окнах без джобов (ночь). Драйв новых джобов не страдает: инжест создаёт
+  // TrafficJob синхронно в своём запросе, а cron-тик шлюза каждую минуту
+  // дергает runWorkerTick независимо от этого таймера.
+  // Квотный breaker (M-6): окно 10 минут от первого квотного сбоя — интервал
+  // НЕ сбрасывается на base ошибкой counts-запроса (прежнее поведение:
+  // сбой подсчёта → 5 с → шторм 17 280 циклов/день на исчерпанной квоте).
   const baseIntervalMs = e.WORKER_POLL_INTERVAL_MS;
   const schedulePoll = () => {
     if (rt.shuttingDown) return;
@@ -919,8 +967,24 @@ export function startWorkerRuntime(): WorkerRuntime {
         }
         set("worker_pending_jobs", pending, "Pending traffic jobs");
         set("worker_running_jobs", running, "Running traffic jobs");
-        if (pending === 0 && running === 0) nextInterval = baseIntervalMs * 6;
-      } catch {}
+        if (pending === 0 && running === 0) nextInterval = baseIntervalMs * 12;
+      } catch (countsErr) {
+        // v2.40.5 (M-6): квотный сбой counts-запроса — открываем/продлеваем окно
+        // breaker'а и НЕ сбрасываем интервал на base (это и был баг: ошибка
+        // подсчёта при исчерпанной квоте возвращала воркер к 5-секундному
+        // шторму). Нет квотной ошибки — прежнее поведение (base).
+        noteWorkerDbError("counts query", countsErr, "schedulePoll");
+      }
+      // v2.40.5 (M-6): активное окно квотного бэкоффа доминирует над адаптивным
+      // интервалом: спим ОСТАТОК окна (≤10 мин), ретро-проба сама закроет его
+      // при успехе или продлит при повторной квотной ошибке.
+      const quotaRemaining = quotaBackoffUntil - Date.now();
+      if (quotaRemaining > 0) {
+        nextInterval = Math.max(nextInterval, quotaRemaining);
+      } else if (quotaBackoffUntil > 0) {
+        // окно истекло и последний тик прошёл без квотных ошибок — сбрасываем
+        quotaBackoffUntil = 0;
+      }
       rt.pollIntervalMs = nextInterval;
       schedulePoll();
     }, rt.pollIntervalMs);

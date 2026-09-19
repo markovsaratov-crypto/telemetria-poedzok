@@ -21,7 +21,7 @@
 import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
 import { dataScopeFor } from "@/lib/scope";
-import { json } from "@/lib/http-utils";
+import { json, jsonWithEtag, computeWeakEtag } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { BatchSessionData, batchCacheKey, loadSessionsForBatch, parseBatchIds } from "@/lib/batch-points";
 import { computeSessionTrack } from "@/lib/session-track";
@@ -35,7 +35,16 @@ import {
 import { getTtlCache } from "@/lib/ttl-cache";
 import { trackLatency } from "@/lib/latency";
 
-const CACHE = getTtlCache<{ tracks: Record<string, unknown>[]; missing: string[] }>("track-batch", 60_000);
+// v2.40.5 (квота-m-13, аудит Task 22): + ETag/304 (паттерн /api/stats §A2).
+// Повторные открытия карточек/возвраты по истории гоняли один и тот же JSON
+// по сети БЕЗ If-None-Match-экономии: TTL-кэш экономил квоту D1, но не байты/
+// парсинг клиента. Кэш хранит {payload, etag}; слабый ETag считается один раз
+// при заполнении; jsonWithEtag → 304 (пустое тело) при совпадении.
+interface TrackBatchCacheEntry {
+  payload: { tracks: Record<string, unknown>[]; missing: string[] };
+  etag: string;
+}
+const CACHE = getTtlCache<TrackBatchCacheEntry>("track-batch", 60_000);
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -56,7 +65,10 @@ export async function GET(request: NextRequest) {
     const cached = CACHE.get(cacheKey);
     if (cached) {
       trackLatency(request);
-      return json(cached, 200, { "X-Request-Id": requestId, "X-Cache": "ttl" });
+      return jsonWithEtag(cached.payload, cached.etag, request, 200, {
+        "X-Request-Id": requestId,
+        "X-Cache": "ttl",
+      });
     }
 
     // ——— меты + ПРЕДРАСЧЁТ (trackCache), БЕЗ точек — один IN-запрос ———
@@ -100,7 +112,9 @@ export async function GET(request: NextRequest) {
     }
 
     const payload = { tracks, missing };
-    CACHE.set(cacheKey, payload);
+    // v2.40.5 (m-13): ETag один раз при заполнении кэша (вход: ключ + JSON)
+    const etag = await computeWeakEtag(`${cacheKey}|${JSON.stringify(payload)}`);
+    CACHE.set(cacheKey, { payload, etag });
 
     trackLatency(request); // P2-16: успешный ответ участвует в api_latency_p95
 
@@ -108,7 +122,7 @@ export async function GET(request: NextRequest) {
       requestId, requested: ids.length, returned: tracks.length,
       missing: missing.length, fromCache: live.length - staleIds.length, computed: staleIds.length,
     });
-    return json(payload, 200, { "X-Request-Id": requestId });
+    return jsonWithEtag(payload, etag, request, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Batch track error", { requestId, error: err instanceof Error ? err.message : String(err) });
     return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });

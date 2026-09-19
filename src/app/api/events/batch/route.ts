@@ -20,7 +20,7 @@
 import { NextRequest } from "next/server";
 import { authorizeRequest } from "@/lib/auth";
 import { dataScopeFor } from "@/lib/scope";
-import { json } from "@/lib/http-utils";
+import { json, jsonWithEtag, computeWeakEtag } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { BatchSessionData, batchCacheKey, loadSessionsForBatch, parseBatchIds } from "@/lib/batch-points";
 import { computeSessionEvents, type SessionEventsPayload } from "@/lib/session-events";
@@ -34,7 +34,14 @@ import {
 import { getTtlCache } from "@/lib/ttl-cache";
 import { trackLatency } from "@/lib/latency";
 
-const CACHE = getTtlCache<{ events: SessionEventsPayload[]; missing: string[] }>("events-batch", 60_000);
+// v2.40.5 (квота-m-13, аудит Task 22): + ETag/304 (паттерн /api/stats §A2 — см.
+// идентичный блок в /api/track/batch): кэш хранит {payload, etag}, слабый ETag
+// считается один раз при заполнении, jsonWithEtag → 304 при совпадении.
+interface EventsBatchCacheEntry {
+  payload: { events: SessionEventsPayload[]; missing: string[] };
+  etag: string;
+}
+const CACHE = getTtlCache<EventsBatchCacheEntry>("events-batch", 60_000);
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -57,7 +64,10 @@ export async function GET(request: NextRequest) {
     const cached = CACHE.get(cacheKey);
     if (cached) {
       trackLatency(request);
-      return json(cached, 200, { "X-Request-Id": requestId, "X-Cache": "ttl" });
+      return jsonWithEtag(cached.payload, cached.etag, request, 200, {
+        "X-Request-Id": requestId,
+        "X-Cache": "ttl",
+      });
     }
 
     // ——— меты + ПРЕДРАСЧЁТ (eventsCache), БЕЗ точек — один IN-запрос ———
@@ -98,7 +108,9 @@ export async function GET(request: NextRequest) {
     }
 
     const payload = { events, missing };
-    CACHE.set(cacheKey, payload);
+    // v2.40.5 (m-13): ETag один раз при заполнении кэша
+    const etag = await computeWeakEtag(`${cacheKey}|${JSON.stringify(payload)}`);
+    CACHE.set(cacheKey, { payload, etag });
 
     trackLatency(request); // P2-16: успешный ответ участвует в api_latency_p95
 
@@ -106,7 +118,7 @@ export async function GET(request: NextRequest) {
       requestId, requested: ids.length, returned: events.length,
       missing: missing.length, fromCache: live.length - staleIds.length, computed: staleIds.length,
     });
-    return json(payload, 200, { "X-Request-Id": requestId });
+    return jsonWithEtag(payload, etag, request, 200, { "X-Request-Id": requestId });
   } catch (err) {
     logger.error("Batch events error", { requestId, error: err instanceof Error ? err.message : String(err) });
     return json({ error: "Internal Server Error" }, 500, { "X-Request-Id": requestId });

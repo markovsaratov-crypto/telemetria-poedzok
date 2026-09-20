@@ -44,7 +44,25 @@ export async function POST(request: NextRequest) {
     const auth = await authorizeRequest(request, "api");
     if (!auth.ok) return json({ error: auth.reason }, 401, { "X-Request-Id": requestId });
 
-    const formData = await request.formData();
+    // v2.40.6 (инцидент 20.09): тело режется proxy-слоем Next 16 (дефолт 10 МБ,
+    // поднят до 150 МБ в next.config → proxyClientMaxBodySize) или превышает
+    // сам лимит — formData() бросает «Failed to parse body as FormData» и
+    // улетал в безликий 500 «Import failed». Честный 413 с внятным текстом.
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch (err) {
+      logger.error("ZIP import: body parse failed", { requestId, error: err instanceof Error ? err.message : String(err) });
+      return json(
+        {
+          error: "Не удалось прочитать загруженный файл: тело запроса обрезано или повреждено. Архивы больше 150 МБ не поддерживаются — экспортируйте из Sensor Logger без акселерометров или за меньший период.",
+          code: "body_parse_failed",
+          requestId,
+        },
+        413,
+        { "X-Request-Id": requestId }
+      );
+    }
     const file = formData.get("file");
     if (!file || !(file instanceof File)) {
       return json({ error: "file required (multipart/form-data)" }, 400, { "X-Request-Id": requestId });

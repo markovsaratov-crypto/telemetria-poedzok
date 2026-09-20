@@ -241,3 +241,38 @@ describe("N-3: сквозной инвариант прод-кейса 20.09 (в
     expect(res.payload.gapTime).toBeGreaterThan(1000);
   });
 });
+
+describe("N-5: trip-grouping нормализует битое поле speed (B-4) перед state machine", () => {
+  it("поездка не обрезается: реальное движение при speed-поле ~0 проходит до конца", async () => {
+    const { computeTripsFromPoints } = await import("../src/lib/trip-grouping");
+    // модель прод-кейса 920ff881: ~10 м/с реального движения (Саратов → север),
+    // поле speed = 0,5 м/с (мусор ZIP-экспорта) — RAW-режим давал last moving
+    // на 1/4 записи, хвост становился idle
+    const rows: Array<{ sessionId: string; lat: number; lon: number; speed: number | null; altitude: number | null; accuracy: number | null; bearing: number | null; timestamp: number }> = [];
+    const stepLat = 10 / 111_320;
+    for (let i = 0; i <= 600; i++) {
+      rows.push({ sessionId: "s1", lat: SARATOV.lat + i * stepLat, lon: SARATOV.lon, speed: 0.5, altitude: null, accuracy: 5, bearing: null, timestamp: i * 1000 });
+    }
+    const sessions = [{ id: "s1", userId: null, deviceId: "d1", startTime: new Date(0).toISOString(), endTime: new Date(600_000).toISOString(), status: "completed" }];
+    const trips = computeTripsFromPoints(rows, sessions);
+    expect(trips.length).toBeGreaterThanOrEqual(1);
+    const last = trips[trips.length - 1];
+    // хвост движения (≈600 с) должен попасть в поездку, а не обрезаться на 1/4
+    expect(last.endTime).toBeGreaterThan(400_000);
+    // движениев поездке — бо́льшая часть записи
+    expect((last.endTime - last.startTime) / 1000).toBeGreaterThan(400);
+  });
+
+  it("хорошие данные: поездка из согласованных скоростей не меняется (регрессия)", async () => {
+    const { computeTripsFromPoints } = await import("../src/lib/trip-grouping");
+    const rows: Array<{ sessionId: string; lat: number; lon: number; speed: number | null; altitude: number | null; accuracy: number | null; bearing: number | null; timestamp: number }> = [];
+    const stepLat = 10 / 111_320;
+    for (let i = 0; i <= 300; i++) {
+      rows.push({ sessionId: "s2", lat: SARATOV.lat + i * stepLat, lon: SARATOV.lon, speed: 10, altitude: null, accuracy: 5, bearing: null, timestamp: i * 1000 });
+    }
+    const sessions = [{ id: "s2", userId: null, deviceId: "d2", startTime: new Date(0).toISOString(), endTime: new Date(300_000).toISOString(), status: "completed" }];
+    const trips = computeTripsFromPoints(rows, sessions);
+    expect(trips.length).toBe(1);
+    expect(trips[0].endTime).toBeGreaterThan(250_000);
+  });
+});

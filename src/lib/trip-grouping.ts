@@ -46,6 +46,7 @@ import { env } from "./env";
 import { logger } from "./logger";
 import { inc } from "./metrics";
 import { computeMovingTime, computeActiveTrip, type MethodologyPoint, type ActiveTripLeg } from "./active-trip";
+import { normalizeSessionSpeeds } from "./kpi"; // v2.40.7 (N-5): B-4 перед state machine
 
 /** Точка загрузки точек из БД (сырые строки GpsPoint). */
 interface RawPointRow {
@@ -144,24 +145,8 @@ async function loadPointsChunked(sessionIds: string[]): Promise<RawPointRow[]> {
  */
 export function computeTripsFromPoints(points: RawPointRow[], sessions: SessionRow[]): ComputedTrip[] {
   if (points.length === 0) return [];
-  const methodPoints: MethodologyPoint[] = points.map((p) => ({
-    lat: p.lat,
-    lon: p.lon,
-    speed: p.speed,
-    altitude: p.altitude,
-    accuracy: p.accuracy,
-    bearing: p.bearing,
-    timestamp: p.timestamp,
-  }));
-  const motion = computeMovingTime(methodPoints);
-  const active = computeActiveTrip(methodPoints, motion, {
-    splitSec: env().TRIP_SPLIT_SEC,
-    minLegSec: env().ACTIVE_TRIP_MIN_LEG_SEC,
-  });
-  if (!active.hasActiveTrip || active.legs.length === 0) return [];
-
-  // Точки по записям (глобальный ряд уже asc) — срез-границы записи ВНУТРИ
-  // конкретной поездки (запись на весь день: её утренняя часть ≠ вся запись)
+  // Точки по записям (ряд уже asc по timestamp — сортирует вызывающий) — нужно
+  // ДО state machine: нормализация посессионно (ниже).
   const ptsBySession = new Map<string, RawPointRow[]>();
   for (const p of points) {
     let arr = ptsBySession.get(p.sessionId);
@@ -171,6 +156,42 @@ export function computeTripsFromPoints(points: RawPointRow[], sessions: SessionR
     }
     arr.push(p);
   }
+  // v2.40.7 (N-5 «битое поле speed режет поездки»): B-4-нормализация — КАК ВО
+  // ВСЕХ остальных конвейерах (session-stats/events/track/share), только здесь
+  // её не было. Прод-кейс 20.09 (ZIP-экспорт 920ff881): поле speed сдавало
+  // мусорные 1–17 км/ч при реальных ~85 км/ч — cross-check state machine
+  // min(speed, disp×1.5) брал мусорное поле, хвост записи (01:26–02:24, ~60 км)
+  // становился «idle», поездка обрезалась на 01:26 при честной «Аналитике»
+  // (её конвейер нормализует). Нормализация — ПОСЕССИОННО: критерий «глобальной
+  // несогласованности» (медиана поля < 0,4×геометрии) — свойство ЗАПИСИ,
+  // а не склейки; конкатенация нормализованных рядов снова сортируется —
+  // порядок потока не меняется.
+  const methodPoints: MethodologyPoint[] = [];
+  for (const arr of ptsBySession.values()) {
+    const sessPts: MethodologyPoint[] = arr.map((p) => ({
+      lat: p.lat,
+      lon: p.lon,
+      speed: p.speed,
+      altitude: p.altitude,
+      accuracy: p.accuracy,
+      bearing: p.bearing,
+      timestamp: p.timestamp,
+    }));
+    if (sessPts.length >= 2) {
+      methodPoints.push(...normalizeSessionSpeeds(sessPts));
+    } else {
+      methodPoints.push(...sessPts);
+    }
+  }
+  methodPoints.sort((a, b) => a.timestamp - b.timestamp); // инвариант глобального asc-потока
+  const motion = computeMovingTime(methodPoints);
+  const active = computeActiveTrip(methodPoints, motion, {
+    splitSec: env().TRIP_SPLIT_SEC,
+    minLegSec: env().ACTIVE_TRIP_MIN_LEG_SEC,
+  });
+  if (!active.hasActiveTrip || active.legs.length === 0) return [];
+
+  // (группировка ptsBySession уже построена выше — до state machine)
 
   const legs: ActiveTripLeg[] = active.legs;
   const trips: ComputedTrip[] = [];

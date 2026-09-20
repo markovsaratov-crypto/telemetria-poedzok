@@ -68,8 +68,12 @@ const POINTS_CONCURRENCY = 4;
 
 /** Точки сессий одним набором чанков (F19): map sessionId → точки (timestamp ASC).
  *  Каждая сессия входит ровно в один чанк → хронология внутри сессии сохраняется
- *  (тот же контракт, что loadSessionsForBatch из batch-points.ts). */
-async function loadGroupPointsChunked(sessionIds: string[]): Promise<Map<string, MethodologyPoint[]>> {
+ *  (тот же контракт, что loadSessionsForBatch из batch-points.ts).
+ *  v2.40.9 (Pack C, N-7): ПУБЛИЧНЫЙ — heavy-segments роут грузит точки ОДИН
+ *  раз и передаёт карту в loadGroupSessions И computeGroupHotspots (прежде
+ *  каждый из них перечитывал одни и те же строки — двойной расход квоты
+ *  чтений на каждый холодный показ вкладки «Маршруты»). */
+export async function loadGroupPointsChunked(sessionIds: string[]): Promise<Map<string, MethodologyPoint[]>> {
   const out = new Map<string, MethodologyPoint[]>();
   if (sessionIds.length === 0) return out;
   const limit = pLimit(POINTS_CONCURRENCY);
@@ -155,7 +159,8 @@ function toMs(v: unknown): number {
 export async function loadGroupSessions(
   routeHash: string,
   sinceIso?: string | null,
-  scope?: DataScope
+  scope?: DataScope,
+  opts?: { pointsBySession?: Map<string, MethodologyPoint[]> }
 ): Promise<GroupSession[]> {
   const sc = scope ? sessionScopeSql(scope) : { clause: "", args: [] as unknown[] };
   const sessRes = await libsql.execute({
@@ -170,8 +175,10 @@ export async function loadGroupSessions(
   // вместо N+1 последовательных SELECT (commuter-маршрут за год = сотни сессий
   // × ~200 мс RTT к D1-шлюзу = минуты; анти-паттерн, побеждённый batch-points.ts).
   // CPU-конвейер (ActiveTrip/SessionReliability) по каждой сессии — как раньше.
+  // v2.40.9 (Pack C, N-7): caller может передать УЖЕ загруженные точки
+  // (тяжёлые роуты читают их один раз на loadGroupSessions+computeGroupHotspots).
   const sessionIds = (sessRes.rows as Record<string, unknown>[]).map((s) => String(s.id));
-  const pointsBySession = await loadGroupPointsChunked(sessionIds);
+  const pointsBySession = opts?.pointsBySession ?? (await loadGroupPointsChunked(sessionIds));
 
   const out: GroupSession[] = [];
   for (const row of sessRes.rows) {
@@ -502,7 +509,11 @@ function cellKey(lat: number, lon: number): string {
   return `${Math.floor(lat / GRID_CELL_DEG)},${Math.floor(lon / GRID_CELL_DEG)}`;
 }
 
-export async function computeGroupHotspots(routeHash: string, sessions: GroupSession[]): Promise<{
+export async function computeGroupHotspots(
+  routeHash: string,
+  sessions: GroupSession[],
+  opts?: { pointsBySession?: Map<string, MethodologyPoint[]> }
+): Promise<{
   hotspots: HotspotWithGeometry[];
   totalSegments: number;
   polyline: { lat: number; lon: number }[];
@@ -561,7 +572,9 @@ export async function computeGroupHotspots(routeHash: string, sessions: GroupSes
 
   // v2.38.1 (F19): точки всех сессий — чанковым добором (как loadGroupSessions),
   // а НЕ N+1 последовательных SELECT (тот же анти-паттерн, ×N сессий).
-  const pointsBySession = await loadGroupPointsChunked(sessions.map((s) => s.sessionId));
+  // v2.40.9 (Pack C, N-7): caller передаёт УЖЕ загруженные точки (единая
+  // загрузка на весь heavy-segments-запрос — до этого двойное чтение).
+  const pointsBySession = opts?.pointsBySession ?? (await loadGroupPointsChunked(sessions.map((s) => s.sessionId)));
 
   // 3. Фактические скорости: GPS-точки сессий → ближайшие сегменты
   const severityHist = new Map<string, number[]>();

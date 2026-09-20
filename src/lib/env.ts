@@ -177,6 +177,13 @@ const schema = z.object({
   // d1_quota_70 в процентах. Сброс корзины — 00:00 UTC (как у Cloudflare).
   D1_DAILY_READ_LIMIT: z.coerce.number().int().positive().default(5_000_000),
   D1_QUOTA_ALERT_PCT: z.coerce.number().int().min(1).max(100).default(70),
+  // v2.40.9 (Pack C, P1-в): режим read-back drill у бэкапов. auto (дефолт) —
+  // полный drill (checksum + парсинг + сверка строк) только в ВОСКРЕСНЫЙ
+  // прогон; будни — лёгкая сверка (checksum+размер, без парсинга дампа):
+  // парсинг 66 тыс. строк на 0.1 CPU — заметная часть ночного окна и источник
+  // 502-таймаутов бэкап-крона. full/checksum — явное перекрытие (ранбуки,
+  // после restore-инцидентов).
+  BACKUP_DRILL_MODE: z.enum(["auto", "full", "checksum"]).default("auto"),
 });
 
 export type Env = z.infer<typeof schema>;

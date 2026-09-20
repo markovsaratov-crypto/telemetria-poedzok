@@ -10,9 +10,12 @@
 //   POST /kvcache {key, sql, params, ttlSec} → §B2: SELECT через KV-кэш
 //   POST /kvcache/invalidate {prefix}     → §B2: сброс кэша по префиксу
 //   POST /api/ingest                      → §B1 v2.40.0: алиас /ingest (host-only switch)
+//   POST /api/ingest/sensorlogger         → §P2 v2.40.9: SensorLogger-native канал (it_)
+//   POST /kvstore/get {key}               → §P0-b v2.40.9: сырой KV для артефактов
+//   POST /kvstore/put {key, value, ttlSec} → §P0-b v2.40.9: запись артефакта (≤512 КБ)
 //   POST /admin/turso-migrate {steps?,reset?} → §T-DELTA: шаги мигратора Turso-дельты
 //   GET  /admin/turso-migrate/status      → §T-DELTA: состояние миграции (KV)
-//   GET  /admin/cron-status               → §B5: последние запуски всех cron-джоб
+//   GET  /admin/cron-status               → §B5: cron-джобы + budget дня (§P1-a v2.40.9)
 //   scheduled (Cron Triggers)             → §B5: планировщик вместо cron-сервисов Render
 //
 // Формат ответа повторяет @libsql/client ResultSet (rows как объекты,
@@ -63,7 +66,7 @@
 //      задокументировано в edge-gateway.ts), инвалидация — list по префиксу
 //      с пагинацией (кап 100 страниц = 100k ключей, полный сброс «dash:»).
 
-import { handleEdgeIngest } from "./ingest-port.js";
+import { handleEdgeIngest, handleEdgeSensorLogger } from "./ingest-port.js";
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
@@ -423,6 +426,191 @@ async function handleKvCache(env, body) {
     },
     kv: env.KV && typeof env.KV.get === "function" ? "miss" : "passthrough",
   });
+}
+
+// ——— v2.40.9 (Pack C §P0-b): сырой KV-store для персистентных артефактов ———
+// /kvcache кэширует SELECT-результаты; heavy-segments (N-7) кэширует ГОТОВЫЙ
+// JSON-ответ (watermark-ключ), которому не соответствует никакой одиночный
+// SELECT. Пара /kvstore/get|put — тот же гейт (секрет + rate-limit + кап
+// тела 64 КБ), значение ≤512 КБ, TTL 1..3600 (пол KV 60с). Обратная
+// совместимость: нет биндинга KV → get {value:null}, put {ok:false,kv:"disabled"}.
+async function handleKvStoreGet(env, body) {
+  const { key } = body ?? {};
+  if (typeof key !== "string" || !KVCACHE_KEY_RE.test(key)) {
+    return json({ error: "invalid key" }, 400);
+  }
+  if (!env.KV || typeof env.KV.get !== "function") {
+    return json({ value: null, kv: "disabled" });
+  }
+  try {
+    const value = await env.KV.get(key, "text");
+    return json({ value: value == null ? null : value, kv: value == null ? "miss" : "hit" });
+  } catch (err) {
+    return json({ value: null, kv: "error", error: String(err?.message ?? err) }, 200);
+  }
+}
+
+async function handleKvStorePut(env, body) {
+  const { key, value, ttlSec } = body ?? {};
+  if (typeof key !== "string" || !KVCACHE_KEY_RE.test(key)) {
+    return json({ error: "invalid key" }, 400);
+  }
+  if (typeof value !== "string" || value.length === 0) {
+    return json({ error: "value required (string)" }, 400);
+  }
+  if (value.length > KVCACHE_VALUE_MAX_CHARS) {
+    return json({ error: `value too large (max ${KVCACHE_VALUE_MAX_CHARS} chars)`, limitChars: KVCACHE_VALUE_MAX_CHARS }, 413);
+  }
+  const ttl = Number(ttlSec);
+  if (!Number.isFinite(ttl) || ttl < KVCACHE_TTL_MIN_SEC || ttl > KVCACHE_TTL_MAX_SEC) {
+    return json({ error: `ttlSec out of range (${KVCACHE_TTL_MIN_SEC}..${KVCACHE_TTL_MAX_SEC})` }, 400);
+  }
+  if (!env.KV || typeof env.KV.put !== "function") {
+    return json({ ok: false, kv: "disabled" });
+  }
+  try {
+    await env.KV.put(key, value, { expirationTtl: Math.max(ttl, KV_PLATFORM_MIN_TTL_SEC) });
+    return json({ ok: true, kv: "put" });
+  } catch (err) {
+    return json({ ok: false, kv: "error", error: String(err?.message ?? err) }, 200);
+  }
+}
+
+// ——— v2.40.9 (Pack C §P1-a): БЮДЖЕТ-МЕТР ДНЯ (rows_read/rows_written) ———
+// Счётчик приложения (d1_rows_read_total, db-d1.ts) умирает с каждым ресайклом
+// Render free (2 за 40 минут 20.09) — квота «невидима» большую часть суток.
+// Шлюз видит КАЖДЫЙ ответ D1 (meta.rows_read) — суммируем их в изолейте и
+// троттл-флашим в KV-ключ дня (quota:day:YYYY-MM-DD UTC):
+//   • pending копится в памяти изолейта; флаш — не чаще 60 с (KV-квота free
+//     1 тыс. записей/день; flush 1/мин = 1 440 — на пределе, поэтому флаш
+//     только при ненулевом pending и по waitUntil);
+//   • слияние read-modify-write: параллельные изолейты могут потерять ≤окна
+//     флаша — счётчик для наблюдаемости, не для биллинга;
+//   • исчерпание (D1_ERROR «exceeded … row read limit») пишется в запись дня
+//     как quotaExhaustedAt — приложение читает это в /admin/cron-status
+//     (алерт d1_quota_70/90, alerts.ts P1-a) и в честный /health (m-20).
+const BUDGET_KV_PREFIX = "quota:day:";
+const BUDGET_FLUSH_MIN_MS = 60_000;
+const BUDGET_DAILY_READ_LIMIT = 5_000_000; // free tier D1 (для процента в ответе)
+
+const globalForBudget = globalThis;
+if (!globalForBudget.__d1GatewayBudget) {
+  globalForBudget.__d1GatewayBudget = { day: "", read: 0, written: 0, quotaExhaustedAt: null, lastFlushAt: 0, flushInFlight: false };
+}
+const budgetState = globalForBudget.__d1GatewayBudget;
+
+function budgetDayKey(now = new Date()) {
+  return now.toISOString().slice(0, 10);
+}
+
+/** Учёт ответа D1 (после успешного /query или каждого элемента /batch). */
+function budgetTrack(rowsRead, rowsWritten) {
+  const day = budgetDayKey();
+  if (budgetState.day !== day) {
+    // полночь UTC: pending прошлого дня уходит флашем до сброса
+    if (budgetState.read > 0 || budgetState.written > 0 || budgetState.quotaExhaustedAt) {
+      flushBudgetPending({ forceDay: budgetState.day });
+    }
+    budgetState.day = day;
+    budgetState.read = 0;
+    budgetState.written = 0;
+    budgetState.quotaExhaustedAt = null;
+  }
+  const read = Number(rowsRead);
+  const written = Number(rowsWritten);
+  if (Number.isFinite(read) && read > 0) budgetState.read += read;
+  if (Number.isFinite(written) && written > 0) budgetState.written += written;
+}
+
+/** Отметка исчерпания read-квоты (из catch /query,/batch — текст D1_ERROR). */
+function budgetMarkExhausted(errMessage) {
+  if (/exceeded D1'?s free tier daily row read limit/i.test(String(errMessage))) {
+    if (!budgetState.quotaExhaustedAt) {
+      budgetState.quotaExhaustedAt = new Date().toISOString();
+      if (budgetState.day === "") budgetState.day = budgetDayKey(); // прайм для snapshot
+    }
+  }
+}
+
+/** Флаш pending в KV (merge). Троттл 60 с; вызовы из waitUntil/scheduled.
+ * Payload захвачен СИНХРОННО ДО первого await — гонка с budgetTrack исключена
+ * (сброс после await защищён повторной сверкой state.day: полночь в полёте
+ * не затирает pending НОВОГО дня; ≤60-секундное окно на самой границе суток
+ * может потерять хвост старого — счётчик наблюдаемости, не биллинг). */
+async function flushBudgetPending(opts = {}) {
+  const state = budgetState;
+  if (state.flushInFlight) return;
+  const day = opts.forceDay ?? state.day;
+  const isCurrent = day === state.day;
+  const payload = isCurrent
+    ? { read: state.read, written: state.written, quotaExhaustedAt: state.quotaExhaustedAt }
+    : (opts.pending ?? { read: 0, written: 0, quotaExhaustedAt: null });
+  if (payload.read <= 0 && payload.written <= 0 && !payload.quotaExhaustedAt) return;
+  if (isCurrent && Date.now() - state.lastFlushAt < BUDGET_FLUSH_MIN_MS && !opts.force) return;
+  const kv = globalEnvKV();
+  if (!kv) return; // нет KV — счётчик живёт только в изолейте (snapshot честен)
+  state.flushInFlight = true;
+  try {
+    const key = BUDGET_KV_PREFIX + day;
+    let base = { rowsRead: 0, rowsWritten: 0, quotaExhaustedAt: null };
+    try {
+      const raw = await kv.get(key, "text");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Number.isFinite(Number(parsed?.rowsRead))) base.rowsRead = Number(parsed.rowsRead);
+        if (Number.isFinite(Number(parsed?.rowsWritten))) base.rowsWritten = Number(parsed.rowsWritten);
+        if (typeof parsed?.quotaExhaustedAt === "string") base.quotaExhaustedAt = parsed.quotaExhaustedAt;
+      }
+    } catch { /* битая запись = начинаем с нуля */ }
+    const record = {
+      day,
+      rowsRead: base.rowsRead + payload.read,
+      rowsWritten: base.rowsWritten + payload.written,
+      quotaExhaustedAt: payload.quotaExhaustedAt ?? base.quotaExhaustedAt,
+      updatedAt: new Date().toISOString(),
+    };
+    await kv.put(key, JSON.stringify(record), { expirationTtl: 2 * 24 * 60 * 60 });
+    if (isCurrent && state.day === day) {
+      state.read = 0;
+      state.written = 0;
+      state.lastFlushAt = Date.now();
+    }
+  } catch { /* KV сбой — pending остаётся, следующий флаш донесёт */ }
+  finally {
+    state.flushInFlight = false;
+  }
+}
+
+// текущий env.KV для флаша из запланированных путей (fetch/scheduled держат env
+// в замыкании, budgetTrack — синхронный; глобальная ссылка обновляется в fetch)
+let __envKV = null;
+function globalEnvKV() {
+  return __envKV && typeof __envKV.get === "function" ? __envKV : null;
+}
+
+/** Полный бюджет дня (KV + pending изолейта) — для /admin/cron-status. */
+async function budgetSnapshot(env) {
+  const day = budgetDayKey();
+  let record = { day, rowsRead: 0, rowsWritten: 0, quotaExhaustedAt: null, updatedAt: null };
+  try {
+    if (env.KV && typeof env.KV.get === "function") {
+      const raw = await env.KV.get(BUDGET_KV_PREFIX + day, "text");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Number.isFinite(Number(parsed?.rowsRead))) record.rowsRead = Number(parsed.rowsRead);
+        if (Number.isFinite(Number(parsed?.rowsWritten))) record.rowsWritten = Number(parsed.rowsWritten);
+        if (typeof parsed?.quotaExhaustedAt === "string") record.quotaExhaustedAt = parsed.quotaExhaustedAt;
+        if (typeof parsed?.updatedAt === "string") record.updatedAt = parsed.updatedAt;
+      }
+    }
+  } catch { /* KV недоступен — только pending */ }
+  if (budgetState.day === day) {
+    record.rowsRead += budgetState.read;
+    record.rowsWritten += budgetState.written;
+    record.quotaExhaustedAt = record.quotaExhaustedAt ?? budgetState.quotaExhaustedAt;
+  }
+  record.quota = BUDGET_DAILY_READ_LIMIT;
+  return record;
 }
 
 // ——— v2.39.1 (§B2): инвалидация кэша по префиксу ———
@@ -919,14 +1107,17 @@ function TURSO_CRON_LAST_KEY(job) {
 // v2.38.2 (линт): воркер вынесен в именованную переменную ДО export default
 // (import/no-anonymous-default-export) — поведение идентично module-syntax.
 const worker = {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    // v2.40.9 (Pack C §P1-a): глобальная ссылка KV для троттл-флаша бюджета
+    // (budgetTrack синхронный; flush — из waitUntil/scheduled по этой ссылке)
+    __envKV = env.KV ?? null;
 
     if (url.pathname === "/health") {
       if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
       // v2.40.5 (Pack B): version — маркер деплоя шлюза (как APP_VERSION у
       // приложения): верификация «в воркере новый код» без wrangler tail.
-      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.40.5" });
+      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.40.9" });
     }
 
     // v2.39.1 (§B1): edge-инжест — ДО гейта X-Gateway-Secret: канал имеет
@@ -939,6 +1130,14 @@ const worker = {
       return await handleEdgeIngest(request, env);
     }
 
+    // v2.40.9 (Pack C §P2): SensorLogger-native канал на границе — Push URL
+    // меняет ТОЛЬКО хост (push.poedzok.fun → d1-gateway…): путь, ?token=it_…
+    // и ?deviceId= остаются как у приложения. Своя авторизация (глобальный
+    // INGEST_TOKEN ИЛИ it_-токен с верификацией HMAC по User-таблице).
+    if (url.pathname === "/api/ingest/sensorlogger") {
+      return await handleEdgeSensorLogger(request, env);
+    }
+
     // v2.40.0 (§B5/§T-DELTA): статус-эндпоинты наблюдаемости (GET, свой
     // секрет-гейт — до общего метод-чека POST-канала).
     if (url.pathname === "/admin/turso-migrate/status" || url.pathname === "/admin/cron-status") {
@@ -948,7 +1147,10 @@ const worker = {
       }
       const turso = await loadTursoState(env);
       const cron = await readCronStatus(env);
-      return json({ turso, cron, schedules: CRON_SCHEDULES, appPaths: CRON_APP_PATHS });
+      // v2.40.9 (Pack C §P1-a): дневной бюджет чтений D1 — счётчик ШЛЮЗА
+      // (KV-день + pending изолейта; переживает ресайклы/сны приложения).
+      const budget = await budgetSnapshot(env);
+      return json({ turso, cron, budget, schedules: CRON_SCHEDULES, appPaths: CRON_APP_PATHS });
     }
 
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
@@ -961,10 +1163,14 @@ const worker = {
     // v2.38.1 (ревью F1): лимит тела — предчек по content-length (дёшево, до
     // чтения) и фактический по байтам стрима (readBodyLimited ниже).
     // v2.39.1 (§B2): /kvcache/* — отдельный меньший кап (64 КБ: sql+params).
+    // v2.40.9 (Pack C): /kvstore/* — тот же малый кап (ключ+значение ≤512 КБ
+    // значения при 64 КБ ЗАПРОСА перекрываются ниже валидацией; heavy-segments
+    // ответ ~16 КБ — с запасом).
     const maxBody =
       Number(env.GATEWAY_MAX_BODY_BYTES) > 0 ? Number(env.GATEWAY_MAX_BODY_BYTES) : MAX_BODY_BYTES_DEFAULT;
     const bodyLimit =
-      url.pathname === "/kvcache" || url.pathname === "/kvcache/invalidate"
+      url.pathname === "/kvcache" || url.pathname === "/kvcache/invalidate" ||
+      url.pathname === "/kvstore/get" || url.pathname === "/kvstore/put"
         ? Math.min(maxBody, KVCACHE_MAX_BODY_BYTES)
         : maxBody;
     const cl = Number(request.headers.get("content-length") || "0");
@@ -1002,6 +1208,9 @@ const worker = {
         let stmt = env.DB.prepare(sql);
         if (Array.isArray(params) && params.length > 0) stmt = stmt.bind(...params.map(normParam));
         const res = await stmt.all();
+        // v2.40.9 (Pack C §P1-a): учёт расхода в бюджет-метр дня
+        budgetTrack(res.meta?.rows_read ?? 0, res.meta?.rows_written ?? 0);
+        if (ctx && ctx.waitUntil) ctx.waitUntil(flushBudgetPending({}));
         return json({
           rows: bigintSafe(res.results ?? []),
           rowsAffected: res.meta?.changes ?? 0,
@@ -1020,6 +1229,15 @@ const worker = {
       }
       if (url.pathname === "/kvcache/invalidate") {
         return await handleKvInvalidate(env, body);
+      }
+
+      // v2.40.9 (Pack C §P0-b): сырой KV-store персистентных артефактов
+      // (watermark-кэш heavy-segments, N-7) — те же гейты, handler выше.
+      if (url.pathname === "/kvstore/get") {
+        return await handleKvStoreGet(env, body);
+      }
+      if (url.pathname === "/kvstore/put") {
+        return await handleKvStorePut(env, body);
       }
 
       // v2.40.0 (§T-DELTA): ручной запуск мигратора Turso-дельты (шаги
@@ -1066,6 +1284,11 @@ const worker = {
         });
         // env.DB.batch = АТОМАРНАЯ транзакция: либо все стейтменты, либо ничего.
         const results = await env.DB.batch(stmts);
+        // v2.40.9 (Pack C §P1-a): бюджет-метр — сумма по стейтментам батча
+        for (const r of results) {
+          budgetTrack(r.meta?.rows_read ?? 0, r.meta?.rows_written ?? 0);
+        }
+        if (ctx && ctx.waitUntil) ctx.waitUntil(flushBudgetPending({}));
         return json(results.map((r) => ({
           rows: bigintSafe(r.results ?? []),
           rowsAffected: r.meta?.changes ?? 0,
@@ -1079,6 +1302,11 @@ const worker = {
 
       return json({ error: "not found" }, 404);
     } catch (err) {
+      // v2.40.9 (Pack C §P1-a/m-20): D1-ошибка квоты — отметка в бюджет-метре
+      // (quotaExhaustedAt дня: алерт d1_quota_70/90 и честный /health приложения
+      // читают это из /admin/cron-status без единой строки квоты)
+      budgetMarkExhausted(String(err?.message ?? err));
+      if (ctx && ctx.waitUntil) ctx.waitUntil(flushBudgetPending({ force: true }));
       return json({ error: String(err?.message ?? err), d1: true }, 500);
     }
   },
@@ -1088,6 +1316,10 @@ const worker = {
   // внутренний шаг мигратора Turso) → запись cron:last:<job> в KV
   // (наблюдаемость через GET /admin/cron-status) + структурный лог.
   async scheduled(controller, env, ctx) {
+    // v2.40.9 (Pack C §P1-a): флаш бюджета дня (троттл внутри; тик */1 —
+    // дожим хвоста после тихих минут)
+    __envKV = env.KV ?? null;
+    const budgetFlush = flushBudgetPending({ force: true }).catch(() => {});
     // нормализуем ОБЕ стороны (ключи карты и controller.cron): CF может
     // прислать выражение как в канонической форме («* * * * *»), так и
     // дословно («*/1 * * * *») — точное сравнение ненадёжно в обе стороны.
@@ -1135,7 +1367,9 @@ const worker = {
       }
       console.log(JSON.stringify({ level: "info", msg: "d1-gateway cron run", cron: controller.cron, jobs, results }));
     })();
-    ctx.waitUntil(run);
+    // v2.40.9 (Pack C §P1-a): run + флаш бюджета — ОБА под waitUntil (флаш
+    // не должен потеряться при заморозке изолейта сразу после тика)
+    ctx.waitUntil(Promise.allSettled([run, budgetFlush]));
   },
 };
 

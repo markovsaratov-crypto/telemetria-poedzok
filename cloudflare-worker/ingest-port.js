@@ -575,3 +575,591 @@ export async function handleEdgeIngest(request, env) {
     return jsonResponse({ error: "Internal Server Error" }, 500, requestId);
   }
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// v2.40.9 (Pack C §P2): EDGE-ПОРТ SensorLogger-КАНАЛА (/api/ingest/sensorlogger)
+// ════════════════════════════════════════════════════════════════════════
+//
+// ЦЕЛЬ (план Pack C, владелец подтвердил «pack c делай полностью»): Push URL
+// SensorLogger меняет ТОЛЬКО ХОСТ (push.poedzok.fun → d1-gateway…), путь
+// /api/ingest/sensorlogger, ?token=it_… и ?deviceId=phone остаются как есть.
+// Телефон мимо Render: латентность −50%+ (edge рядом с РФ и D1), прокси-тело
+// не жжёт CPU инстанса, канал живёт при сне инстанса (cron-tick всё равно
+// будит Render каждую минуту — исполнители конвейера остаются на месте).
+//
+// ЗЕРКАЛО /api/ingest/sensorlogger v2.40.8 (портируются ДОСЛОВНО):
+//   • нативный формат: массив / {payload|points|data|records|…} / именованные
+//     записи {name,time,values} / вложенный {data:{location:[…]}} — весь
+//     экстрактор контейнеров (v2.10.7/v2.10.8) с гистограммой для диагностики;
+//   • фильтры: parseTimestamp (магнитуда F74), ±24 ч, accuracy ≤ 100 м,
+//     lat/lon диапазоны, маркер «нет фиксa» (-1,-1), speed/altitude/bearing
+//     диапазоны — зеркала extractPoint;
+//   • идемпотентность IngestMessage(deviceId, messageId): быстрая проверка
+//     ДО вставки + запись ПОСЛЕ успешной вставки точек (R2) + повторная
+//     проверка под «локом» (MI-6: в воркере роль lock'а играет атомарный
+//     INSERT…WHERE NOT EXISTS создания сессии — гонка параллельных ретраев
+//     разрешается в duplicate);
+//   • корреляция сессий по ГЕПСУ GPS-времени (R4: endTime vs первая точка
+//     батча, fallback updatedAt wall-clock; гэп ≥ SESSION_GAP_MS → НОВАЯ
+//     сессия), границы startTime/endTime монотонные MIN/MAX (R11);
+//   • многорядные INSERT точек чанками floor(90/9)=10 (F4);
+//   • rollup-инкремент дня последней точки (§A1.5);
+//   • паритет ответов: 201/200-new-batch/200-duplicate/200-test/400/413/500.
+//
+// ЧЕСТНЫЕ ОТЛИЧИЯ (документированные, не «тихая семантика»):
+//   1) ФИНАЛИЗАЦИЯ старой сессии при гэпе НЕ вызывается на edge (весь
+//      finalize-конвейер — поездки/кэши/traffic-jobs — живёт в приложении):
+//      сессия остаётся recording и закрывается жнецом приложения ≤ ~10 мин
+//      (worker-tick */1; порог max(10 мин, SESSION_GAP_MS×10), F8). Дата
+//      ложится мгновенно, поездка/кэши появляются с задержкой финализации.
+//   2) ЖИВОЕ tripId/extendTripOnPoints не выполняются (v2.26/v2.35-логика
+//      приложения) — состав поездки досчитает финализация (как для любых
+//      «поздних данных»).
+//   3) Инжест-трейс/метрики/алерт-исходы (ingest-trace.ts, F40) — только в
+//      консоль-логе воркера (JSON-строка, как cron-логи); _AlertState-канал
+//      приложения остаётся за Render-каналом.
+//
+// БЕЗОПАСНОСТЬ (паритет F11/token-check):
+//   • авторизация: X-Gateway-Secret (приложение) / глобальный INGEST_TOKEN
+//     (Bearer/?token=, канал владельца userId NULL) / per-user it_-токен —
+//     верификация HMAC-SHA256(SESSION_SECRET, "<apiKey>:ingest") по
+//     User-таблице (первый SELECT ~1-2 строки; результат кэшируется KV на
+//     10 минут по sha256-префиксу токена — БЕЗ хранения apiKey в KV);
+//   • timing-safe сравнения — дайджесты SHA-256 (tokenMatches выше);
+//   • SQL только параметризованный, тексты — константы модуля.
+
+// ——— §P2: it_-токен (порт token-check.ts F11) ———
+/** Формат: it_<32 hex> — производный ingest-only токен (НЕ apiKey). */
+export const IT_TOKEN_RE = /^it_[0-9a-f]{32}$/;
+
+/** Первые 32 hex(HMAC-SHA256(sessionSecret, "<apiKey>:ingest")) → it_-токен. */
+export async function deriveItToken(sessionSecret, apiKey) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(sessionSecret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(`${apiKey}:ingest`));
+  const hex = Array.from(new Uint8Array(sig), (b) => b.toString(16).padStart(2, "0")).join("");
+  return `it_${hex.slice(0, 32)}`;
+}
+
+/** hex sha256 (для KV-ключа кэша верификации). */
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const IT_CACHE_TTL_SEC = 600; // 10 мин: ротация apiKey отзывает токен с ≤10-мин окном
+
+/**
+ * Верификация it_-токена → userId | null. Позитивный результат кэшируется
+ * в KV по sha256-префиксу токена (в KV не попадает ни apiKey, ни сам токен);
+ * негативы НЕ кэшируются (brute-force не получает бесплатную память).
+ * User-таблица маленькая (single-owner) — один SELECT на промахе кэша.
+ */
+export async function verifyEdgeItToken(env, token) {
+  if (!IT_TOKEN_RE.test(String(token))) return null;
+  if (!env.SESSION_SECRET) return null; // it_-канал не настроен (секрет не задан)
+  const cacheKey = `edgeit:${(await sha256Hex(String(token))).slice(0, 24)}`;
+  let cached = null;
+  try {
+    if (env.KV && typeof env.KV.get === "function") {
+      cached = await env.KV.get(cacheKey, "text");
+    }
+  } catch { /* KV сбой — прямая верификация */ }
+  if (cached && /^[A-Za-z0-9_-]{1,64}$/.test(cached)) return cached; // userId
+  const rows = await env.DB.prepare("SELECT id, apiKey FROM User").all();
+  for (const u of (rows.results ?? [])) {
+    const expected = await deriveItToken(env.SESSION_SECRET, String(u.apiKey));
+    if (await tokenMatches(String(token), expected)) {
+      try {
+        if (env.KV && typeof env.KV.put === "function") {
+          await env.KV.put(cacheKey, String(u.id), { expirationTtl: IT_CACHE_TTL_SEC });
+        }
+      } catch { /* кэш не критичен */ }
+      return String(u.id);
+    }
+  }
+  return null;
+}
+
+// ——— §P2: экстрактор нативного формата (порт route.ts v2.10.7/8) ———
+const DEVICE_ID_RE = /^[A-Za-z0-9_.:\- ]{1,64}$/;
+const DEVICE_NAME_RE = /^[^\n\r]{1,128}$/;
+const MAX_BATCH_ITEMS = 5000;
+const MAX_POINT_ACCURACY_M = 100; // AUDIT B-5 (зеркало; = MAX_TRUSTED_ACCURACY_M)
+const ARRAY_KEYS = [
+  "payload", "points", "data", "records", "readings", "sensors",
+  "measurements", "samples", "locations", "entries", "batches",
+];
+const LOCATION_NAMES = ["location", "gps", "position", "coords", "coordinates", "latitude"];
+
+/** Именованная запись {name, time, values} → плоская точка с location. */
+function normalizeItem(item) {
+  if (item && typeof item === "object" && !Array.isArray(item)) {
+    const r = item;
+    if (typeof r.name === "string" && r.values && typeof r.values === "object" && !Array.isArray(r.values)) {
+      return { ...r, time: r.time ?? r.timestamp, location: r.values };
+    }
+  }
+  return item;
+}
+
+/** Массив точек из тела: корневой массив / известные контейнеры / вложенный data. */
+export function extractItems(body) {
+  if (Array.isArray(body)) return body.map(normalizeItem);
+  if (body && typeof body === "object") {
+    const obj = body;
+    for (const key of ARRAY_KEYS) {
+      const v = obj[key];
+      if (Array.isArray(v)) {
+        if (v.length === 0) return [];
+        if (Array.isArray(v[0])) return v.flat().map(normalizeItem);
+        return v.map(normalizeItem);
+      }
+    }
+    const data = obj.data;
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      const nested = data;
+      for (const key of [...ARRAY_KEYS, "location", "gps", "position", "coords"]) {
+        const v = nested[key];
+        if (Array.isArray(v) && v.length > 0) return v.map(normalizeItem);
+      }
+    }
+    return [body];
+  }
+  return null;
+}
+
+/** Нормализация точки (порт extractPoint): контейнеры, диапазоны, фильтры. */
+export function extractPoint(raw, nowMs) {
+  const loc = raw.location ?? raw.coords ?? raw.position ?? raw.gps ?? {};
+  const lat = raw.latitude ?? raw.lat ?? loc.latitude ?? loc.lat;
+  const lon = raw.longitude ?? raw.lon ?? raw.lng ?? loc.longitude ?? loc.lon ?? loc.lng;
+  if (lat == null || lon == null || isNaN(Number(lat)) || isNaN(Number(lon))) return null;
+  if (Math.abs(Number(lat)) > 90 || Math.abs(Number(lon)) > 180) return null;
+  if (Number(lat) === -1 && Number(lon) === -1) return null; // «нет GPS-фикса»
+  const tsRaw = raw.time ?? raw.timestamp;
+  if (tsRaw == null) return null;
+  const timestampMs = parseTimestamp(String(tsRaw));
+  if (timestampMs == null) return null;
+  if (Math.abs(nowMs - timestampMs) > TS_PLAUSIBILITY_MS) return null;
+  const speed = raw.speed ?? loc.speed ?? null;
+  const altitude = raw.altitude ?? loc.altitude ?? null;
+  const accuracy = raw.horizontalAccuracy ?? raw.accuracy ?? loc.horizontalAccuracy ?? loc.accuracy ?? null;
+  const bearing = raw.course ?? raw.bearing ?? raw.heading ?? loc.course ?? loc.bearing ?? loc.heading ?? null;
+  return {
+    lat: Number(lat),
+    lon: Number(lon),
+    speed: speed != null && Number(speed) >= 0 ? Number(speed) : null,
+    altitude: altitude != null && Number(altitude) >= -1000 ? Number(altitude) : null,
+    accuracy: accuracy != null && Number(accuracy) >= 0 ? Number(accuracy) : null,
+    bearing: bearing != null && Number(bearing) >= 0 && Number(bearing) <= 360 ? Number(bearing) : null,
+    timestampMs,
+  };
+}
+
+/** Гистограмма сенсоров батча — краткий образец структуры для лога. */
+function describeItems(items) {
+  const hist = new Map();
+  let hasLocation = false;
+  for (const it of items) {
+    const name = it && typeof it === "object" && typeof it.name === "string" ? it.name : "(без name)";
+    if (LOCATION_NAMES.some((ln) => name.toLowerCase().includes(ln))) hasLocation = true;
+    hist.set(name, (hist.get(name) ?? 0) + 1);
+  }
+  const histStr = [...hist.entries()].sort((a, b) => b[1] - a[1]).map(([n, c]) => `${n}×${c}`).join(", ");
+  return `items[${items.length}] sensors: ${histStr}${hasLocation ? " · location OK" : " · location-записей НЕТ"}`;
+}
+
+// ——— §P2: стейтменты SensorLogger-конвейера (зеркало route.ts) ———
+
+/** Последняя recording-сессия канала (userId NULL — владелец / = ? — юзер). */
+function findActiveRecordingStatement(deviceId, userId) {
+  if (userId != null) {
+    return {
+      sql: "SELECT id, startTime, endTime, updatedAt FROM Session WHERE deviceId = ? AND status = 'recording' AND deletedAt IS NULL AND userId = ? ORDER BY updatedAt DESC LIMIT 1",
+      args: [deviceId, userId],
+    };
+  }
+  return {
+    sql: "SELECT id, startTime, endTime, updatedAt FROM Session WHERE deviceId = ? AND status = 'recording' AND deletedAt IS NULL AND userId IS NULL ORDER BY updatedAt DESC LIMIT 1",
+    args: [deviceId],
+  };
+}
+
+/**
+ * Создание recording-сессии с АТОМНЫМ анти-гонкой гардом (роль writeLock C-14):
+ * INSERT…SELECT…WHERE NOT EXISTS — два параллельных батча одного девайса не
+ * создадут две сессии: проигравший (changes=0) перечитывает активную и
+ * продолжает её (см. вызов ниже). Точки вставляются только в СУЩЕСТВУЮЩИЙ id.
+ */
+function createRecordingStatement(opts) {
+  const userIdSql = opts.userId != null ? "userId, " : "";
+  const userIdPh = opts.userId != null ? "?, " : "";
+  const guard = opts.userId != null
+    ? "NOT EXISTS (SELECT 1 FROM Session WHERE deviceId = ? AND status = 'recording' AND deletedAt IS NULL AND userId = ?)"
+    : "NOT EXISTS (SELECT 1 FROM Session WHERE deviceId = ? AND status = 'recording' AND deletedAt IS NULL AND userId IS NULL)";
+  const args = [
+    opts.sessionId, opts.deviceId, opts.clientId, opts.deviceName,
+    opts.startTimeIso, opts.startTimeIso, opts.nowIso, opts.nowIso,
+    ...(opts.userId != null ? [opts.userId] : []),
+    opts.deviceId,
+    ...(opts.userId != null ? [opts.userId] : []),
+  ];
+  return {
+    sql: `INSERT INTO Session (id, deviceId, clientId, deviceName, startTime, endTime, pointCount, payloadBytes, status, createdAt, updatedAt${opts.userId != null ? ", userId" : ""})
+          SELECT ?, ?, ?, ?, ?, ?, 0, 0, 'recording', ?, ?${opts.userId != null ? ", ?" : ""}
+          WHERE ${guard}`,
+    args,
+  };
+}
+
+/** Многорядные INSERT точек чанками 10×9 (F4). id генерируются здесь. */
+function pointInsertStatements(sessionId, points, newId) {
+  const POINT_COLS = ["id", "sessionId", "lat", "lon", "speed", "altitude", "accuracy", "timestamp", "bearing"];
+  const ph = `(${POINT_COLS.map(() => "?").join(", ")})`;
+  const CH = Math.max(1, Math.floor(EDGE_PARAM_BUDGET / POINT_COLS.length)); // 10
+  const stmts = [];
+  for (let i = 0; i < points.length; i += CH) {
+    const chunk = points.slice(i, i + CH);
+    const args = [];
+    for (const p of chunk) {
+      args.push(newId(), sessionId, p.lat, p.lon, p.speed, p.altitude, p.accuracy, p.timestampMs, p.bearing);
+    }
+    stmts.push({
+      sql: `INSERT INTO GpsPoint (${POINT_COLS.join(", ")}) VALUES ${chunk.map(() => ph).join(", ")}`,
+      args,
+    });
+  }
+  return stmts;
+}
+
+// ——— §P2: ГОТОВЫЙ ЭНДПОИНТ (монтируется в d1-gateway.js ДО гейта секрета) ———
+/**
+ * @param {Request} request
+ * @param {{DB: D1Database, KV?: KVNamespace, GATEWAY_SECRET?: string, INGEST_TOKEN?: string, SESSION_SECRET?: string, SESSION_GAP_MS?: string|number, EDGE_INGEST_MAX_BYTES?: number, EDGE_INGEST_ROLLUP_ENABLED?: string, TELEMAT_TIMEZONE?: string}} env
+ * @returns {Promise<Response>}
+ */
+export async function handleEdgeSensorLogger(request, env) {
+  const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
+  const startedAt = Date.now();
+  try {
+    const url = new URL(request.url);
+
+    // ——— GET: тест-проба SensorLogger (паритет route.ts) ———
+    if (request.method === "GET") {
+      const queryToken = url.searchParams.get("token");
+      const bearer = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || null;
+      const gwSecret = env.GATEWAY_SECRET || null;
+      const ingestToken = env.INGEST_TOKEN || null;
+      const viaSecret = gwSecret ? await tokenMatches(request.headers.get("x-gateway-secret"), gwSecret) : false;
+      const viaIngest = (bearer && ingestToken && (await tokenMatches(bearer, ingestToken))) ||
+        (queryToken && ingestToken && (await tokenMatches(queryToken, ingestToken)));
+      let viaIt = false;
+      if (!viaSecret && !viaIngest) {
+        const presented = bearer ?? queryToken;
+        if (presented && IT_TOKEN_RE.test(presented)) viaIt = (await verifyEdgeItToken(env, presented)) != null;
+      }
+      if (!viaSecret && !viaIngest && !viaIt) {
+        return jsonResponse({ ok: false, error: "Unauthorized" }, 401, requestId);
+      }
+      return jsonResponse({
+        ok: true,
+        endpoint: "/api/ingest/sensorlogger",
+        method: "POST",
+        edge: true,
+        format: "JSON array of { time, location: { latitude, longitude, speed, altitude, horizontalAccuracy, course } }",
+        auth: "Authorization: Bearer <INGEST_TOKEN or it_ ingest token> OR ?token=<same>",
+        requiredParams: ["deviceId"],
+        optionalParams: ["deviceName"],
+      }, 200, requestId);
+    }
+
+    if (request.method !== "POST") {
+      return jsonResponse({ error: "Method not allowed" }, 405, requestId);
+    }
+
+    // ——— авторизация: X-Gateway-Secret / INGEST_TOKEN (владелец) / it_ (юзер) ———
+    const queryToken = url.searchParams.get("token");
+    const bearer = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || null;
+    const gwSecret = env.GATEWAY_SECRET || null;
+    const ingestToken = env.INGEST_TOKEN || null;
+    const viaSecret = gwSecret ? await tokenMatches(request.headers.get("x-gateway-secret"), gwSecret) : false;
+    const viaIngest = (bearer && ingestToken && (await tokenMatches(bearer, ingestToken))) ||
+      (queryToken && ingestToken && (await tokenMatches(queryToken, ingestToken)));
+    let ingestUserId = null; // канал владельца
+    if (!viaSecret && !viaIngest) {
+      const presented = bearer ?? queryToken;
+      if (presented && IT_TOKEN_RE.test(presented)) {
+        const userId = await verifyEdgeItToken(env, presented);
+        if (userId == null) {
+          return jsonResponse(
+            { error: "Unauthorized: Invalid it_ ingest token (edge: SESSION_SECRET/User verification failed — Render channel remains available)" },
+            401,
+            requestId
+          );
+        }
+        ingestUserId = userId;
+      } else {
+        return jsonResponse(
+          {
+            error: "Unauthorized",
+            reason: ingestToken
+              ? "Bearer INGEST_TOKEN / ?token= (SensorLogger) or X-Gateway-Secret required; per-user apiKey — only Bearer via Render /api/ingest"
+              : "X-Gateway-Secret required (INGEST_TOKEN not configured on worker)",
+          },
+          401,
+          requestId
+        );
+      }
+    }
+
+    // ——— deviceId/deviceName из query (C-21) ———
+    const deviceId = url.searchParams.get("deviceId");
+    if (!deviceId) {
+      return jsonResponse({ error: "deviceId query param required. Example: ?deviceId=iphone-15-pro" }, 400, requestId);
+    }
+    if (!DEVICE_ID_RE.test(deviceId)) {
+      return jsonResponse({ error: "Invalid deviceId: 1-64 chars, letters/digits/dots/dashes/colons/spaces only" }, 400, requestId);
+    }
+    const deviceNameRaw = url.searchParams.get("deviceName") || "SensorLogger";
+    const deviceName = DEVICE_NAME_RE.test(deviceNameRaw) ? deviceNameRaw.slice(0, 128) : "SensorLogger";
+
+    // ——— тело с капом (F20) → JSON ———
+    const maxBytes = env.EDGE_INGEST_MAX_BYTES || EDGE_INGEST_MAX_BYTES;
+    const raw = await readBodyCapped(request, maxBytes);
+    if (raw == null) {
+      return jsonResponse({ error: "Payload too large", limit: maxBytes }, 413, requestId);
+    }
+    let body = null;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = null;
+    }
+    if (!body) {
+      return jsonResponse({ error: "Invalid JSON body" }, 400, requestId);
+    }
+
+    // ——— идемпотентность IngestMessage (быстрая проверка, R2) ———
+    const msgId = body && typeof body === "object" && !Array.isArray(body) ? body.messageId : undefined;
+    const hasMsgId = msgId != null && (typeof msgId === "number" || typeof msgId === "string");
+    if (hasMsgId) {
+      try {
+        const seen = await env.DB.prepare("SELECT 1 FROM IngestMessage WHERE deviceId = ? AND messageId = ? LIMIT 1")
+          .bind(deviceId, String(msgId)).first();
+        if (seen) {
+          return jsonResponse(
+            { ok: true, duplicate: true, message: "Batch already processed (messageId seen)", deviceId, deviceName },
+            200,
+            requestId
+          );
+        }
+      } catch { /* таблицы нет (старая БД) — продолжаем без идемпотентности */ }
+    }
+
+    // ——— извлечение точек (нативные контейнеры) ———
+    const items = extractItems(body);
+    if (!items || items.length === 0) {
+      console.log(JSON.stringify({ level: "info", msg: "edge sensorlogger: empty/test push", requestId, deviceId, shape: typeof body }));
+      return jsonResponse(
+        { ok: true, test: true, message: "SensorLogger push test passed. Ready to receive GPS data.", deviceId, deviceName },
+        200,
+        requestId
+      );
+    }
+    if (items.length > MAX_BATCH_ITEMS) {
+      return jsonResponse({ error: "Too many points in batch", limit: MAX_BATCH_ITEMS, received: items.length }, 413, requestId);
+    }
+
+    const nowMs = Date.now();
+    let droppedInaccurate = 0;
+    let droppedUnparsed = 0;
+    const points = [];
+    for (const item of items) {
+      const p = extractPoint(item, nowMs);
+      if (p == null) {
+        droppedUnparsed++;
+        continue;
+      }
+      if (p.accuracy != null && p.accuracy > MAX_POINT_ACCURACY_M) {
+        droppedInaccurate++;
+        continue;
+      }
+      points.push(p);
+    }
+    if (points.length === 0) {
+      console.log(JSON.stringify({
+        level: "info", msg: "edge sensorlogger: no GPS in batch", requestId, deviceId,
+        droppedInaccurate, droppedUnparsed, sample: describeItems(items).slice(0, 300),
+      }));
+      return jsonResponse(
+        {
+          ok: true,
+          test: true,
+          message: "No GPS points extracted from batch (missing location data). Push test passed.",
+          deviceId,
+          deviceName,
+          payloadShape: describeItems(items).slice(0, 300),
+        },
+        200,
+        requestId
+      );
+    }
+    points.sort((a, b) => a.timestampMs - b.timestampMs);
+
+    // ——— корреляция сессий (R4: гэп по GPS-времени) ———
+    const sessionGapMs = Number(env.SESSION_GAP_MS) > 0 ? Number(env.SESSION_GAP_MS) : 60_000;
+    const lookup = findActiveRecordingStatement(deviceId, ingestUserId);
+    const recent = await env.DB.prepare(lookup.sql).bind(...lookup.args).first();
+
+    let sessionId = null;
+    let sessionStartMs = NaN;
+    let sessionEndMs = NaN;
+    let isNewSession = false;
+
+    if (recent) {
+      const row = recent;
+      sessionStartMs = new Date(String(row.startTime)).getTime();
+      sessionEndMs = row.endTime != null ? new Date(String(row.endTime)).getTime() : NaN;
+      const firstBatchTs = points[0].timestampMs;
+      const gapMs = Number.isFinite(sessionEndMs)
+        ? firstBatchTs - sessionEndMs
+        : nowMs - new Date(String(row.updatedAt)).getTime();
+      if (gapMs < sessionGapMs) {
+        sessionId = String(row.id); // продолжение (в т.ч. поздние батчи)
+      } else {
+        // Гэп ≥ SESSION_GAP_MS → НОВАЯ сессия. Финализация старой — жнецом
+        // приложения (≤ ~10 мин; см. шапку «ЧЕСТНЫЕ ОТЛИЧИЯ» п.1).
+        isNewSession = true;
+      }
+    } else {
+      isNewSession = true;
+    }
+
+    if (isNewSession) {
+      const newId = crypto.randomUUID();
+      const create = createRecordingStatement({
+        sessionId: newId,
+        deviceId,
+        clientId: crypto.randomUUID(),
+        deviceName,
+        startTimeIso: new Date(points[0].timestampMs).toISOString(),
+        nowIso: new Date(nowMs).toISOString(),
+        userId: ingestUserId,
+      });
+      const res = await env.DB.prepare(create.sql).bind(...create.args).run();
+      if ((res.meta?.changes ?? 0) > 0) {
+        sessionId = newId;
+      } else {
+        // Гонка: параллельный батч успел создать сессию — продолжаем ЕЁ
+        const again = await env.DB.prepare(lookup.sql).bind(...lookup.args).first();
+        if (again) {
+          sessionId = String(again.id);
+          isNewSession = false;
+          sessionStartMs = new Date(String(again.startTime)).getTime();
+          sessionEndMs = again.endTime != null ? new Date(String(again.endTime)).getTime() : NaN;
+        } else {
+          // крайне редкий кейс (сессию успели закрыть между SELECT и INSERT)
+          sessionId = newId; // вставим точку в созданную выше (guard прошёл бы)
+        }
+      }
+    }
+
+    // ——— вставка точек чанками (C-16/F4) + монотонный UPDATE сессии (R11) ———
+    const newIdFn = () => crypto.randomUUID();
+    const pointStmts = pointInsertStatements(sessionId, points, newIdFn);
+    for (const st of pointStmts) {
+      await env.DB.prepare(st.sql).bind(...st.args).run();
+    }
+
+    const lastTs = points[points.length - 1].timestampMs;
+    const firstTs = points[0].timestampMs;
+    const currentStart = Number.isFinite(sessionStartMs) ? Math.min(sessionStartMs, firstTs) : firstTs;
+    const currentEnd = Number.isFinite(sessionEndMs) ? Math.max(sessionEndMs, lastTs) : lastTs;
+    await env.DB.prepare(
+      "UPDATE Session SET startTime = ?, endTime = ?, pointCount = pointCount + ?, payloadBytes = payloadBytes + ?, updatedAt = ? WHERE id = ?"
+    ).bind(
+      new Date(currentStart).toISOString(),
+      new Date(currentEnd).toISOString(),
+      points.length,
+      raw.length,
+      new Date(nowMs).toISOString(),
+      sessionId
+    ).run();
+
+    // ——— rollup-инкремент дня последней точки (§A1.5, зеркала bumpRollup) ———
+    if ((env.EDGE_INGEST_ROLLUP_ENABLED || "true") === "true") {
+      try {
+        const day = rollupDayKey(lastTs, env.TELEMAT_TIMEZONE || "UTC");
+        const uid = ingestUserId == null ? "" : String(ingestUserId);
+        await env.DB.prepare(
+          `INSERT INTO StatsRollup (day, userId, sessions, points, distanceM, durationSec, ecoSum, ecoCount, updatedAt)
+           VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?)
+           ON CONFLICT(day, userId) DO UPDATE SET
+             sessions = sessions + excluded.sessions,
+             points = points + excluded.points,
+             updatedAt = excluded.updatedAt`
+        ).bind(day, uid, isNewSession ? 1 : 0, points.length, new Date(nowMs).toISOString()).run();
+      } catch { /* rollup не критичен (зеркало приложения: сбой глотается) */ }
+    }
+
+    // ——— идемпотентность-запись ПОСЛЕ вставки точек (R2/MI-6) ———
+    if (hasMsgId) {
+      try {
+        await env.DB.prepare("INSERT OR IGNORE INTO IngestMessage (deviceId, messageId, firstSeenAt) VALUES (?, ?, ?)")
+          .bind(deviceId, String(msgId), new Date(nowMs).toISOString()).run();
+      } catch { /* нет таблицы на старых БД — не фатально */ }
+    }
+
+    console.log(JSON.stringify({
+      level: "info",
+      msg: "edge sensorlogger ingest",
+      requestId,
+      sessionId,
+      deviceId,
+      deviceName,
+      points: points.length,
+      dropped: { inaccurate: droppedInaccurate, unparsed: droppedUnparsed },
+      newSession: isNewSession,
+      userId: ingestUserId,
+      durationMs: Date.now() - startedAt,
+    }));
+
+    return jsonResponse(
+      {
+        ok: true,
+        sessionId,
+        pointsAccepted: points.length,
+        newSession: isNewSession,
+        deviceId,
+        deviceName,
+        status: "recording",
+        edge: true,
+      },
+      isNewSession ? 201 : 200,
+      requestId
+    );
+  } catch (err) {
+    // Гонка идемпотентности (двойной ретрай): повторная проверка ledger
+    try {
+      const raceBody = await request.clone().json().catch(() => null);
+      const url = new URL(request.url);
+      const deviceId = url.searchParams.get("deviceId");
+      if (raceBody && typeof raceBody.messageId !== "undefined" && deviceId) {
+        const seen = await env.DB.prepare("SELECT 1 FROM IngestMessage WHERE deviceId = ? AND messageId = ? LIMIT 1")
+          .bind(deviceId, String(raceBody.messageId)).first();
+        if (seen) {
+          return jsonResponse({ ok: true, duplicate: true, message: "Batch already processed (messageId seen)", deviceId }, 200, requestId);
+        }
+      }
+    } catch { /* анализ гонки не удался — падаем в общую 500 */ }
+    console.log(JSON.stringify({ level: "error", msg: "edge sensorlogger error", requestId, error: String((err && err.message) || err) }));
+    return jsonResponse({ error: "Internal Server Error", requestId }, 500, requestId);
+  }
+}

@@ -34,12 +34,14 @@ export const USING_D1 =
 // (trafficJobId генерируется ДО вставки сессии и пишется сразу), а остаточные
 // read-зависимые пути честно маппятся в 429 этим детектором.
 // Текст ошибки воркера: "Your account has exceeded D1's free tier daily row read limit. …"
-export function isD1QuotaError(err: unknown): boolean {
-  return (
-    err instanceof Error &&
-    /exceeded D1'?s free tier daily row (read|write) limit/i.test(err.message)
-  );
-}
+// v2.40.9 (Pack C, m-20): реализация переехала в лист-модуль d1-quota.ts
+// (db-d1.ts отмечает исчерпание/восстановление там, где видны реальные
+// исходы запросов; db.ts оставляет ре-экспорт на прежнем месте — все
+// существующие импорты "from ./db" работают без правок).
+export { isD1QuotaError } from "./d1-quota";
+// db.ts сам не использует детектор (внутренние потребители — worker-runtime,
+// db-d1, /health — импортируют из лист-модуля d1-quota напрямую);
+// ре-экспорт выше сохраняет прежний контракт `import { isD1QuotaError } from "./db"`.
 
 // ——— v2.38.1 (ревью F3/F4/F5): ЕДИНЫЕ лимиты чанкования для D1 ———
 // Жёсткие лимиты gateway-воркера (cloudflare-worker/d1-gateway.js):

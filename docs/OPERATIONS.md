@@ -643,3 +643,49 @@ CF владельцем (зона + смена NS у регистратора + 
 23 ссылки refs/pull/*/head держат переписанные до filter-repo коммиты до
 GitHub GC. Тикет подаёт владелец (Support API нет) — текст в отчёте ревью
 (раунд 19, Постскриптум №7) и в worklog.
+
+## §10. Pack C v2.40.9 (20.09.2026): квота-бюджет, точечная инвалидация, персистентные кэши, edge-телефон
+
+Замер среза 20-5 (Task 27): фоновая нагрузка побеждена Pack A/B (0 чтений в
+тихую эпоху), остаточный расход — разовые тяжёлые события. Pack C закрывает
+оба верхних источника выгорания (N-6/N-7) и делает квоту ВИДИМОЙ (P1-a):
+
+- **N-6 (app)**: `invalidateSessionCaches(ids)` — инвалидация кэшей ПО
+  СПИСКОМ повреждённых сессий (cacheVersion=-1), не глобальным bump'ом;
+  `warmStaleSessionCaches` — бюджетный фоновый прогрев протухших (не первым
+  зрителем); стартовый warmup греет ТОЛЬКО протухшие (O(повреждённых)).
+- **N-7 (app+gateway)**: heavy-segments — единая загрузка точек на запрос
+  (было двойное чтение) + двухслойный кэш ответа: in-memory 60с + KV шлюза
+  по watermark-ключу (состав групп + период + tz + SESSION_CACHE_VERSION);
+  новая сессия → другой watermark → честный пересчёт, TTL 1 ч — страховка.
+  Воркер: `POST /kvstore/get|put` (секрет шлюза, тело ≤64 КБ, значение
+  ≤512 КБ, TTL 1..3600).
+- **P1-a (gateway)**: бюджет-метр дня — шлюз суммирует meta.rows_read/rows_written
+  каждого /query и /batch, троттл-флаш (60 с) в KV `quota:day:YYYY-MM-DD`;
+  `GET /admin/cron-status` → `budget {day, rowsRead, rowsWritten, quota,
+  quotaExhaustedAt, updatedAt}`. Приложение: alerts d1_quota_70/90 читают
+  бюджет ШЛЮЗА (кэш 5 мин, 0 строк квоты; фолбэк — локальная свёртка).
+- **m-20 (app)**: честный /health — sticky-флаги `d1-quota.ts` (ставятся на
+  РЕАЛЬНЫХ D1-ошибках в db-d1.ts, снимаются успешным чтением строк /
+  полуночью UTC): db:degraded + `d1Quota{readExhaustedAt,writeExhaustedAt}`
+  вместо ложного db:ok при мёртвой квоте; gauges d1_quota_read/write_exhausted.
+- **P1-в (app)**: read-back drill бэкапов — auto = ПОЛНЫЙ только воскресенье
+  UTC (день github-крона), будни — checksum+расшифровка без парсинга 66 тыс.
+  строк (CPU 0.1 — источник 502-таймаутов ночного окна). BACKUP_DRILL_MODE
+  = auto|full|checksum.
+- **P2 (gateway)**: `POST /api/ingest/sensorlogger` НА EDGE — Push URL
+  SensorLogger меняет ТОЛЬКО хост (push.poedzok.fun →
+  d1-gateway.markov-saratov.workers.dev), путь/?token=it_…/?deviceId=
+  остаются. it_-верификация: HMAC-SHA256(SESSION_SECRET, "<apiKey>:ingest")
+  по User-таблице (паритет token-check.ts — юнит-тест сверяет побуквенно),
+  результат кэшируется KV на 10 мин. ЧЕСТНЫЕ ОТЛИЧИЯ от Render-канала:
+  финализация/trip-grouping/кэши — жнецом приложения ≤ ~10 мин
+  (worker-tick */1, порог F8); ingest-trace/метрики — в консоли воркера.
+  Воркер-секрет `SESSION_SECRET` обязан совпадать с Render (ротация секрета
+  инвалидирует it_-токены на ОБОИХ каналах синхронно).
+
+Мониторинг эффекта: `/api/metrics` — `routes_hotspot_cache_total{layer}` ,
+`edge_kv_*`, `d1_quota_*_exhausted`; `/admin/cron-status` — budget дня
+(истина расхода, переживает ресайклы приложения); расход чтений должен расти
+как O(новых данных), всплеск после релиза = симптом N-6 (больше не должен
+воспроизводиться — инвалидация точечная).

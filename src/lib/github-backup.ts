@@ -180,6 +180,10 @@ export async function backupToGitHub(actorId?: string, existing?: LocalBackupHan
     // Read-back drill: сразу после аплоада скачиваем ассет обратно и
     // проверяем восстановимость durable-копии (sha256 + парсинг + счёт строк).
     // Дёшево (один запрос), закрывает «restore никогда не проверялся».
+    // v2.40.9 (Pack C, P1-в): полный drill (парсинг дампа + сверка строк) —
+    // только воскресный прогон; будни — сверка checksum+размера (загрузка и
+    // расшифровка durable-байтов остаются — «копия читаема», без 66К-строк
+    // парсинга на 0.1 CPU — ночное окно и 502-таймауты бэкапа дышат).
     const drill = await runBackupReadBackDrill({
       assetUrl: asset?.url ?? "",
       expectedChecksum: local.checksum,
@@ -305,14 +309,30 @@ export interface DrillResult {
   totalRows: number;
   countsMatch: boolean;
   detail?: string;
+  /** v2.40.9 (Pack C, P1-в): режим прогона — full (checksum+parse+counts) | checksum (без парсинга). */
+  mode?: "full" | "checksum";
 }
 
 /**
  * Read-back drill: durable-копия должна быть ВОССТАНОВИМОЙ, а не просто
  * существующей. Скачивает ассет обратно, сверяет sha256 с чексуммой аплоада,
- * парсит JSON и сверяет счётчики строк с дампом-источником. Результат —
- * в аудит + лог (+ Slack при провале). Не бросает исключений.
+ * парсит JSON и сверяет счётчики строк с дампом-источником (v2.40.9, Pack C
+ * P1-в: полный прогон — воскресенье UTC / BACKUP_DRILL_MODE=full; будни —
+ * checksum+расшифровка без парсинга). Результат — в аудит + лог (+ Slack при
+ * провале). Не бросает исключений.
  */
+/** Режим drill: env-перекрытие full/checksum, auto = воскресенье UTC. */
+export function resolveDrillMode(
+  now: Date,
+  mode: "auto" | "full" | "checksum"
+): "full" | "checksum" {
+  if (mode === "full") return "full";
+  if (mode === "checksum") return "checksum";
+  // auto: полный раз в неделю — воскресенье UTC (день еженедельного
+  // github-крона 04:00 UTC — обе страховки в один день, будни дёшевы)
+  return now.getUTCDay() === 0 ? "full" : "checksum";
+}
+
 export async function runBackupReadBackDrill(opts: {
   assetUrl: string;
   expectedChecksum: string;
@@ -321,6 +341,11 @@ export async function runBackupReadBackDrill(opts: {
   actorId?: string;
 }): Promise<DrillResult> {
   const result: DrillResult = { ok: false, checksumVerified: false, parsed: false, totalRows: 0, countsMatch: false };
+  // v2.40.9 (Pack C, P1-в): auto — воскресенье UTC = full (еженедельная
+  // страховка совпадает с еженедельным github-кроном ВС 04:00 UTC),
+  // будни — checksum-only. full/checksum — явное перекрытие из env.
+  const mode = resolveDrillMode(new Date(), env().BACKUP_DRILL_MODE);
+  result.mode = mode;
   try {
     if (!opts.assetUrl) throw new Error("asset url is empty");
     // v2.38.1 (ревью F13): drill скачивает СЫРЫЕ байты и расшифровывает их же
@@ -332,18 +357,27 @@ export async function runBackupReadBackDrill(opts: {
     result.checksumVerified = actual === opts.expectedChecksum;
     if (!result.checksumVerified) throw new Error(`drill checksum mismatch: expected ${opts.expectedChecksum.slice(0, 12)}…, got ${actual.slice(0, 12)}…`);
 
-    const dump = JSON.parse(text) as BackupDump;
-    result.parsed = true;
-    const counts = countDumpRows(dump);
-    result.totalRows = Object.values(counts).reduce((a, b) => a + b, 0);
-    if (opts.expectedCounts) {
-      // сравниваем только таблицы дампа (User — информационный блок, в restore не входит)
-      const mismatches = Object.entries(opts.expectedCounts).filter(([t, n]) => t in counts && (counts[t] ?? 0) !== n).map(([t, n]) => `${t}: dump ${n} → asset ${counts[t] ?? 0}`);
-      result.countsMatch = mismatches.length === 0;
-      if (!result.countsMatch) throw new Error(`drill row-count mismatch: ${mismatches.join("; ")}`);
+    // v2.40.9 (Pack C, P1-в): будничный лёгкий режим — durable-байты скачаны,
+    // расшифрованы и совпали побайтно (sha256) — «копия читаема и неизменна»;
+    // парсинг 66 тыс. строк и сверка счётчиков — только воскресный полный
+    // прогон (или явное BACKUP_DRILL_MODE=full).
+    if (mode === "checksum") {
+      result.ok = true;
+      logger.info("github-backup: read-back drill OK (checksum-only, будни — Pack C P1-в)", { tag: opts.tag, mode });
+    } else {
+      const dump = JSON.parse(text) as BackupDump;
+      result.parsed = true;
+      const counts = countDumpRows(dump);
+      result.totalRows = Object.values(counts).reduce((a, b) => a + b, 0);
+      if (opts.expectedCounts) {
+        // сравниваем только таблицы дампа (User — информационный блок, в restore не входит)
+        const mismatches = Object.entries(opts.expectedCounts).filter(([t, n]) => t in counts && (counts[t] ?? 0) !== n).map(([t, n]) => `${t}: dump ${n} → asset ${counts[t] ?? 0}`);
+        result.countsMatch = mismatches.length === 0;
+        if (!result.countsMatch) throw new Error(`drill row-count mismatch: ${mismatches.join("; ")}`);
+      }
+      result.ok = true;
+      logger.info("github-backup: read-back drill OK (full, воскресенье UTC — Pack C P1-в)", { tag: opts.tag, totalRows: result.totalRows });
     }
-    result.ok = true;
-    logger.info("github-backup: read-back drill OK", { tag: opts.tag, totalRows: result.totalRows });
   } catch (err) {
     result.detail = err instanceof Error ? err.message : String(err);
     logger.error("github-backup: read-back drill FAILED — durable-копия не проверена как восстановимая", { tag: opts.tag, detail: result.detail });

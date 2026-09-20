@@ -1,7 +1,12 @@
 // GET /health — health-check (§4.8)
 import { NextRequest } from "next/server";
-import { libsql, isD1QuotaError } from "@/lib/db";
+import { libsql } from "@/lib/db";
+// v2.40.9 (Pack C, m-20): честный статус квоты — sticky-флаги d1-quota.ts
+// (SELECT 1 не видит исчерпание: читает 0 строк и проходит; флаг ставится
+// на РЕАЛЬНЫХ ошибках запросов в db-d1.ts и снимается успешными чтениями).
+import { d1QuotaSnapshot } from "@/lib/d1-quota";
 import { env } from "@/lib/env";
+import { set } from "@/lib/metrics";
 import { circuitStatus } from "@/lib/routing/circuit-breaker";
 import { getRateLimiterStats } from "@/lib/rate-limit";
 // v2.11.0 (АУДИТ C-20): worker — реальная живость in-process-ворчера,
@@ -27,10 +32,24 @@ export async function GET(request: NextRequest) {
   } catch (e) {
     dbStatus = "degraded";
     dbError = e instanceof Error ? e.message.slice(0, 100) : String(e).slice(0, 100);
-    if (isD1QuotaError(e)) {
-      // честный, но отдельный маркер: связность жива, «деградация» — квота
-      dbError = "D1 daily quota exhausted (connectivity probe passed gateway)";
-    }
+  }
+  // v2.40.9 (Pack C, m-20): SELECT 1 ПРОХОДИТ при мёртвой read-квоте (0 строк) —
+  // проба связности проверяет шлюз/секрет/латентность, но НЕ бюджет ДАННЫХ.
+  // Sticky-флаг из d1-quota.ts (поставлен реальными ошибками запросов в
+  // db-d1.ts) достраивает картину: db:degraded + честная причина, пока
+  // сутки не кончились. Снятие — успешным чтением строк (db-d1.toResultSet)
+  // или полуночью UTC; ноль дополнительной квоты на сам индикатор.
+  const quota = d1QuotaSnapshot();
+  set("d1_quota_read_exhausted", quota.readExhausted ? 1 : 0, "D1 daily READ quota exhausted (sticky flag, m-20)");
+  set("d1_quota_write_exhausted", quota.writeExhausted ? 1 : 0, "D1 daily WRITE quota exhausted (sticky flag, m-20)");
+  if (quota.readExhausted) {
+    dbStatus = "degraded";
+    const since = quota.readExhaustedAt ? quota.readExhaustedAt.slice(11, 16) : "??";
+    dbError = `D1 daily READ quota exhausted since ${since} UTC (resets 00:00 UTC; connectivity probe passed — data reads will fail until reset, m-20)`;
+  } else if (quota.writeExhausted && dbStatus === "ok") {
+    dbStatus = "degraded";
+    const since = quota.writeExhaustedAt ? quota.writeExhaustedAt.slice(11, 16) : "??";
+    dbError = `D1 daily WRITE quota exhausted since ${since} UTC (reads alive; writes/finalize degraded until 00:00 UTC)`;
   }
   // v2.11.0 (C-20): worker запущен и не в shutdown → ok; не запущен → degraded
   const rt = getWorkerRuntime();
@@ -39,6 +58,11 @@ export async function GET(request: NextRequest) {
     status: dbStatus === "ok" && workerStatus === "ok" ? "ok" : "degraded",
     db: dbStatus,
     dbError: dbError || undefined,
+    // v2.40.9 (Pack C, m-20): машиночитаемое состояние квоты (null = жива).
+    d1Quota: {
+      readExhaustedAt: quota.readExhaustedAt,
+      writeExhaustedAt: quota.writeExhaustedAt,
+    },
     worker: workerStatus,
     workerUptimeSec: rt ? Math.round((Date.now() - rt.startedAt) / 1000) : 0,
     circuits: circuitStatus(),

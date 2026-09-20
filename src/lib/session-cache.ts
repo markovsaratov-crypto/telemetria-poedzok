@@ -39,6 +39,8 @@
 import { libsql } from "./db";
 import { logger } from "./logger";
 import { sessionScopeSql, type DataScope } from "./scope";
+import { D1_PARAM_BUDGET } from "./db";
+import { isD1QuotaError } from "./d1-quota";
 import { loadSessionsForBatch } from "./batch-points";
 import { computeSessionStats, type SessionStatsResult } from "./session-stats";
 import { computeSessionEvents, type SessionEventsPayload } from "./session-events";
@@ -326,4 +328,151 @@ export async function warmSessionCache(sessionId: string): Promise<void> {
     ["stats", "events", "track"]
   );
   logger.info("session cache warmed", { sessionId, points: entry.points.length });
+}
+
+// ——— v2.40.9 (Pack C, N-6): ТОЧЕЧНАЯ инвалидация + фоновый прогрев ———
+//
+// УРОК v2.40.7 (N-3): глобальный bump SESSION_CACHE_VERSION 9→10 ради ДВУХ
+// повреждённых телепортом записей инвалидировал ВСЕ ~105 сессий — первый
+// показ «Аналитики» после релиза перечитал ~300–450 тыс. строк точек и
+// добил дневную квоту D1 (инцидент 20.09 ~17:35 UTC). Инвалидация обязана
+// стоить O(повреждённых), НЕ O(всех).
+//
+// МЕХАНИКА: invalidateSessionCaches(ids) пишет cacheVersion = -1 ТОЛЬКО в
+// перечисленные строки (isSessionCacheFresh сравнивает с текущей константой
+// → помеченные протухают, остальные НЕ трогаются). persistSessionCaches
+// по write-through вернёт им актуальную версию при первом пересчёте.
+//
+// КОГДА ГЛОБАЛЬНЫЙ BUMP ВСЁ-ТАК НУЖЕН: смена ФОРМЫ payload (новое поле в
+// stats/events/track, изменившаяся нормализация) затрагивает все сессии —
+// bump остаётся инструментом schema-миграций. Точечная инвалидация — для
+// РЕМОНТА ДАННЫХ и точечных конвейерных фиксов (N-3/N-5 класс: результат
+// меняется только у сессий с конкретным дефектом, найденным запросом).
+// Обе операции сопровождаются warm: invalidation → warmStaleSessionCaches
+// (бюджетный фоновый пересчёт — не первым зрителем).
+
+/** Версия-надгробие: протухшая строка кэша после точечной инвалидации. */
+export const SESSION_CACHE_INVALIDATED_VERSION = -1;
+
+/**
+ * Инвалидация кэшей КОНКРЕТНЫХ сессий (ремонт данных / точечный фикс
+ * конвейера). Чанками ≤ D1_PARAM_BUDGET id, один IN-UPDATE на чанк.
+ * Возвращает число отмеченных строк. opts.warm — запустить бюджетный
+ * фоновый прогрев помеченных (см. warmStaleSessionCaches; НЕ первым
+ * зрителем — пересчёт до открытия дашборда).
+ */
+export async function invalidateSessionCaches(
+  ids: string[],
+  opts?: { warm?: boolean }
+): Promise<number> {
+  const stmts = buildInvalidationStatements(ids);
+  if (stmts.length === 0) return 0;
+  let marked = 0;
+  for (const stmt of stmts) {
+    try {
+      const res = await libsql.execute(stmt as never);
+      marked += Number((res as { rowsAffected?: number }).rowsAffected ?? 0);
+    } catch (err) {
+      logger.warn("session cache targeted invalidation failed (chunk, non-fatal)", {
+        size: stmt.args.length,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  logger.info("session cache targeted invalidation", { requested: ids.length, marked });
+  if (opts?.warm && marked > 0) {
+    void warmStaleSessionCaches({ limit: marked + 8, budgetMs: 30_000 }).catch(() => null);
+  }
+  return marked;
+}
+
+/**
+ * Чистый строитель стейтментов точечной инвалидации (юнит-тестируется без БД —
+ * канон сьютов): UPDATE … SET cacheVersion = -1 … WHERE id IN (чанки ≤ 90).
+ * Инвариант N-6: число стейтментов = O(повреждённых / 90), НЕ O(всех сессий).
+ */
+export function buildInvalidationStatements(ids: string[]): Array<{ sql: string; args: string[] }> {
+  const unique = [...new Set(ids.filter((x) => typeof x === "string" && x.length > 0))];
+  const out: Array<{ sql: string; args: string[] }> = [];
+  for (let i = 0; i < unique.length; i += D1_PARAM_BUDGET) {
+    const chunk = unique.slice(i, i + D1_PARAM_BUDGET);
+    const ph = chunk.map(() => "?").join(", ");
+    out.push({
+      sql: `UPDATE Session SET cacheVersion = ${SESSION_CACHE_INVALIDATED_VERSION} WHERE id IN (${ph})`,
+      args: chunk,
+    });
+  }
+  return out;
+}
+
+export interface StaleCacheWarmReport {
+  warmed: number;
+  quotaHit: boolean;
+  budgetSpentMs: number;
+  reason: string;
+}
+
+/**
+ * Бюджетный фоновый прогрев ПРОТУХШИХ кэшей (N-6): ищет закрытые сессии с
+ * невалидным кэшем (версия ≠ текущей / pointCount разошёлся / statsCache не
+ * посчитан) и пересчитывает их ДО первого зрителя. Активные recording-сессии
+ * исключены (их кэш заведомо протухает каждым новым батчем инжеста — греть
+ * бессмысленно). Лимиты: бюджет времени + limit строк; квота-ошибка D1
+ * останавливает прогрев немедленно (не тратим остаток в стену).
+ */
+export async function warmStaleSessionCaches(
+  opts: { limit?: number; budgetMs?: number } = {}
+): Promise<StaleCacheWarmReport> {
+  const limit = Math.max(1, Math.min(opts.limit ?? 20, 200));
+  const deadline = Date.now() + (opts.budgetMs ?? 30_000);
+  const out: StaleCacheWarmReport = { warmed: 0, quotaHit: false, budgetSpentMs: 0, reason: "" };
+  let ids: string[];
+  try {
+    ids = await findStaleSessionCacheIds(limit);
+  } catch (err) {
+    out.reason = `stale lookup failed: ${err instanceof Error ? err.message : String(err)}`;
+    out.budgetSpentMs = Date.now() - (deadline - (opts.budgetMs ?? 30_000));
+    return out;
+  }
+  for (const id of ids) {
+    if (Date.now() >= deadline) {
+      out.reason = "budget exhausted";
+      break;
+    }
+    try {
+      await warmSessionCache(id);
+      out.warmed++;
+    } catch (err) {
+      if (isD1QuotaError(err)) {
+        out.quotaHit = true;
+        out.reason = "D1 quota error — warming stopped (rest will recompute lazily)";
+        break;
+      }
+      logger.warn("warmStaleSessionCaches: session warm failed (skip)", {
+        id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  out.budgetSpentMs = Date.now() - (deadline - (opts.budgetMs ?? 30_000));
+  return out;
+}
+
+/**
+ * Id закрытых сессий с протухшим/отсутствующим кэшем (для фонового прогрева
+ * и инвентаря N-6). Один дешёвый SELECT по таблице Session (~100 строк —
+ * меты, БЕЗ точек). Порядок — свежие первыми (дашборд показывает их).
+ */
+export async function findStaleSessionCacheIds(limit: number): Promise<string[]> {
+  const res = await libsql.execute({
+    sql: `SELECT id FROM Session
+          WHERE deletedAt IS NULL AND status != 'recording'
+            AND (cacheVersion IS NULL OR cacheVersion != ?
+                 OR cachePointCount IS NULL OR cachePointCount != pointCount
+                 OR statsCache IS NULL)
+          ORDER BY startTime DESC
+          LIMIT ?`,
+    args: [SESSION_CACHE_VERSION, Math.max(1, Math.min(limit, 200))] as never[],
+  });
+  return (res.rows as Record<string, unknown>[]).map((r) => String(r.id));
 }

@@ -27,6 +27,16 @@ import type { Client, InStatement, InValue, ResultSet } from "@libsql/client";
 // не импортирует ничего (листь графа модулей) — цикла не возникает; db-d1
 // используется только на ветке USING_D1 → счётчики растут только на D1.
 import { inc, D1_ROWS_READ_TOTAL, D1_ROWS_WRITTEN_TOTAL } from "./metrics";
+// v2.40.9 (Pack C, m-20): sticky-флаги квоты — ставятся на РЕАЛЬНЫХ ошибках
+// шлюза (SELECT 1 не может их поймать — читает 0 строк и проходит),
+// снимаются любым успешным ответом с фактами чтения/записи строк.
+import {
+  isD1ReadQuotaError,
+  isD1WriteQuotaError,
+  markD1ReadQuotaExhausted,
+  markD1WriteQuotaExhausted,
+  clearD1QuotaIfAlive,
+} from "./d1-quota";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -63,6 +73,13 @@ function toResultSet(r: GatewayQueryResult): ResultSet {
   const written = r.meta?.rowsWritten;
   if (typeof read === "number" && read > 0) inc(D1_ROWS_READ_TOTAL, "", read);
   if (typeof written === "number" && written > 0) inc(D1_ROWS_WRITTEN_TOTAL, "", written);
+  // v2.40.9 (Pack C, m-20): успешный ответ с фактами строк — квота жива,
+  // sticky-флаги сняты (см. d1-quota.ts: раннее восстановление после 00:00 UTC,
+  // если показ данных случился раньше первого /health).
+  clearD1QuotaIfAlive(
+    typeof read === "number" ? read : 0,
+    typeof written === "number" ? written : 0
+  );
   return {
     columns: Object.keys(r.rows[0] ?? {}),
     rows: r.rows,
@@ -102,6 +119,14 @@ export function createD1Client(baseUrl: string, secret: string): Client {
     if (!res.ok) {
       const err = new Error(data.error ?? `D1 gateway ${path}: HTTP ${res.status}`);
       (err as Error & { d1?: boolean }).d1 = data.d1 === true;
+      // v2.40.9 (Pack C, m-20): РЕАЛЬНАЯ ошибка квоты от D1 — единственное место,
+      // где исчерпание видно достоверно (SELECT 1 в /health при мёртвой квоте
+      // проходит — читает 0 строк). Флаг живёт до полуночи UTC или до первого
+      // успешного чтения строк — /health перестаёт рисовать db:ok впустую.
+      if (data.d1 === true) {
+        if (isD1ReadQuotaError(err)) markD1ReadQuotaExhausted();
+        if (isD1WriteQuotaError(err)) markD1WriteQuotaExhausted();
+      }
       throw err;
     }
     return data;

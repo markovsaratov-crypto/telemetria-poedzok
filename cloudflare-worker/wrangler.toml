@@ -9,8 +9,9 @@
 #   GATEWAY_SECRET — секрет шлюза (секрет, задаётся `wrangler secret put`)
 #   INGEST_TOKEN   — токен Sensor Logger для /ingest (§B1, `wrangler secret put`)
 #
-# Секреты ЗДЕСЬ не хранятся: `bunx wrangler secret put GATEWAY_SECRET` и
-# `bunx wrangler secret put INGEST_TOKEN` (значения — из рунбука ротации
+# Секреты ЗДЕСЬ не хранятся: `bunx wrangler secret put GATEWAY_SECRET`,
+# `bunx wrangler secret put INGEST_TOKEN`, `bunx wrangler secret put
+# SESSION_SECRET` (значения — из рунбука ротации
 # docs/SECURITY-ROTATION.md; должны совпадать с Render-инстансом приложения).
 name = "d1-gateway"
 main = "d1-gateway.js"

@@ -302,23 +302,76 @@ export function parseQuotaDayState(raw: { value: string; updatedAt: string } | n
  * Кулдаун уведомлений — общий механизм дедупа ALERT_DEDUP_COOLDOWN_MIN
  * (дефолт 60 мин = требуемый «1 час» §A6). Деградирует мягко: не-D1 режим
  * или отсутствие метрики → firing:false с detail, правило не падает.
+ * v2.40.9 (Pack C, P1-a): ИСТИНА — счётчик ШЛЮЗА (KV-день, budgetTrack
+ * v2.40.9, переживает ресайклы/сны приложения; /admin/cron-status → budget).
+ * Локальная свёртка — фолбэк, если воркер ещё старой версии. Бюджет шлюза
+ * кэшируется на 5 мин (alerts каждые 5 мин): один HTTP-вызов, 0 строк квоты.
  */
-async function ruleD1Quota70(): Promise<AlertRule> {
-  const limit = env().D1_DAILY_READ_LIMIT;
-  const pctThreshold = env().D1_QUOTA_ALERT_PCT;
-  const base: Omit<AlertRule, "firing" | "value"> = {
-    rule: "d1_quota_70",
-    description: `дневные чтения строк D1 ≥ ${pctThreshold}% от ${limit}`,
-    threshold: `≥ ${pctThreshold}% дневного лимита`,
-    action: "Проверить /api/metrics (d1_rows_read_total), включить STATS_ROLLUP_ENABLED/edge-KV, снизить частоту опроса (§A3)",
-  };
+// ——— v2.40.9 (Pack C, P1-a): бюджет-метр шлюза ———
+export interface GatewayBudget {
+  day: string;
+  rowsRead: number;
+  rowsWritten: number;
+  quota: number;
+  quotaExhaustedAt: string | null;
+  updatedAt: string | null;
+}
 
-  const counter = counterValue(D1_ROWS_READ_TOTAL);
-  if (counter == null) {
-    // метрика не инициализирована (не D1-режим / модуль не загружен) — мягкая деградация
-    return { ...base, firing: false, value: null, detail: "метрика d1_rows_read_total недоступна (не D1-режим?)" };
+const GATEWAY_BUDGET_TTL_MS = 5 * 60_000;
+const GLOBAL_BUDGET_KEY = "__telematGatewayBudgetCache";
+const gBudget = globalThis as unknown as { [GLOBAL_BUDGET_KEY]?: { at: number; budget: GatewayBudget | null } };
+
+/** Бюджет дня из /admin/cron-status шлюза (кэш 5 мин; null = канал недоступен). */
+export async function fetchGatewayBudget(): Promise<GatewayBudget | null> {
+  const cached = gBudget[GLOBAL_BUDGET_KEY];
+  if (cached && Date.now() - cached.at < GATEWAY_BUDGET_TTL_MS) return cached.budget;
+  const url = (process.env.D1_GATEWAY_URL ?? "").replace(/\/$/, "");
+  const secret = process.env.D1_GATEWAY_SECRET ?? "";
+  let budget: GatewayBudget | null = null;
+  if (url && secret) {
+    try {
+      const res = await fetch(`${url}/admin/cron-status`, {
+        headers: { "x-gateway-secret": secret },
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { budget?: Partial<GatewayBudget> };
+        const b = data.budget;
+        if (b && typeof b.rowsRead === "number" && typeof b.day === "string") {
+          budget = {
+            day: b.day,
+            rowsRead: b.rowsRead,
+            rowsWritten: typeof b.rowsWritten === "number" ? b.rowsWritten : 0,
+            quota: typeof b.quota === "number" ? b.quota : env().D1_DAILY_READ_LIMIT,
+            quotaExhaustedAt: b.quotaExhaustedAt ?? null,
+            updatedAt: b.updatedAt ?? null,
+          };
+        }
+      }
+    } catch {
+      budget = null; // шлюз недоступен — фолбэк на локальную свёртку
+    }
   }
+  gBudget[GLOBAL_BUDGET_KEY] = { at: Date.now(), budget };
+  return budget;
+}
 
+interface QuotaUsage {
+  total: number;
+  limit: number;
+  source: "gateway" | "process";
+  quotaExhaustedAt: string | null;
+}
+
+/** Общая оценка расхода: приоритет — шлюз, фолбэк — свёртка локального counter. */
+async function d1QuotaUsage(): Promise<QuotaUsage> {
+  const limit = env().D1_DAILY_READ_LIMIT;
+  const gateway = await fetchGatewayBudget();
+  if (gateway) {
+    return { total: gateway.rowsRead, limit, source: "gateway", quotaExhaustedAt: gateway.quotaExhaustedAt };
+  }
+  // ——— фолбэк: прежняя свёртка per-process counter (_AlertState) ———
+  const counter = counterValue(D1_ROWS_READ_TOTAL) ?? 0;
   const today = utcDayKey();
   let state: QuotaDayState;
   try {
@@ -326,29 +379,62 @@ async function ruleD1Quota70(): Promise<AlertRule> {
   } catch {
     state = { date: null, base: 0, seen: 0 };
   }
-
-  // Смена дня (00:00 UTC): корзина обнуляется. seen := counter — чтения,
-  // случившиеся до полуночи в живом процессе, в новую корзину не попадают
-  // (потеря ≤ интервала cron-оценок, задокументировано).
   if (state.date !== today) {
     state = { date: today, base: 0, seen: counter };
   }
-  // рестарт процесса: счётчик с нуля — «хвост» seen прошлого инстанса не мешает
   const delta = Math.max(0, counter - state.seen);
   const total = state.base + delta;
-  const isNewDay = delta === 0 && state.base === 0;
-
-  // свёртка корзины (best-effort: сбой записи = пересчёт с того же base)
   try {
     await stateSet(QUOTA_STATE_KEY, JSON.stringify({ date: today, base: total, seen: counter }));
   } catch { /* мягкая деградация — value всё равно честный на этой оценке */ }
+  return { total, limit, source: "process", quotaExhaustedAt: null };
+}
 
-  const pct = (total / limit) * 100;
+async function ruleD1Quota70(): Promise<AlertRule> {
+  const pctThreshold = env().D1_QUOTA_ALERT_PCT;
+  const base: Omit<AlertRule, "firing" | "value"> = {
+    rule: "d1_quota_70",
+    description: `дневные чтения строк D1 ≥ ${pctThreshold}% от лимита free-тира`,
+    threshold: `≥ ${pctThreshold}% дневного лимита`,
+    action: "Проверить /admin/cron-status (budget) и /api/metrics (d1_rows_read_total); горячие чтения уже кэшированы (Pack A–C) — разовые события (релиз/бэкап/ремонт) видны в журнале",
+  };
+
+  const usage = await d1QuotaUsage();
+  if (usage.source === "process" && counterValue(D1_ROWS_READ_TOTAL) == null) {
+    return { ...base, firing: false, value: null, detail: "метрика d1_rows_read_total недоступна (не D1-режим?) и бюджет шлюза не получен" };
+  }
+  const pct = (usage.total / usage.limit) * 100;
+  const quotaDead = usage.quotaExhaustedAt != null;
   return {
     ...base,
-    firing: pct >= pctThreshold,
-    value: `${Math.round(total).toLocaleString("ru-RU")} строк (${pct.toFixed(1)}% от лимита)`,
-    detail: isNewDay ? "новая дневная корзина (00:00 UTC)" : undefined,
+    firing: pct >= pctThreshold || quotaDead,
+    value: `${Math.round(usage.total).toLocaleString("ru-RU")} строк (${pct.toFixed(1)}% от лимита; источник: ${usage.source === "gateway" ? "шлюз" : "локально"})`,
+    detail: quotaDead
+      ? `квота исчерпана в ${usage.quotaExhaustedAt} — чтения деградированы до 00:00 UTC`
+      : usage.source === "gateway"
+        ? "счётчик шлюза (KV-день, Pack C §P1-a) — переживает ресайклы приложения"
+        : "воркер < v2.40.9 (нет budget-эндпоинта) — свёртка локального counter",
+  };
+}
+
+/** v2.40.9 (Pack C, P1-a): ≥90% — эскалация того же источника (до исчерпания). */
+async function ruleD1Quota90(): Promise<AlertRule> {
+  const base: Omit<AlertRule, "firing" | "value"> = {
+    rule: "d1_quota_90",
+    description: "дневные чтения строк D1 ≥ 90% от лимита free-тира (эскалация)",
+    threshold: "≥ 90% дневного лимита",
+    action: "Приблизить неминуемое: отказаться от разовых тяжёлых операций (drill/бэкфилл) до 00:00 UTC; проверить /admin/cron-status → budget",
+  };
+  const usage = await d1QuotaUsage();
+  if (usage.source === "process" && counterValue(D1_ROWS_READ_TOTAL) == null) {
+    return { ...base, firing: false, value: null, detail: "источники расхода недоступны" };
+  }
+  const pct = (usage.total / usage.limit) * 100;
+  return {
+    ...base,
+    firing: pct >= 90,
+    value: `${pct.toFixed(1)}% от лимита`,
+    detail: usage.quotaExhaustedAt ? `исчерпана в ${usage.quotaExhaustedAt}` : undefined,
   };
 }
 
@@ -362,6 +448,7 @@ export async function evaluateAlerts(): Promise<AlertEvaluation> {
     ruleApiLatencyP95,
     ruleWorkerStuck,
     ruleD1Quota70, // v2.39.0 (§A6): квота чтений D1
+    ruleD1Quota90, // v2.40.9 (Pack C §P1-a): эскалация 90% + исчерпание
   ];
   const alerts: AlertRule[] = [];
   for (const run of defs) {

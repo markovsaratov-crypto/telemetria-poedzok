@@ -22,15 +22,19 @@
 import { env } from "./env";
 import { logger } from "./logger";
 import { libsql } from "./db";
-import { warmSessionCache } from "./session-cache";
+import { warmSessionCache, warmStaleSessionCaches, findStaleSessionCacheIds } from "./session-cache";
 import { loadSessionMetasWithCache, isSessionCacheFresh } from "./session-cache";
 import { recomputeRollupRange, todayKey } from "./stats-rollup";
 import { tripsEnabled } from "./trip-grouping";
 import { loadTripById, computeTripStats } from "./trip-stats";
 
 const WARMUP_BUDGET_MS = 10_000; // §A4: общий бюджет прогрева
-const WARMUP_TOP_N = 20; // §A4: топ-N сессий/поездок
+const WARMUP_TOP_N = 40; // §A4: топ-N сессий/поездок; v2.40.9 (N-6): кандидаты только протухшие — список длиннее бесплатен
 const WARMUP_ROLLUP_DAYS = 7; // §A4: rollup последних 7 дней
+// v2.40.9 (Pack C, N-6): фоновый дожим протухших кэшей ПОСЛЕ бюджета старта —
+// до 60 с отдельным бюджетом (запускается из instrumentation fire-and-forget,
+// НЕ блокирует готовность сервера). Ленивый путь остаётся страховкой.
+const WARMUP_STALE_SWEEP_MS = 60_000;
 
 interface WarmupReport {
   enabled: boolean;
@@ -83,12 +87,14 @@ export async function runStartupWarmup(): Promise<WarmupReport> {
   }
 
   // ——— Шаг 2: топ-N завершённых сессий — прогрев только ПРОТУХШИХ кэшей ———
+  // v2.40.9 (Pack C, N-6): кандидаты — не «топ-N вообще», а именно ПРОТУХШИЕ
+  // (findStaleSessionCacheIds: версия/pointCount/statsCache) — после релиза
+  // с точечной инвалидацией прогрев строго O(повреждённых), а не O(всех)
+  // (инвариант N-6; до этого топ-20 читал меты всех свежих сессий впустую).
+  let staleRemaining = 0;
   try {
-    const res = await libsql.execute({
-      sql: `SELECT id FROM Session WHERE deletedAt IS NULL AND status = 'completed'
-            ORDER BY startTime DESC LIMIT ${WARMUP_TOP_N}`,
-    });
-    const ids = (res.rows as Record<string, unknown>[]).map((r) => String(r.id));
+    const ids = await findStaleSessionCacheIds(WARMUP_TOP_N);
+    staleRemaining = ids.length;
     if (ids.length > 0) {
       // меты БЕЗ точек: свежий кэш → сессию не трогаем (точки не грузим — квота)
       const metas = await loadSessionMetasWithCache(ids, undefined, { stats: false, events: false, track: false });
@@ -156,5 +162,23 @@ export async function runStartupWarmup(): Promise<WarmupReport> {
 
   report.budgetSpentMs = Date.now() - start;
   logger.info("warmup done (§A4)", { ...report });
+
+  // ——— v2.40.9 (Pack C, N-6): дожим протухших кэшей фоном ———
+  // Старт-бюджет 10 с греет лишь несколько тяжёлых сессий; хвост (импорты,
+  // которых никто не открывал; ремонтные инвалидации) досчитывается ЗДЕСЬ
+  // отдельным бюджетом — НЕ первым зрителем (инвариант N-6). Квота-ошибка
+  // останавливает свип мгновенно (warmStaleSessionCaches).
+  if (staleRemaining > 0) {
+    void (async () => {
+      try {
+        const sweep = await warmStaleSessionCaches({ limit: 100, budgetMs: WARMUP_STALE_SWEEP_MS });
+        logger.info("warmup: stale-cache sweep (Pack C N-6)", { ...sweep });
+      } catch (err) {
+        logger.warn("warmup: stale sweep failed (non-fatal)", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+  }
   return report;
 }

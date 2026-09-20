@@ -51,7 +51,7 @@ import {
   type SessionRates,
 } from "./eco-corpus-watermark";
 import { computeMethodologyMetrics, calibrateEcoScoreBaselinesFromCorpus, type EcoScoreBaselines } from "./metrics-methodology";
-import { haversineM } from "./geo";
+import { plausibleIntervalM } from "./geo";
 
 // ——— v2.40.3 (ревью 19-j, критик RR-2 «рестарт-бёрн»): персист watermark ———
 // ЧИСТЫЕ функции сериализации — в ./eco-corpus-watermark (без импортов,
@@ -260,10 +260,15 @@ async function computeCorpusBaselines(prev: CorpusWatermark | null): Promise<{ b
         const lastTs = points[points.length - 1].timestamp;
         const end = Number.isFinite(m.endTimeMs) ? m.endTimeMs : lastTs;
         const durationSec = Math.max(0, (end - m.startTimeMs) / 1000);
-        // Дистанция — по ВСЕМ интервалам записи (гаверсинус), как прежде
+        // Дистанция — по ВСЕМ интервалам записи (гаверсинус), как прежде.
+        // v2.40.7 (N-3): интервалы-телепорты (v_impl > 200 км/ч) не входят —
+        // иначе корпус-дистанция раздувалась фантомами (см. plausibleIntervalM).
         let distance = 0;
         for (let i = 1; i < points.length; i++) {
-          distance += haversineM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
+          distance += plausibleIntervalM(
+            points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon,
+            (points[i].timestamp - points[i - 1].timestamp) / 1000
+          );
         }
         const met = computeMethodologyMetrics(points, distance, durationSec);
         if (met.ecoScore.value != null) {

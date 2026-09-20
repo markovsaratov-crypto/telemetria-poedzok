@@ -16,7 +16,7 @@
 // HighSpeedCornering, SessionReliability) и в UI (timeline «движение / стоянка / разрыв»).
 
 import { env } from "./env";
-import { haversineM } from "./geo";
+import { haversineM, isTeleportInterval } from "./geo";
 
 export type MotionState = "idle" | "moving" | "gap";
 
@@ -154,7 +154,15 @@ export function computeMovingTime(points: MethodologyPoint[]): MotionResult {
         points[i - 1].lat, points[i - 1].lon,
         points[i].lat, points[i].lon
       );
-      if (jump >= e.SPARSE_MOVE_MIN_M) {
+      // v2.40.7 (N-3 «GPS-телепорт»): у разреженного движения появился ПОТОЛОК
+      // ПРАВДОПОДОБИЯ — jump/dt ≤ MAX_PLAUSIBLE_SPEED_MS (200 км/ч, §4.4/§11.6).
+      // Прод-кейс 20.09: прыжки Саратов→Казахстан 890 км за 449 с (1982 м/с) и
+      // обратно 885 км за 616 с проходили как «разреженное движение» → leg
+      // растягивался на телепорт, дистанция интегрировала прыжок (N-3 в
+      // session-stats), gapTime оставался 0 при километрах разрывов. Телепорт ≠
+      // движение: интервал честно становится gap. Легитимные блипы §4.6а
+      // (90 м–3,4 км с дырами 6–10 мин = 0,2–9 м/с) — проходят как раньше.
+      if (jump >= e.SPARSE_MOVE_MIN_M && !isTeleportInterval(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon, dt)) {
         intervals.push({ dt, v: jump / dt, isGap: false, isSparse: true });
       } else {
         intervals.push({ dt, v: 0, isGap: true, isSparse: false });

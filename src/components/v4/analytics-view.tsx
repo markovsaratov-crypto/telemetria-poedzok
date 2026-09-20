@@ -2673,6 +2673,8 @@ function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats |
   const driftScore = reliability?.driftScore ?? null;
   const plausibility = reliability?.plausibilityScore ?? null;
   const activeIdleTime = stats?.methodology?.activeTrip?.activeIdleTime ?? null;
+  // v2.40.7 (N-3): фантомная дистанция, срезанная фильтром GPS-телепортов
+  const teleportM = stats?.teleportDistanceM ?? 0;
 
   if (!stats || !stats.methodology) {
     return (
@@ -2728,6 +2730,14 @@ function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats |
             tip="Пропуски сигнала | Количество пауз в данных GPS и их суммарная длина | Пауза — интервал длиннее 30 секунд"
             label="Пропуски сигнала"
           />
+          {teleportM > 0 ? (
+            <Stat
+              value={`${fmtNumber(teleportM / 1000)} км`}
+              cls={teleportM < 1000 ? "c-amber" : "c-red"}
+              tip="GPS-телепорты | Дистанция, выброшенная фильтром правдоподобия: интервалы, где перемещение требует скорости выше 200 км/ч (физически невозможно) | Появляется только у записей с глитчами позиционирования — основные KPI (дистанция/средняя) уже очищены"
+              label="Срезано телепортов"
+            />
+          ) : null}
           <Stat
             value={accuracyP90 != null ? `${fmtNum(accuracyP90, 1)} м` : "—"}
             cls={accuracyP90 == null ? "c-faint" : accuracyP90 <= 10 ? "c-plum" : accuracyP90 <= 25 ? "c-amber" : "c-red"}

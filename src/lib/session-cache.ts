@@ -50,7 +50,7 @@ import { getCorpusEcoBaselines } from "./eco-corpus";
  * session-events.ts / session-track.ts (поля, нормализация, пороги) → bump
  * здесь: все существующие кэши станут протухшими и пересчитаются on-demand.
  */
-export const SESSION_CACHE_VERSION = 9; // v2.38.2: EcoScore penalty-экспонента 1.5→2 (§7.3, ревью F65) — кэшированные EcoScore/rating пересчитываются on-demand; было 8 (v2.33.0: план = время 2ГИС с пробками на момент старта (utc) — planDurationSec/speedDeviationPct/durationDeviationPct в кэшированных payloads пересчитаны; базовая линия §3.2 осталась только для timeLostToTrafficSec)
+export const SESSION_CACHE_VERSION = 10; // v2.40.7 (N-3): фильтр GPS-телепортов — дистанция/avgSpeed/gapTime/трек пересчитываются on-demand; было 9 (v2.38.2: EcoScore penalty-экспонента 1.5→2 (§7.3, ревью F65) — кэшированные EcoScore/rating пересчитываются on-demand; было 8 (v2.33.0: план = время 2ГИС с пробками на момент старта (utc) — planDurationSec/speedDeviationPct/durationDeviationPct в кэшированных payloads пересчитаны; базовая линия §3.2 осталась только для timeLostToTrafficSec)
 
 export interface SessionCacheMeta {
   id: string;

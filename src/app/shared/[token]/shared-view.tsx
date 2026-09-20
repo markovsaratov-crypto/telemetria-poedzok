@@ -10,7 +10,7 @@ import * as React from "react";
 import { Activity, Calendar, Timer, Route as RouteIcon, Gauge } from "lucide-react";
 
 // P2-14: канонический гаверсинус — src/lib/geo.ts (была локальная копия)
-import { haversineM } from "@/lib/geo";
+import { plausibleIntervalM } from "@/lib/geo";
 import { ErrorBoundary } from "@/components/error-boundary";
 
 export interface SharedPoint {
@@ -125,7 +125,12 @@ function SharedTripContent({ data }: { data: SharedPayload }) {
     distance = 0;
     maxSpeed = 0;
     for (let i = 1; i < pts.length; i++) {
-      distance += haversineM(pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon);
+      // v2.40.7 (N-3): fallback-дистанция — с фильтром телепортов (как серверный
+      // расчёт /api/share): прыжки с v_impl > 200 км/ч не накручивают км.
+      distance += plausibleIntervalM(
+        pts[i - 1].lat, pts[i - 1].lon, pts[i].lat, pts[i].lon,
+        (pts[i].timestamp - pts[i - 1].timestamp) / 1000
+      );
       if (pts[i].speed != null) maxSpeed = Math.max(maxSpeed, pts[i].speed!);
     }
   }

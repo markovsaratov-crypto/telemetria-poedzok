@@ -21,7 +21,7 @@ import { env } from "./env"; // v2.25.0 (П.5): PLAN_MIN_COVERAGE — гейт �
 import { computeMethodologyMetrics, type EcoScoreBaselines, type MethodologyMetrics } from "./metrics-methodology";
 import { computeMovingTime, computeActiveTrip, type MethodologyPoint } from "./active-trip";
 import { avgSpeedMs, meanPointSpeedMs, maxSpeedMs, normalizeSessionSpeeds } from "./kpi";
-import { haversineM } from "./geo";
+import { haversineM, plausibleIntervalM } from "./geo";
 
 // P1-7: план-фактные отклонения и трафик-блок из результата ворчера (§6.3/§6.6/§6.7/§6.8 методологии)
 export interface RoutePlanFact {
@@ -196,6 +196,11 @@ export interface FullSessionStatsPayload {
   // (диагностика: сколько «накрутил» дрейф в хвостах)
   distance: number;
   rawDistanceM: number;
+  // v2.40.7 (N-3): метры, выброшенные фильтром GPS-телепортов (интервалы с
+  // v_impl > 200 км/ч — см. plausibleIntervalM). Диагностика «Качество данных»:
+  // честно показывает, сколько фантомной дистанции срезано (прод-кейс 20.09:
+  // запись 00:34 — 1 782 км телепортов в одной паре прыжков Саратов↔Казахстан).
+  teleportDistanceM: number;
   duration: number;
   // v2.9.3: спидограмма для графика скорость-время
   speedProfile: SpeedProfilePoint[];
@@ -274,6 +279,7 @@ export function computeSessionStats(
 
   let distance = 0; // FIX-C1: активная дистанция (метрика KPI, план-факт, EcoScore)
   let rawDistance = 0; // вся запись (диагностика хвостов)
+  let teleportDistance = 0; // v2.40.7 (N-3): срезано фильтром телепортов
   let elevationGain = 0;
   let elevationLoss = 0;
   let prevAlt: number | null = null;
@@ -289,12 +295,24 @@ export function computeSessionStats(
     // (v2.25.0 П.3: FIX-C1 дальше — долгая парковка внутри записи больше не
     // накручивает дистанцию; критерий пересечения интервалом окна leg тот же,
     // что был для span: правая точка ≥ старта, левая ≤ финиша)
+    // v2.40.7 (N-3): каждый интервал проходит фильтр телепортов ПЕРЕД любым
+    // суммированием — v_impl = d/dt > 200 км/ч (§4.4/§11.6) означает, что
+    // перемещение физически недостижимо за интервал: это GPS-глитч (позиция
+    // «улетела» на сотни км при dt сотни секунд). Раньше такой интервал
+    // попадал и в raw, и в active-дистанцию (если пересекал leg — а после
+    // v2.36.0 sparse-move растягивал leg НА телепорт, так что попадал всегда):
+    // период 14–20.09 показывал 2 435 км при реальных ~550 км и среднюю
+    // 387,3 км/ч при макс. 179,3 — средняя больше максимума. Телепорт-метры
+    // копятся отдельно (teleportDistanceM) для блока «Качество данных».
     if (i > 0) {
       const prev = points[i - 1];
+      const dt = (p.timestamp - prev.timestamp) / 1000;
       const d = haversineM(prev.lat, prev.lon, p.lat, p.lon);
-      rawDistance += d;
+      const dPlausible = plausibleIntervalM(prev.lat, prev.lon, p.lat, p.lon, dt);
+      if (dPlausible < d) teleportDistance += d - dPlausible;
+      rawDistance += dPlausible;
       if (hasActive && intervalInActiveLegs(activeTrip, prev.timestamp, p.timestamp)) {
-        distance += d;
+        distance += dPlausible;
       }
     }
 
@@ -377,6 +395,7 @@ export function computeSessionStats(
       pointCount: points.length,
       distance: Math.round(distance),
       rawDistanceM: Math.round(rawDistance),
+      teleportDistanceM: Math.round(teleportDistance),
       duration: Math.round(durationSec),
       speedProfile,
       hasAltitude,

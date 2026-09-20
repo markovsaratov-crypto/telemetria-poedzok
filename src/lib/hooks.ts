@@ -269,6 +269,8 @@ export interface SessionStats {
   // (разница = дрейф GPS в хвостах стоянки до старта/после финиша)
   distance: number;
   rawDistanceM?: number;
+  // v2.40.7 (N-3): метры, срезанные фильтром GPS-телепортов (v_impl > 200 км/ч)
+  teleportDistanceM?: number;
   duration: number;
   movingTime: number;
   idleTime: number;

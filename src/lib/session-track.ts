@@ -6,6 +6,7 @@
 // Входные точки — уже загруженные из БД (ORDER BY timestamp asc на стороне SQL).
 
 import { normalizeSessionSpeeds, HARSH_THRESHOLD_MS2 } from "./kpi"; // v2.16.0: единый порог §7.1/§7.2
+import { isTeleportInterval } from "./geo"; // v2.40.7 (N-3): острова телепортов не попадают на карту
 
 // Пороги скоростных бакетов для цветовых сегментов (§7 методологии) —
 // presentation-схема карты (цвет+подпись), отличная от KPI-бакетов kpi.ts
@@ -45,17 +46,57 @@ export function computeSessionTrack(session: TrackSessionMeta, rawPoints: TrackI
   }
 
   const startMs = Number(rawPoints[0].timestamp);
-  const startLat = rawPoints[0].lat;
-  const startLng = rawPoints[0].lon;
 
   // v2.13.0 (Ф6): normalizeSessionSpeeds (AUDIT B-4) — как в /stats и /events.
   // Сырое поле speed бывает битым (запись с пиком 166 км/ч имела speed ≤ 20 км/ч) —
   // весь трек окрашивался в «0–20». Теперь скорость согласована с геометрией.
   const normPoints = normalizeSessionSpeeds(rawPoints);
 
+  // v2.40.7 (N-3 «GPS-телепорт»): куски трека, недостижимые физически, удаляются
+  // ДО построения точек/сегментов/bounds — прод-кейс 20.09: кластер из трёх точек
+  // в Казахстане внутри саратовской ночной записи растягивал bounds карты на
+  // 890 км (авто-зум уходил в «обзор полушара»), а полилиния рисовалась через
+  // полстраны. См. правило островов ниже.
+  const kept: typeof normPoints = [];
+  // tp[i] — интервал между точками i и i+1 телепорт (v_impl > 200 км/ч)
+  const tp = new Array<boolean>(Math.max(0, normPoints.length - 1)).fill(false);
+  for (let i = 0; i < normPoints.length - 1; i++) {
+    const dt = (normPoints[i + 1].timestamp - normPoints[i].timestamp) / 1000;
+    tp[i] = isTeleportInterval(normPoints[i].lat, normPoints[i].lon, normPoints[i + 1].lat, normPoints[i + 1].lon, dt);
+  }
+  // Полилиния распадается на раны — отрезки между телепорт-интервалами.
+  // «Остров» = МАЛЫЙ ран (≤ 8 точек и ≤ 300 с), в который ведёт телепорт-интервал
+  // хотя бы с одной границы: физически недостижимый глитч-кластер (прод-кейс:
+  // 2–3 точки в Казахстане внутри саратовской записи — «недостижимость»
+  // доказана скоростью входа/выхода 1 982 м/с). БОЛЬШОЙ ран между телепортами —
+  // это основной трек, вокруг которого лежат глитчи (реальный кейс 920ff881:
+  // ран на 862 точки зажат джиттер-телепортом слева и КЗ-телепортом справа) —
+  // его не выбрасываем НИКОГДА: размер сам по себе доказывает реальность.
+  // Консерватизм: лучше оставить редкий большой глитч на карте (пунктиром),
+  // чем выбросить 14 минут реального движения.
+  const MAX_ISLAND_POINTS = 8;
+  const MAX_ISLAND_SPAN_MS = 300_000;
+  const runs: Array<{ from: number; to: number; enterTp: boolean; exitTp: boolean }> = [];
+  let runStart = 0;
+  for (let i = 0; i < tp.length; i++) {
+    if (tp[i]) {
+      runs.push({ from: runStart, to: i, enterTp: runStart > 0 ? tp[runStart - 1] : false, exitTp: true });
+      runStart = i + 1;
+    }
+  }
+  runs.push({ from: runStart, to: normPoints.length - 1, enterTp: runStart > 0 ? tp[runStart - 1] : false, exitTp: false });
+  for (const r of runs) {
+    const spanMs = normPoints[r.to].timestamp - normPoints[r.from].timestamp;
+    const size = r.to - r.from + 1;
+    const island = (r.enterTp || r.exitTp) && size <= MAX_ISLAND_POINTS && spanMs <= MAX_ISLAND_SPAN_MS;
+    if (island) continue;
+    for (let i = r.from; i <= r.to; i++) kept.push(normPoints[i]);
+  }
+  const points = kept.length >= 2 ? kept : normPoints; // вырожденный случай — не теряем трек целиком
+
   // Компактный массив точек: {i, t, lat, lng, v, alt, brg, acc, st}
   // st = 1 если moving (v > 0.5 м/с), иначе 0
-  const trackPoints = normPoints.map((p, i) => {
+  const trackPoints = points.map((p, i) => {
     const t = Math.round((Number(p.timestamp) - startMs) / 1000);
     const v = p.speed ?? 0; // м/с, нормализованная (AUDIT B-4)
     return {
@@ -135,8 +176,10 @@ export function computeSessionTrack(session: TrackSessionMeta, rawPoints: TrackI
     }
   }
 
-  // Bounds для авто-зума Leaflet
-  let minLat = startLat, maxLat = startLat, minLng = startLng, maxLng = startLng;
+  // Bounds для авто-зума Leaflet — по ФИЛЬТРОВАННОМУ треку (v2.40.7 N-3:
+  // стартовая/финишная точки-глитчи больше не растягивают зум; до фильтра
+  // bounds бралась от rawPoints[0])
+  let minLat = points[0].lat, maxLat = points[0].lat, minLng = points[0].lon, maxLng = points[0].lon;
   for (const p of trackPoints) {
     if (p.lat < minLat) minLat = p.lat;
     if (p.lat > maxLat) maxLat = p.lat;

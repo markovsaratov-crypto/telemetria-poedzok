@@ -5,7 +5,7 @@ import { createHmac, createHash } from "crypto";
 import { env } from "./env";
 import { db, libsql } from "./db";
 import { json } from "./http-utils";
-import { haversineM } from "./geo";
+import { plausibleIntervalM } from "./geo";
 import { computeMovingTime, computeActiveTrip, type MethodologyPoint, type ActiveTrip } from "./active-trip";
 import { maxSpeedMs, normalizeSessionSpeeds } from "./kpi";
 import { tokenMatches } from "./token-check"; // v2.16.0 (D-16): timing-safe сверка сигнатуры
@@ -211,7 +211,10 @@ export async function sharePayload(sessionId: string, expiresAt: number, request
     preTripIdleSec = active.preTripIdle;
     postTripIdleSec = active.postTripIdle;
     for (let i = 1; i < points.length; i++) {
-      const d = haversineM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon);
+      // v2.40.7 (N-3): фильтр телепортов — как в session-stats (единая семантика
+      // дистанции публичной страницы и приложения).
+      const dt = (points[i].timestamp - points[i - 1].timestamp) / 1000;
+      const d = plausibleIntervalM(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon, dt);
       rawDistanceM += d;
       // v2.31.0 (MAJ-9): гейтинг по LEGS (§4.11), как в session-stats
       // (intervalInActiveLegs). Раньше — по SPAN (activeStartTime…activeEndTime):

@@ -7,7 +7,10 @@
 //   §5.3 SpeedDistribution — 6 бакетов по 20 км/ч, Σ percent = 100%
 //   §4.4 MaxSpeed — с фильтрацией GPS-выбросов (обоснование в isUsableSpeedPoint)
 
-import { haversineM } from "@/lib/geo"; // AUDIT B-4: геометрическая проверка скоростей
+import { haversineM, plausibleIntervalM, MAX_PLAUSIBLE_SPEED_MS } from "@/lib/geo"; // AUDIT B-4: геометрическая проверка скоростей; v2.40.7: константа §4.4/§11.6 переехала в geo.ts (единственный источник, см. N-3)
+// v2.40.7 (N-3): обратный реэкспорт для существующих импортёров (metrics-methodology
+// и др.) — значение физически то же, источник один (geo.ts).
+export { MAX_PLAUSIBLE_SPEED_MS };
 export interface SpeedBucketDef {
   label: string;
   minKmh: number;
@@ -59,7 +62,8 @@ export function avgSpeedMs(
 //   - точки с accuracy > 100 м — координата/скорость недостоверны.
 // v2.31.0 (MIN-13): 70 м/с (252 км/ч) → 200 км/ч — ЕДИНАЯ константа с §11.6
 // (metrics-methodology isPlausiblePoint считал по своей границе 200 км/ч).
-export const MAX_PLAUSIBLE_SPEED_MS = 200 / 3.6; // 55,6 м/с = 200 км/ч
+// v2.40.7 (N-3): объявление перенесено в geo.ts (нужно и без kpi-зависимостей —
+// в active-trip/session-stats); здесь — реэкспорт (см. импорт выше).
 export const MAX_TRUSTED_ACCURACY_M = 100;
 
 export interface SpeedPoint {
@@ -284,11 +288,17 @@ export function normalizeSessionSpeeds<P extends NormalizablePoint>(points: P[])
   const points0 = glitchFiltered;
 
   // Средняя геометрическая скорость поездки (по гаверсинусу).
+  // v2.40.7 (N-3): интервалы-телепорты НЕ входят ни в числитель, ни в знаменатель
+  // иначе один прыжок 890 км раздувал geoAvg до сотен м/с и ложно запускал
+  // пересчёт скоростей «глобально не согласованы» (B-4) на чистых данных.
   let dist = 0;
+  let dur = 0;
   for (let i = 1; i < points0.length; i++) {
-    dist += haversineM(points0[i - 1].lat, points0[i - 1].lon, points0[i].lat, points0[i].lon);
+    const dt = (points0[i].timestamp - points0[i - 1].timestamp) / 1000;
+    dist += plausibleIntervalM(points0[i - 1].lat, points0[i - 1].lon, points0[i].lat, points0[i].lon, dt);
+    if (dt > 0) dur += dt;
   }
-  const durSec = Math.max(0, (points0[points0.length - 1].timestamp - points0[0].timestamp) / 1000);
+  const durSec = dur;
   if (durSec <= 0) return points0;
   const geoAvg = dist / durSec;
 

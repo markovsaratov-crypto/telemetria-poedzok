@@ -159,6 +159,8 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
   );
 
   const distance = sum(sorted.map((s) => s.distance));
+  // v2.40.7 (N-3): Σ срезанных телепортов — диагностика «Качество данных» периода
+  const teleportDistanceM = sum(sorted.map((s) => s.teleportDistanceM ?? 0));
   const duration = sum(sorted.map((s) => s.duration));
   const movingTime = sum(sorted.map((s) => s.movingTime));
   const idleTime = sum(sorted.map((s) => s.idleTime));
@@ -274,6 +276,7 @@ function aggregateStats(items: SessionStats[], sessionId: string): SessionStats 
     sessionId,
     pointCount,
     distance,
+    teleportDistanceM,
     duration,
     movingTime,
     idleTime,

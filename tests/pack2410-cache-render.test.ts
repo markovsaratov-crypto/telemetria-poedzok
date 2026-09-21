@@ -413,7 +413,10 @@ describe("§P1 m-21: getGatewayDayBudget — авторитетный метр �
     expect(budget!.readPct).toBe(Math.round((510_057 / D1_DAILY_READ_LIMIT) * 1000) / 10);
     expect(budget!.quotaExhaustedAt).toBeNull();
     // ключ дня — quota:day:<UTC-сегодня> (конвенция d1-gateway.js)
-    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    // v2.42.1: vi.fn без сигнатуры типизирует calls как [][] — индекс [1]
+    // доступен только через unknown-каст (CI tsc -p tsconfig.test.json)
+    const firstCall = fetchMock.mock.calls[0] as unknown[];
+    const body = JSON.parse((firstCall[1] as RequestInit).body as string);
     expect(body.key).toBe(`quota:day:${new Date().toISOString().slice(0, 10)}`);
   });
 

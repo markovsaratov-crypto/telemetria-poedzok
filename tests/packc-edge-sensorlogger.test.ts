@@ -54,16 +54,20 @@ describe("§C P2: extractItems — нативный формат SensorLogger", 
       { name: "location", time: NOW, values: { latitude: 51.53, longitude: 46.03, speed: 12.5 } },
     ];
     const items = extractItems(body);
-    expect(items).toHaveLength(2);
-    const loc = items[1] as Record<string, unknown>;
+    // v2.42.1: extractItems возвращает RawPoint[] | null — невалидный контейнер
+    // даёт null; валидные кейсы ниже — non-null (CI tsc -p tsconfig.test.json)
+    expect(items).not.toBeNull();
+    expect(items!).toHaveLength(2);
+    const loc = items![1] as Record<string, unknown>;
     expect((loc.location as Record<string, unknown>).latitude).toBe(51.53);
     expect(loc.time).toBe(NOW);
   });
   it("{payload:[…]} — реальный формат приложения (кейс 01.09)", () => {
     const body = { messageId: 41, sessionId: "s", deviceId: "phone", payload: [{ name: "location", time: NOW, values: { latitude: 51.5, longitude: 46.0 } }] };
     const items = extractItems(body);
-    expect(items).toHaveLength(1);
-    expect((items[0] as Record<string, unknown>).name).toBe("location");
+    expect(items).not.toBeNull();
+    expect(items!).toHaveLength(1);
+    expect((items![0] as Record<string, unknown>).name).toBe("location");
   });
   it("прочие контейнеры + вложенный data.location + плоский объект", () => {
     expect(extractItems({ points: [{ time: NOW, location: { latitude: 1, longitude: 2 } }] })).toHaveLength(1);

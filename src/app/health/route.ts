@@ -16,6 +16,9 @@ import { getRateLimiterStats } from "@/lib/rate-limit";
 // v2.11.0 (АУДИТ C-20): worker — реальная живость in-process-ворчера,
 // раньше был захардкожен "ok" (спека §4.8 требовала честный статус)
 import { getWorkerRuntime } from "@/lib/worker-runtime";
+// v2.42.0 («Вариант 1»): состояние слоя TripCalc (снапшоты расчётов >24 ч) —
+// честная видимость «шлюз ещё не задеплоен» (tableOk=false, 403) без деградации
+import { tripCalcStatus } from "@/lib/trip-calc";
 
 // v2.40.5 (квота-M-15): проба БД — SELECT 1 вместо db.session.count.
 // Прежний COUNT по Session читал ~104 строки на КАЖДЫЙ вызов /health, а их
@@ -64,6 +67,11 @@ export async function GET(request: NextRequest) {
   // v2.11.0 (C-20): worker запущен и не в shutdown → ok; не запущен → degraded
   const rt = getWorkerRuntime();
   const workerStatus: "ok" | "degraded" = rt && !rt.shuttingDown ? "ok" : "degraded";
+  // v2.42.0: не фатально (путь v2.41.0 полностью корректен) — только
+  // наблюдаемость + гейдж для мониторинга
+  const tc = tripCalcStatus();
+  set("tripcalc_enabled", tc.enabled ? 1 : 0, "TripCalc snapshot layer enabled (v2.42.0)");
+  set("tripcalc_table_ok", tc.tableOk === true ? 1 : 0, "TripCalc table ensured (false until gateway whitelist deploy)");
   const body = JSON.stringify({
     status: dbStatus === "ok" && workerStatus === "ok" ? "ok" : "degraded",
     db: dbStatus,
@@ -88,6 +96,14 @@ export async function GET(request: NextRequest) {
     },
     worker: workerStatus,
     workerUptimeSec: rt ? Math.round((Date.now() - rt.startedAt) / 1000) : 0,
+    // v2.42.0: слой расчётных снапшотов (enabled/tableOk/lastError);
+    // tableOk=false + 403 в lastError = вайтлист шлюза ждёт деплоя
+    // cloudflare-worker/d1-gateway.js (bunx wrangler deploy) — сервис НЕ деградирован
+    tripCalc: {
+      enabled: tc.enabled,
+      tableOk: tc.tableOk,
+      lastError: tc.lastError,
+    },
     circuits: circuitStatus(),
     rateLimiter: getRateLimiterStats(),
     version: env().APP_VERSION,

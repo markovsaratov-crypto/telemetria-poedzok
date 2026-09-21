@@ -39,12 +39,21 @@ import { computeSessionEvents, type SessionEventsPayload } from "@/lib/session-e
 import {
   loadSessionMetasWithCache,
   getCachedPayload,
+  parseCachedJson,
   persistSessionCaches,
   type SessionCacheMeta,
 } from "@/lib/session-cache";
 import { getTtlCache } from "@/lib/ttl-cache";
 import { trackLatency } from "@/lib/latency";
 import { parseRenderMode, thinEventsForRender } from "@/lib/track-render";
+import { CACHE_PIPELINE_VERSIONS } from "@/lib/cache-versions";
+import {
+  loadFinalCalcCandidates,
+  readTripCalcRows,
+  tripCalcServesEvents,
+  upsertTripCalc,
+  tripCalcEnabled,
+} from "@/lib/trip-calc";
 
 // v2.40.5 (квота-m-13, аудит Task 22): + ETag/304 (паттерн /api/stats §A2 — см.
 // идентичный блок в /api/track/batch): кэш хранит {payload, etag}, слабый ETag
@@ -59,6 +68,8 @@ const RENDER_CACHE = getTtlCache<EventsBatchCacheEntry>("events-batch-render", 3
 
 inc("batch_render_total", "Batch routes served in render mode (v2.41.0 P0-C)", 0, 'route="events"');
 inc("batch_swr_total", "Batch routes served stale-while-revalidate (v2.41.0 P0-C)", 0, 'route="events"');
+inc("tripcalc_serve_total", "Render batches served from TripCalc snapshots (v2.42.0)", 0, 'route="events"');
+inc("tripcalc_fallback_total", "Render batch TripCalc candidates served by v2.41.0 fallback (v2.42.0)", 0, 'route="events"');
 
 export async function GET(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
@@ -125,6 +136,13 @@ export async function GET(request: NextRequest) {
 /**
  * Сборка ответа + запись в кэш ответа (единая для запроса и фоновой
  * SWR-ревалидации, v2.41.0).
+ *
+ * v2.42.0 («Вариант 1», TripCalc): рендер-режим обслуживает финальные
+ * записи (> 24 ч) из снапшотов TripCalc.eventsJson (капы thinEventsForRender
+ * — ровно форма ответа): eventsCache-колонки (665–677 КБ у тяжёлых записей)
+ * не тянутся из D1, прореживание не выполняется. Слой недоступен (403 шлюза
+ * до деплоя / сбой) — весь список на пути v2.41.0. Write-through: финальная
+ * запись обслужена классически → рендер-форма фиксируется в снапшот.
  */
 async function buildAndCache(
   ids: string[],
@@ -133,14 +151,71 @@ async function buildAndCache(
   render: boolean,
   requestId: string
 ): Promise<EventsBatchCacheEntry> {
+  const nowMs = Date.now();
+
+  // ——— v2.42.0: фаза 0 — финальные записи из TripCalc (только рендер) ———
+  const servedByTripCalc = new Map<string, SessionEventsPayload>();
+  let classicIds = ids;
+  let missing0: string[] | null = null;
+  let tripcalcCandidates: Array<{
+    id: string; userId: string | null; startTime: string; pointCount: number;
+  }> = [];
+  if (render && tripCalcEnabled()) {
+    const phase0 = await loadFinalCalcCandidates(ids, scope, nowMs);
+    if (!phase0.failed) {
+      missing0 = phase0.missing;
+      const finalIds = phase0.candidates.map((c) => c.id);
+      classicIds = ids.filter((id) => !finalIds.includes(id));
+      tripcalcCandidates = phase0.candidates.map((c) => ({
+        id: c.id, userId: c.userId, startTime: c.startTime, pointCount: c.pointCount ?? 0,
+      }));
+      if (finalIds.length > 0) {
+        const rows = await readTripCalcRows(finalIds, scope, { events: true });
+        let served = 0;
+        for (const c of phase0.candidates) {
+          const row = rows?.get(c.id);
+          if (
+            tripCalcServesEvents(
+              row,
+              { endTime: c.endTime, deleted: c.deleted, pointCount: c.pointCount },
+              CACHE_PIPELINE_VERSIONS.events,
+              nowMs
+            )
+          ) {
+            const parsed = parseCachedJson<SessionEventsPayload>(row!.eventsJson);
+            if (parsed) {
+              servedByTripCalc.set(c.id, parsed);
+              served++;
+            }
+          }
+        }
+        if (served > 0) inc("tripcalc_serve_total", "", served, 'route="events"');
+        if (served < finalIds.length) {
+          inc("tripcalc_fallback_total", "", finalIds.length - served, 'route="events"');
+        }
+      }
+    }
+  }
+
   // ——— меты + ПРЕДРАСЧЁТ (eventsCache), БЕЗ точек — один IN-запрос ———
   // v2.23.0: чужие сессии не попадают в Map → трактуются как missing
-  const metas = await loadSessionMetasWithCache(ids, scope, { events: true });
-  const missing = ids.filter((id) => {
-    const e = metas.get(id);
-    return !e || e.deleted;
-  });
-  const live = ids.map((id) => metas.get(id)).filter((e): e is SessionCacheMeta => !!e && !e.deleted);
+  // v2.42.0: только НЕ-обслуженные снапшотами id
+  const metas = classicIds.length > 0
+    ? await loadSessionMetasWithCache(classicIds, scope, { events: true })
+    : new Map<string, SessionCacheMeta>();
+  const missing =
+    missing0 != null
+      ? missing0.filter((id) => {
+          const e = metas.get(id);
+          return !e || e.deleted;
+        })
+      : ids.filter((id) => {
+          const e = metas.get(id);
+          return !e || e.deleted;
+        });
+  const live = classicIds
+    .map((id) => metas.get(id))
+    .filter((e): e is SessionCacheMeta => !!e && !e.deleted);
 
   // ——— протухшие/некэшированные: live-конвейер по их точкам ———
   // v2.41.0 (P0-A, N-8): честность ПО ПОЛЯМ — payload.cacheV конвейера событий
@@ -153,7 +228,7 @@ async function buildAndCache(
 
   const cacheWrites: Array<{ id: string; cachePointCount: number; eventsJson?: string }> = [];
 
-  const events = live.map((entry) => {
+  const classicEvents = live.map((entry) => {
     // v2.41.0 (P0-A): свежий кэш — по штампу конвейера в самом payload
     const fresh = getCachedPayload<SessionEventsPayload>(entry, "events");
     if (fresh) return fresh;
@@ -175,9 +250,37 @@ async function buildAndCache(
   }
 
   // v2.41.0 (P0-C): рендер-потолки (summary — без изменений: счётчики честные)
-  const outEvents = render
-    ? events.map((e) => thinEventsForRender(e as unknown as Record<string, unknown>) as unknown as SessionEventsPayload)
-    : events;
+  // v2.42.0: для classicIds; снапшотные payload'ы уже в рендер-форме
+  const outClassic = render
+    ? classicEvents.map((e) => thinEventsForRender(e as unknown as Record<string, unknown>) as unknown as SessionEventsPayload)
+    : classicEvents;
+
+  // сборка в ПОРЯДКЕ ids (семантика v2.41.0)
+  const byId = new Map<string, SessionEventsPayload>();
+  live.forEach((e, i) => byId.set(e.id, outClassic[i]));
+  for (const [id, p] of servedByTripCalc) byId.set(id, p);
+  const outEvents = ids.map((id) => byId.get(id)).filter((p): p is SessionEventsPayload => !!p);
+
+  // ——— v2.42.0: write-through снапшотов финальных записей (рендер-форма) ———
+  if (render && tripcalcCandidates.length > 0) {
+    const writes = tripcalcCandidates
+      .filter((c) => !servedByTripCalc.has(c.id))
+      .map((c) => {
+        const thin = byId.get(c.id);
+        if (!thin) return null;
+        return {
+          sessionId: c.id,
+          userId: c.userId,
+          startTime: c.startTime,
+          pointCount: c.pointCount,
+          eventsJson: JSON.stringify(thin),
+        };
+      })
+      .filter((w): w is NonNullable<typeof w> => w != null);
+    if (writes.length > 0) {
+      await upsertTripCalc(writes);
+    }
+  }
 
   const payload = { events: outEvents, missing };
   // v2.40.5 (m-13): ETag один раз при заполнении кэша
@@ -185,9 +288,9 @@ async function buildAndCache(
   (render ? RENDER_CACHE : CACHE).set(cacheKey, { payload, etag });
 
   logger.info("batch events computed", {
-    requestId, requested: ids.length, returned: events.length,
+    requestId, requested: ids.length, returned: outEvents.length,
     missing: missing.length, fromCache: live.length - staleIds.length, computed: staleIds.length,
-    render,
+    render, tripcalcServed: servedByTripCalc.size,
   });
   return { payload, etag };
 }

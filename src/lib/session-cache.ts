@@ -48,6 +48,7 @@ import { computeSessionTrack } from "./session-track";
 import { getCorpusEcoBaselines } from "./eco-corpus";
 // v2.41.0 (N-8): версии конвейеров ПО ПОЛЯМ — лист-модуль, циклов нет
 import { CACHE_PIPELINE_VERSIONS, payloadCacheV, type SessionCacheField } from "./cache-versions";
+import { upsertTripCalcForWarmedSession } from "./trip-calc";
 
 /**
  * Версия схемы кэша. Любое изменение формы payloads/session-stats.ts /
@@ -430,6 +431,22 @@ export async function warmSessionCache(sessionId: string): Promise<void> {
     ],
     ["stats", "events", "track"]
   );
+
+  // v2.42.0 («Вариант 1»): финальная (> 24 ч) запись — фиксируем РАСЧЁТНЫЙ
+  // СНАПШОТ (TripCalc: рендер-трек/события + метрики) из УЖЕ посчитанных
+  // payloads — сырье повторно не читается. На финализации запись моложе 24 ч —
+  // гвард внутри вернёт false; снапшот появится при бэкфилле/прогреве
+  // протухших, когда запись уже финальна. Сбой — non-fatal (снапшот доберёт
+  // write-through рендер-батчей).
+  try {
+    await upsertTripCalcForWarmedSession(
+      { id: entry.id, startTime: entry.startTime, endTime: entry.endTime, pointCount: entry.pointCount },
+      { stats: statsResult, events, track }
+    );
+  } catch {
+    // прогрев не имеет права падать из-за слоя снапшотов
+  }
+
   logger.info("session cache warmed", { sessionId, points: entry.points.length });
 }
 

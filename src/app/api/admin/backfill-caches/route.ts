@@ -29,6 +29,10 @@ import { writeAudit } from "@/lib/audit";
 import { inc } from "@/lib/metrics";
 import { isD1QuotaError } from "@/lib/d1-quota";
 import { findSessionsWithStalePayloads, warmSessionCache } from "@/lib/session-cache";
+import {
+  findFinalSessionsWithoutTripCalc,
+  upsertTripCalcFromSessionCaches,
+} from "@/lib/trip-calc";
 
 const zBackfillBody = z.object({
   /** Максимум сессий на вызов (бюджет CPU Render 0.1). Default 60. */
@@ -55,12 +59,19 @@ export async function POST(request: NextRequest) {
     const budgetMs = parsed.data.budgetMs ?? BUDGET_MS_DEFAULT;
 
     // ——— инвентарь протухших (один SELECT, ~строка rows_read на сессию) ———
+    // v2.42.0 («Вариант 1»): + финальные (>24 ч) записи БЕЗ снапшота TripCalc
+    // (анти-джойн по маленьким таблицам) — снапшот строится ЛЕГКИМ путём из
+    // свежих персистентных кэшей (без чтения точек); кэш протух — полный warm.
     const startedAt = Date.now();
     const inventory = await findSessionsWithStalePayloads(200);
-    const toWarm = inventory.ids.slice(0, limit);
-    const remaining = Math.max(0, inventory.ids.length - toWarm.length);
+    const tripcalcMissing = await findFinalSessionsWithoutTripCalc(200);
+    const staleSet = new Set(inventory.ids);
+    const mergedIds = [...inventory.ids, ...tripcalcMissing.filter((id) => !staleSet.has(id))];
+    const toWarm = mergedIds.slice(0, limit);
+    const remaining = Math.max(0, mergedIds.length - toWarm.length);
 
     let warmed = 0;
+    let tripcalcBuilt = 0;
     let quotaHit = false;
     let reason = "completed";
     for (const id of toWarm) {
@@ -69,8 +80,21 @@ export async function POST(request: NextRequest) {
         break;
       }
       try {
-        await warmSessionCache(id);
-        warmed++;
+        if (staleSet.has(id)) {
+          // протухший кэш: полный конвейер (сырьё) + снапшот внутри warm'а
+          await warmSessionCache(id);
+          warmed++;
+        } else {
+          // кэш свеж, снапшота нет: лёгкий путь — снапшот из кэшей
+          const r = await upsertTripCalcFromSessionCaches(id);
+          if (r.written) {
+            tripcalcBuilt++;
+          } else if (r.reason === "session-caches-stale") {
+            await warmSessionCache(id);
+            warmed++;
+          }
+          // not-final/disabled/upsert-failed — честный пропуск
+        }
       } catch (err) {
         if (isD1QuotaError(err)) {
           // АВАРИЙНЫЙ СТОП: остаток бюджета не тратим в стену (как N-6 warm)
@@ -89,6 +113,8 @@ export async function POST(request: NextRequest) {
       ok: true,
       scanned: inventory.scanned,
       staleFound: inventory.ids.length,
+      tripcalcMissingFound: tripcalcMissing.length,
+      tripcalcBuilt,
       warmed,
       remaining,
       quotaHit,

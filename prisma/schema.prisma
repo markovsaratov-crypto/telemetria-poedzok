@@ -347,3 +347,45 @@ model StatsRollup {
   @@id([day, userId])
   @@index([userId, day])
 }
+
+// v2.42.0 («Вариант 1», запрос владельца 21.09): ПРОМЕЖУТОЧНОЕ ХРАНЕНИЕ
+// РАСЧЁТОВ по финальным записям (закрыты > 24 ч — состав точек заморожен):
+// рендер-снапшоты трека (≤400 тчк, форма thinTrackForRender) и событий
+// (капы thinEventsForRender) + SQL-агрегируемые метрики расчёта. Рендер-батчи
+// период-срезов обслуживаются отсюда напрямую: жирные JSON-колонки Session
+// (trackCache до 1,19 МБ/запись) не тянутся из D1, прореживание не
+// выполняется (замер Task 28: 6,32 МБ → ~1,4 МБ на 50 записей).
+// Штампы ПО ПОЛЯМ (statsCacheV/eventsCacheV/trackCacheV — конвенция N-8
+// v2.41.0): bump конвейера протухляет только своё поле снапшота.
+// Пишется: write-through рендер-батчей, warmSessionCache финальных записей,
+// бэкфилл admin/backfill-caches (анти-джойн, лёгкий путь без чтения точек).
+// Удаляется: retention-purge (вместе с точками записи).
+// РЕАЛЬНОЕ DDL — идемпотентный ensure-on-boot в src/lib/trip-calc.ts (до
+// деплоя шлюза с TripCalc в вайтлисте — 403, консервативный fallback на
+// путь v2.41.0; Prisma здесь — только типы, как у StatsRollup/_AlertState).
+// day — YYYY-MM-DD startTime в TELEMAT_TIMEZONE (бакет период-срезов);
+// userId "" = unclaimed (sentinel, как StatsRollup — NULL-PK не детектится).
+model TripCalc {
+  sessionId        String   // PK = id записи (Session.id)
+  userId           String   @default("") // "" = unclaimed
+  day              String   @default("") // YYYY-MM-DD в TELEMAT_TIMEZONE
+  final            Int      @default(1) // 1 = закрыта > 24 ч (иммутбельна)
+  statsCacheV      Int      @default(0) // штамп конвейера статов (метрик)
+  eventsCacheV     Int      @default(0) // штамп конвейера событий
+  trackCacheV      Int      @default(0) // штамп конвейера трека
+  renderMaxPoints  Int      @default(400) // потолок рендер-формы трека
+  pointCount       Int      @default(0) // состав на момент снапшота
+  distanceM        Float    @default(0)
+  durationSec      Int      @default(0)
+  avgSpeedMs       Float?   // м/с (значение payload статов)
+  maxSpeedMs       Float?   // м/с
+  ecoScore         Float?
+  teleportDistanceM Float   @default(0)
+  eventsJson       String?  // рендер-события (капы thinEventsForRender)
+  trackJson        String?  // рендер-трек (≤400 тчк, поля {i,t,lat,lng,v,st})
+  updatedAt        DateTime
+
+  @@id([sessionId])
+  @@index([userId, day])
+  @@index([final, updatedAt])
+}

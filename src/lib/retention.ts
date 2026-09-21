@@ -3,6 +3,7 @@ import { db, libsql } from "./db";
 import { env } from "./env";
 import { writeAudit } from "./audit";
 import { recomputeAfterSessionDelete } from "./trip-grouping"; // v2.29.0 (MI-1)
+import { deleteTripCalcRows } from "./trip-calc"; // v2.42.0: снапшот умираёт вместе с записью
 
 // Hard-delete сессий с purgedAt старше archive retention, или сразу если архивация отключена.
 export async function runRetention(): Promise<{ purged: number; archived: number }> {
@@ -75,6 +76,11 @@ export async function runRetention(): Promise<{ purged: number; archived: number
       { sql: "DELETE FROM GpsPoint WHERE sessionId = ?", args: [String(s.id)] },
       { sql: "UPDATE Session SET purgedAt = ?, status = 'archived' WHERE id = ?", args: [now.toISOString(), String(s.id)] },
     ], "write");
+    // v2.42.0 («Вариант 1»): строка TripCalc (расчётный снапшот) умираёт
+    // вместе с записью; non-fatal — осиротевшая строка обслуживания не
+    // получает (финальность/pointCache сверяются с метой Session, которой
+    // больше нет → missing → снапшот недоступен).
+    await deleteTripCalcRows([String(s.id)]).catch(() => 0);
     await writeAudit({
       action: "session.purge",
       targetId: String(s.id),

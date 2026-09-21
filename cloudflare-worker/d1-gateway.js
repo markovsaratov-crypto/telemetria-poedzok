@@ -94,6 +94,11 @@ const ALLOWED_TABLES = new Set(
     // v2.39.0-приложения; /ingest-порт пишет независимо от вайтлиста
     // (стейтменты фиксированы), строка нужна для /query и create-index.
     "StatsRollup",
+    // v2.42.0 («Вариант 1»): расчётные снапшоты финальных записей (>24 ч) —
+    // рендер-трек/события + метрики; читают/пишут батч-роуты рендера,
+    // warm/бэкфилл и retention-purge (DELETE). До СВОЕГО деплоя все SQL к
+    // ней = 403 — приложение консервативно живёт на пути v2.41.0.
+    "TripCalc",
   ].map((t) => t.toLowerCase())
 );
 
@@ -109,6 +114,11 @@ const CREATE_ALERTSTATE_RE = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?_AlertStat
 // (src/lib/stats-rollup.ts ensureStatsRollupTable — идемпотентный DDL, тот же
 // паттерн что _AlertState: IF NOT EXISTS = no-op на существующей).
 const CREATE_STATSROLLUP_RE = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?StatsRollup"?\s*\(/i;
+// v2.42.0 («Вариант 1»): ленивое самовосстановление TripCalc-таблицы
+// приложением (src/lib/trip-calc.ts ensureTripCalcTable — идемпотентный DDL,
+// тот же паттерн _AlertState/StatsRollup; ретрай каждые 10 мин, чтобы
+// таблица поднялась сразу после ЭТОГО деплоя шлюза без ресайкла Render).
+const CREATE_TRIPCALC_RE = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?TripCalc"?\s*\(/i;
 // v2.38.2 (ревью F50): идемпотентные индексы ensure-on-boot. Приложение
 // создаёт Session_userId_startTime_idx лениво при первом списковом запросе
 // (db.ts, fire-and-forget). IF NOT EXISTS = no-op на существующем индексе;
@@ -257,6 +267,7 @@ function validateStatement(sql, readOnly) {
   if (verb === "CREATE") {
     if (CREATE_ALERTSTATE_RE.test(clean)) return null;
     if (CREATE_STATSROLLUP_RE.test(clean)) return null;
+    if (CREATE_TRIPCALC_RE.test(clean)) return null;
     // v2.38.2 (F50): CREATE [UNIQUE] INDEX IF NOT EXISTS <idx> ON <allowed-table>
     const idxMatch = clean.match(CREATE_INDEX_RE);
     if (idxMatch && ALLOWED_TABLES.has(idxMatch[3].toLowerCase())) return null;
@@ -1117,7 +1128,8 @@ const worker = {
       if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
       // v2.40.5 (Pack B): version — маркер деплоя шлюза (как APP_VERSION у
       // приложения): верификация «в воркере новый код» без wrangler tail.
-      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.40.9" });
+      // v2.42.0: + TripCalc в ALLOWED_TABLES + CREATE_TRIPCALC_RE.
+      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.42.0" });
     }
 
     // v2.39.1 (§B1): edge-инжест — ДО гейта X-Gateway-Secret: канал имеет

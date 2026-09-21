@@ -5,6 +5,10 @@ import { libsql } from "@/lib/db";
 // (SELECT 1 не видит исчерпание: читает 0 строк и проходит; флаг ставится
 // на РЕАЛЬНЫХ ошибках запросов в db-d1.ts и снимается успешными чтениями).
 import { d1QuotaSnapshot } from "@/lib/d1-quota";
+// v2.41.0 (P1, m-21): авторитетный дневной бюджет из KV-метра шлюза —
+// счётчик приложения d1_rows_read_total умирает с ресайклами и не видит
+// чтений других изолейтов шлюза (4,49 млн «эпохи» vs 510 тыс. реальных)
+import { getGatewayDayBudget, D1_DAILY_READ_LIMIT } from "@/lib/gateway-budget";
 import { env } from "@/lib/env";
 import { set } from "@/lib/metrics";
 import { circuitStatus } from "@/lib/routing/circuit-breaker";
@@ -42,6 +46,12 @@ export async function GET(request: NextRequest) {
   const quota = d1QuotaSnapshot();
   set("d1_quota_read_exhausted", quota.readExhausted ? 1 : 0, "D1 daily READ quota exhausted (sticky flag, m-20)");
   set("d1_quota_write_exhausted", quota.writeExhausted ? 1 : 0, "D1 daily WRITE quota exhausted (sticky flag, m-20)");
+  // v2.41.0 (P1, m-21): метр шлюза НЕ фатален — /health не падает из-за
+  // наблюдаемости; сбой канала = meter: null (деградация честная)
+  const meter = await getGatewayDayBudget().catch(() => null);
+  if (meter != null) {
+    set("d1_day_rows_read", meter.rowsRead, "Daily D1 rows_read from gateway KV meter (authoritative, m-21)");
+  }
   if (quota.readExhausted) {
     dbStatus = "degraded";
     const since = quota.readExhaustedAt ? quota.readExhaustedAt.slice(11, 16) : "??";
@@ -59,9 +69,22 @@ export async function GET(request: NextRequest) {
     db: dbStatus,
     dbError: dbError || undefined,
     // v2.40.9 (Pack C, m-20): машиночитаемое состояние квоты (null = жива).
+    // v2.41.0 (P1, m-21): + авторитетный метр шлюза (rowsReadToday — сумма
+    // ВСЕХ чтений через шлюз за UTC-сутки, включая другие изоляты/backup/cron)
     d1Quota: {
       readExhaustedAt: quota.readExhaustedAt,
       writeExhaustedAt: quota.writeExhaustedAt,
+      ...(meter != null
+        ? {
+            rowsReadToday: meter.rowsRead,
+            rowsWrittenToday: meter.rowsWritten,
+            readLimit: D1_DAILY_READ_LIMIT,
+            readPct: meter.readPct,
+            meter: "gateway-kv" as const,
+            meterDay: meter.day,
+            meterExhaustedAt: meter.quotaExhaustedAt,
+          }
+        : { meter: null }),
     },
     worker: workerStatus,
     workerUptimeSec: rt ? Math.round((Date.now() - rt.startedAt) / 1000) : 0,

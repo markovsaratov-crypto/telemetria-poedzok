@@ -653,14 +653,21 @@ export function usePeriodStats(period: PeriodKey) {
       // + серверный TTL-кэш 30с). Раньше — 2×N поштучных запросов под семафором 6
       // (последняя оставшаяся N+1-нога период-агрегата после батч-статса v2.17.0).
       const idsQuery = capped.join(",");
+      // v2.41.0 (P0-C, N-9): events/track — в РЕНДЕР-режиме (?mode=render):
+      // серверное прореживание ≤400 тчк/запись + компактные поля (без
+      // alt/brg/acc) + потолки событий + TTL 300с + SWR + ETag/304. Замер
+      // Task 28: полный батч 10,27 с / 10,3 МБ при рендере ≤4000 точек на
+      // карту — 99% байтов выбрасывалось; агрегат ниже по-прежнему работает
+      // на прореженных массивах (склейка/переиндексация gap'ов — те же
+      // инварианты, сэмпл сохраняет первую/последнюю точки записей).
       const [batch, eventsBatch, trackBatch] = await Promise.all([
         qc.fetchQuery({
           queryKey: ["stats-batch", cappedKey],
           queryFn: () => fetchSessionsStatsBatch(capped),
           staleTime: 30_000,
         }),
-        api.get<{ events: EventsResponse[]; missing: string[] }>("/api/events/batch", { ids: idsQuery }),
-        api.get<{ tracks: TrackResponse[]; missing: string[] }>("/api/track/batch", { ids: idsQuery }),
+        api.get<{ events: EventsResponse[]; missing: string[] }>("/api/events/batch", { ids: idsQuery, mode: "render" }),
+        api.get<{ tracks: TrackResponse[]; missing: string[] }>("/api/track/batch", { ids: idsQuery, mode: "render", maxPoints: 400 }),
       ]);
       seedSessionsStatsFromBatch(qc, batch.stats);
       const fallbackIds = batch.missing;

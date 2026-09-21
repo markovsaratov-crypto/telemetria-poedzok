@@ -28,10 +28,9 @@ import { getCorpusEcoBaselines } from "@/lib/eco-corpus"; // v2.16.0 (I1): об�
 import { computeSessionStats, loadPlanFacts, composeRoute, type SessionStatsResult } from "@/lib/session-stats"; // v2.17.0: единый конвейер
 import {
   loadSessionMetasWithCache,
-  isSessionCacheFresh,
-  parseCachedJson,
+  getCachedPayload,
   persistSessionCaches,
-} from "@/lib/session-cache"; // v2.38.2 · F41: персистентный кэш предрасчёта
+} from "@/lib/session-cache"; // v2.38.2 · F41: персистентный кэш предрасчёта; v2.41.0 (P0-A): честность по payload
 import { trackLatency } from "@/lib/latency"; // P2-16: замер api_latency_p95
 
 export async function GET(
@@ -56,7 +55,8 @@ export async function GET(
     }
 
     // ——— свежий персистентный кэш: готовый payload, БЕЗ точек и конвейера ———
-    const fresh = isSessionCacheFresh(meta) ? parseCachedJson<SessionStatsResult>(meta.statsCache) : null;
+    // v2.41.0 (P0-A, N-8): свежесть — по штампу конвейера в самом payload
+    const fresh = getCachedPayload<SessionStatsResult>(meta, "stats");
     if (fresh) {
       if (fresh.kind === "empty") {
         trackLatency(request); // P2-16

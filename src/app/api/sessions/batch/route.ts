@@ -24,7 +24,7 @@ import { dataScopeFor, sessionScopeWhere } from "@/lib/scope";
 import { json } from "@/lib/http-utils";
 import { logger } from "@/lib/logger";
 import { z } from "zod";
-import { isSessionCacheFresh, loadSessionMetasWithCache, parseCachedJson } from "@/lib/session-cache";
+import { getCachedPayload, loadSessionMetasWithCache } from "@/lib/session-cache";
 import type { SessionStatsResult } from "@/lib/session-stats";
 
 const zBatchBody = z.object({
@@ -98,9 +98,9 @@ export async function POST(request: NextRequest) {
       const pts = (s.gpsPoints ?? []) as Array<Record<string, unknown>>; // v2.18.0: типизированный db
       const sampled = includePoints ? evenSample(pts, BATCH_MAX_POINTS) : pts;
       const meta = metas.get(String(s.id));
-      const stats = meta && isSessionCacheFresh(meta, ["stats"])
-        ? parseCachedJson<SessionStatsResult>(meta.statsCache)
-        : null;
+      // v2.41.0 (P0-A, N-8): свежесть — по штампу конвейера в payload
+      // (getCachedPayload: строка + поле + cacheV статов)
+      const stats = meta ? getCachedPayload<SessionStatsResult>(meta, "stats") : null;
       const payload = stats ? stats.payload : null;
       return {
         ...s,

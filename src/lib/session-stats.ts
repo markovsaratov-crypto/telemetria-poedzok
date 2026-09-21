@@ -22,6 +22,7 @@ import { computeMethodologyMetrics, type EcoScoreBaselines, type MethodologyMetr
 import { computeMovingTime, computeActiveTrip, type MethodologyPoint } from "./active-trip";
 import { avgSpeedMs, meanPointSpeedMs, maxSpeedMs, normalizeSessionSpeeds } from "./kpi";
 import { haversineM, plausibleIntervalM } from "./geo";
+import { CACHE_PIPELINE_VERSIONS } from "./cache-versions"; // v2.41.0 (N-8): штамп конвейера в payload
 
 // P1-7: план-фактные отклонения и трафик-блок из результата ворчера (§6.3/§6.6/§6.7/§6.8 методологии)
 export interface RoutePlanFact {
@@ -182,6 +183,8 @@ export function buildSpeedProfile(
 /** Пустой ответ для сессии без точек — форма прежнего early-return в stats-роуте. */
 export interface EmptySessionStatsPayload {
   sessionId: string;
+  // v2.41.0 (N-8): штамп конвейера статов в кэше (см. cache-versions.ts)
+  cacheV?: number;
   pointCount: 0;
   distance: 0;
   duration: 0;
@@ -191,6 +194,8 @@ export interface EmptySessionStatsPayload {
 
 export interface FullSessionStatsPayload {
   sessionId: string;
+  // v2.41.0 (N-8): штамп конвейера статов в кэше (см. cache-versions.ts)
+  cacheV?: number;
   pointCount: number;
   // FIX-C1: distance — активная дистанция поездки (KPI); rawDistanceM — вся запись
   // (диагностика: сколько «накрутил» дрейф в хвостах)
@@ -265,7 +270,8 @@ export function computeSessionStats(
   if (points.length === 0) {
     return {
       kind: "empty",
-      payload: { sessionId: id, pointCount: 0, distance: 0, duration: 0, avgSpeed: null, maxSpeed: null },
+      // v2.41.0 (N-8): + cacheV — свежесть поля проверяется по штампу payload
+      payload: { sessionId: id, cacheV: CACHE_PIPELINE_VERSIONS.stats, pointCount: 0, distance: 0, duration: 0, avgSpeed: null, maxSpeed: null },
     };
   }
 
@@ -392,6 +398,9 @@ export function computeSessionStats(
     kind: "full",
     payload: {
       sessionId: id,
+      // v2.41.0 (N-8): штамп конвейера статов — переживёт «лжесвежесть» строки
+      // (cacheVersion пишется и чужими батч-роутами); см. cache-versions.ts
+      cacheV: CACHE_PIPELINE_VERSIONS.stats,
       pointCount: points.length,
       distance: Math.round(distance),
       rawDistanceM: Math.round(rawDistance),

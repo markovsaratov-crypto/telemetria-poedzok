@@ -41,8 +41,7 @@ import { computeSessionStats, loadPlanFacts, composeRoute, type SessionStatsMeta
 import { BatchSessionData, batchCacheKey, loadSessionsForBatch, parseBatchIds } from "@/lib/batch-points";
 import {
   loadSessionMetasWithCache,
-  isSessionCacheFresh,
-  parseCachedJson,
+  getCachedPayload,
   persistSessionCaches,
   type SessionCacheMeta,
 } from "@/lib/session-cache";
@@ -89,7 +88,9 @@ export async function GET(request: NextRequest) {
     const live = ids.map((id) => metas.get(id)).filter((e): e is SessionCacheMeta => !!e && !e.deleted);
 
     // ——— протухшие/некэшированные: live-конвейер по их точкам ———
-    const staleIds = live.filter((e) => !isSessionCacheFresh(e) || parseCachedJson<SessionStatsResult>(e.statsCache) == null).map((e) => e.id);
+    // v2.41.0 (P0-A, N-8): честность ПО ПОЛЯМ — payload.cacheV конвейера статов
+    // (строчный cacheVersion пишется и ЧУЖИМИ батч-роутами — «лжесвежесть» исключена)
+    const staleIds = live.filter((e) => getCachedPayload<SessionStatsResult>(e, "stats") == null).map((e) => e.id);
     const staleData = staleIds.length > 0
       ? await loadSessionsForBatch(staleIds, scope)
       : new Map<string, BatchSessionData>();
@@ -109,8 +110,9 @@ export async function GET(request: NextRequest) {
     const cacheWrites: Array<{ id: string; cachePointCount: number; statsJson?: string }> = [];
 
     const stats: Array<Record<string, unknown>> = live.map((entry) => {
-      // v2.27.0: свежий кэш → готовый SessionStatsResult из JSON (без конвейера)
-      const fresh = isSessionCacheFresh(entry) ? parseCachedJson<SessionStatsResult>(entry.statsCache) : null;
+      // v2.27.0: свежий кэш → готовый SessionStatsResult из JSON (без конвейера);
+      // v2.41.0 (P0-A): свежесть — по штампу конвейера в самом payload
+      const fresh = getCachedPayload<SessionStatsResult>(entry, "stats");
       if (fresh) {
         if (fresh.kind === "empty") {
           return fresh.payload as unknown as Record<string, unknown>;

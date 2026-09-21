@@ -46,6 +46,8 @@ import { computeSessionStats, type SessionStatsResult } from "./session-stats";
 import { computeSessionEvents, type SessionEventsPayload } from "./session-events";
 import { computeSessionTrack } from "./session-track";
 import { getCorpusEcoBaselines } from "./eco-corpus";
+// v2.41.0 (N-8): версии конвейеров ПО ПОЛЯМ — лист-модуль, циклов нет
+import { CACHE_PIPELINE_VERSIONS, payloadCacheV, type SessionCacheField } from "./cache-versions";
 
 /**
  * Версия схемы кэша. Любое изменение формы payloads/session-stats.ts /
@@ -177,6 +179,78 @@ export function isCacheFieldUsable(raw: string | null): boolean {
   return raw != null && raw !== "" && raw !== SESSION_CACHE_OVERSIZED;
 }
 
+// ——— v2.41.0 (N-8 «лжесвежесть частичным write-through»): свежесть ПО ПОЛЯМ ———
+// Строчный cacheVersion пишется любым батч-роутом при пересчёте СВОЕГО поля —
+// поле от СТАРОГО конвейера наследует строку как «свежую» (прод-кейс: trackCache
+// от v2.40.6 «отстиран» строкой v10 от stats/batch v2.40.7, 2 точки Казахстана
+// месяц жили на карте). Честный критерий поля: строка свежа И payload.cacheV
+// совпал с текущей версией ЕГО конвейера (штамп в cache-versions.ts).
+// Единая точка для всех батч-роутов/прогрева — ручной танец
+// «isSessionCacheFresh(meta) ? parseCachedJson(...) : null» больше не нужен.
+export function getCachedPayload<T>(meta: SessionCacheMeta, field: SessionCacheField): T | null {
+  if (!isSessionCacheFresh(meta)) return null; // схема строки + состав точек
+  const raw =
+    field === "stats" ? meta.statsCache : field === "events" ? meta.eventsCache : meta.trackCache;
+  if (!isCacheFieldUsable(raw)) return null;
+  const parsed = parseCachedJson<T>(raw);
+  if (parsed == null) return null;
+  if (payloadCacheV(parsed) !== CACHE_PIPELINE_VERSIONS[field]) {
+    logger.info("session cache field pipeline-version mismatch → recompute (N-8)", {
+      sessionId: meta.id,
+      field,
+      payloadV: payloadCacheV(parsed),
+      expected: CACHE_PIPELINE_VERSIONS[field],
+    });
+    return null;
+  }
+  return parsed;
+}
+
+// ——— v2.41.0 (P0-B): инвентарь протухших payload'ов для бюджетного бэкфилла ———
+// SQL не может разобрать JSON-колонки — детектор чистый (юнит-тестируется),
+// SELECT тянет меты + сами кэш-поля: ~одна строка rows_read НА сессию (JSON
+// не размножает rows_read — чтение 104 строк с мегабайтными колонками стоит
+// ~104 чтений, инцидент N-6 НЕ повторяется).
+export interface StalePayloadRow {
+  pointCount: number | null;
+  cachePointCount: number | null;
+  cacheVersion: number | null;
+  statsCache: string | null;
+  eventsCache: string | null;
+  trackCache: string | null;
+}
+
+/**
+ * Какие ПОЛЯ кэша строки протухли? Чистая функция: строка (схема/состав)
+ * ИЛИ поле отсутствует/маркер ИЛИ payload.cacheV ≠ версии конвейера поля.
+ * Вернувшийся массив полей — что именно пересчитывать бэкфиллу.
+ */
+export function detectStaleCacheFields(row: StalePayloadRow): SessionCacheField[] {
+  const stale: SessionCacheField[] = [];
+  const base =
+    row.cacheVersion !== SESSION_CACHE_VERSION ||
+    row.cachePointCount == null ||
+    row.pointCount == null ||
+    row.cachePointCount !== row.pointCount;
+  for (const field of ["stats", "events", "track"] as const) {
+    const raw = field === "stats" ? row.statsCache : field === "events" ? row.eventsCache : row.trackCache;
+    if (base || !isCacheFieldUsable(raw)) {
+      stale.push(field);
+      continue;
+    }
+    let parsed: unknown = null;
+    try {
+      parsed = raw === SESSION_CACHE_OVERSIZED ? null : JSON.parse(raw as string);
+    } catch {
+      parsed = null;
+    }
+    if (parsed == null || payloadCacheV(parsed) !== CACHE_PIPELINE_VERSIONS[field]) {
+      stale.push(field);
+    }
+  }
+  return stale;
+}
+
 /** Безопасный разбор JSON-кэша: битая строка = «нет кэша» (пересчёт).
  * v2.38.2 (F51): маркер oversized — явная ветка (самодокументирование
  * контракта, не полагаемся на исключение JSON.parse). */
@@ -263,6 +337,35 @@ export async function persistSessionCaches(
           // остаётся «протухшей», т.е. честно нестабильной для такой сессии.
           if (values.every((v) => v == null || v === SESSION_CACHE_OVERSIZED)) {
             return Promise.resolve();
+          }
+          // v2.41.0 (P0-B, дебаг бэкфилла 21.06): ТЯЖЁЛАЯ строка — раздельные
+          // UPDATE по полям. Гейт шлюза режет ТЕЛО запроса на 2 МБ: комбинированный
+          // UPDATE (track 1,19 МБ + events 0,66 МБ + stats) 920ff881/08c29265
+          // получал 413 «payload too large» — ВСЯ запись кэша молча пропадала
+          // (warn non-fatal), сессия оставалась вечно «протухшей» и грелась
+          // повторно каждым проходом. Порог 1,6 МБ — запас до гейта 2 МБ с учётом
+          // JSON-экранирования; каждое поле ≤ гварда 1,5 МБ, значит отдельный
+          // UPDATE проходит всегда. cacheVersion/cachePointCount пишутся с каждым
+          // (идемпотентно — одни и те же значения).
+          const combinedBytes = values.reduce((a, v) => a + (v?.length ?? 0), 0);
+          if (combinedBytes > 1_600_000) {
+            const fieldNames: Array<"statsCache" | "eventsCache" | "trackCache"> = [];
+            if (fields.includes("stats")) fieldNames.push("statsCache");
+            if (fields.includes("events")) fieldNames.push("eventsCache");
+            if (fields.includes("track")) fieldNames.push("trackCache");
+            logger.info("session cache persist split per-field (heavy row)", {
+              sessionId: row.id, combinedBytes,
+            });
+            return Promise.all(
+              fieldNames.map((fname, i) => {
+                const v = values[i];
+                if (v == null || v === SESSION_CACHE_OVERSIZED) return Promise.resolve();
+                return libsql.execute({
+                  sql: `UPDATE Session SET cachePointCount = ?, cacheVersion = ?, ${fname} = ? WHERE id = ?`,
+                  args: [row.cachePointCount, SESSION_CACHE_VERSION, v, row.id] as never[],
+                });
+              })
+            );
           }
           args.push(...values);
           args.push(row.id);
@@ -475,4 +578,38 @@ export async function findStaleSessionCacheIds(limit: number): Promise<string[]>
     args: [SESSION_CACHE_VERSION, Math.max(1, Math.min(limit, 200))] as never[],
   });
   return (res.rows as Record<string, unknown>[]).map((r) => String(r.id));
+}
+
+// ——— v2.41.0 (P0-B): полный инвентарь протухших (включая N-8) ———
+// В отличие от findStaleSessionCacheIds (строчный критерий, N-6), здесь
+// читаются САМИ payload-строки и проверяется cacheV каждого поля: находит и
+// «лжесвежие» поля старого конвейера. Вызов — ОДИН SELECT по таблице Session
+// (строки с JSON-колонками; rows_read ≈ числу строк), порядок — свежие первыми.
+export interface StalePayloadInventory {
+  ids: string[];
+  scanned: number;
+}
+
+export async function findSessionsWithStalePayloads(limit: number): Promise<StalePayloadInventory> {
+  const res = await libsql.execute({
+    sql: `SELECT id, pointCount, cachePointCount, cacheVersion, statsCache, eventsCache, trackCache
+          FROM Session
+          WHERE deletedAt IS NULL AND status != 'recording'
+          ORDER BY startTime DESC
+          LIMIT ?`,
+    args: [Math.max(1, Math.min(limit, 500))] as never[],
+  });
+  const ids: string[] = [];
+  for (const row of res.rows as Record<string, unknown>[]) {
+    const fields = detectStaleCacheFields({
+      pointCount: row.pointCount == null ? null : Number(row.pointCount),
+      cachePointCount: row.cachePointCount == null ? null : Number(row.cachePointCount),
+      cacheVersion: row.cacheVersion == null ? null : Number(row.cacheVersion),
+      statsCache: row.statsCache == null ? null : String(row.statsCache),
+      eventsCache: row.eventsCache == null ? null : String(row.eventsCache),
+      trackCache: row.trackCache == null ? null : String(row.trackCache),
+    });
+    if (fields.length > 0) ids.push(String(row.id));
+  }
+  return { ids, scanned: (res.rows as unknown[]).length };
 }

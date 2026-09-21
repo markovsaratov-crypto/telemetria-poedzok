@@ -7,10 +7,13 @@
 
 import { normalizeSessionSpeeds, HARSH_THRESHOLD_MS2 } from "./kpi"; // v2.16.0: единый порог §7.1/§7.2
 import { isTeleportInterval } from "./geo"; // v2.40.7 (N-3): острова телепортов не попадают на карту
+import { CACHE_PIPELINE_VERSIONS } from "./cache-versions"; // v2.41.0 (N-8): штамп конвейера в payload
 
 // Пороги скоростных бакетов для цветовых сегментов (§7 методологии) —
-// presentation-схема карты (цвет+подпись), отличная от KPI-бакетов kpi.ts
-const SPEED_BUCKETS = [
+// presentation-схема карты (цвет+подпись), отличная от KPI-бакетов kpi.ts.
+// v2.41.0 (P0-C): экспорт — рендер-прореживание (track-render.ts) собирает
+// сегменты заново по той же таблице, уже ПОСЛЕ равномерного сэмпла.
+export const SPEED_BUCKETS = [
   { max: 20, color: "#9ca3af", label: "0–20" },
   { max: 40, color: "#f59e0b", label: "20–40" },
   { max: 60, color: "#10b981", label: "40–60" },
@@ -42,7 +45,8 @@ type TrackPayload = Record<string, unknown>;
 export function computeSessionTrack(session: TrackSessionMeta, rawPoints: TrackInputPoint[]): TrackPayload {
   if (rawPoints.length === 0) {
     // форма раннего return одиночного роута — ДОСЛОВНО
-    return { sessionId: session.id, points: [], segments: [], harshPoints: [], bounds: null };
+    // v2.41.0 (N-8): + cacheV — свежесть поля проверяется по штампу payload
+    return { sessionId: session.id, cacheV: CACHE_PIPELINE_VERSIONS.track, points: [], segments: [], harshPoints: [], bounds: null };
   }
 
   const startMs = Number(rawPoints[0].timestamp);
@@ -189,6 +193,9 @@ export function computeSessionTrack(session: TrackSessionMeta, rawPoints: TrackI
 
   return {
     sessionId: session.id,
+    // v2.41.0 (N-8): штамп конвейера трека — переживёт «лжесвежесть» строки
+    // (cacheVersion пишется и чужими батч-роутами); см. cache-versions.ts
+    cacheV: CACHE_PIPELINE_VERSIONS.track,
     deviceId: session.deviceId,
     startTime: session.startTime,
     endTime: session.endTime,

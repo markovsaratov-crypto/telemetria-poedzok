@@ -9,6 +9,7 @@
 import { normalizeSessionSpeeds, medianSmooth3, isUsableSpeedPoint, HARSH_THRESHOLD_MS2 } from "./kpi";
 import { haversineM } from "./geo"; // v2.16.0 (D-9): канонический гаверсинус
 import { computeMovingTime, computeActiveTrip, inActiveLegs } from "./active-trip"; // v2.25.0 (П.4): события только внутри legs
+import { CACHE_PIPELINE_VERSIONS } from "./cache-versions"; // v2.41.0 (N-8): штамп конвейера в payload
 
 // v2.13.0 (Ф3): порог приведён к методологии §7.1/§7.2 — 10 км/ч за секунду
 // = 2,78 м/с². Раньше было 10 м/с² (≈1g — экстренное торможение): счётчик блока
@@ -44,6 +45,9 @@ export interface EventsInputPoint {
 
 export interface SessionEventsPayload {
   sessionId: string;
+  // v2.41.0 (N-8): штамп конвейера событий в кэше (см. cache-versions.ts);
+  // опционален только для старых разобранных JSON — новые payload несут всегда
+  cacheV?: number;
   // deviceId/hscEvents/hscCount отсутствуют в пустой форме (<5 точек) —
   // дословный паритет с прежним ранним return одиночного роута
   deviceId?: string;
@@ -65,8 +69,10 @@ export function computeSessionEvents(sessionId: string, deviceId: string, rawPoi
   if (rawPoints.length < 5) {
     // форма раннего return одиночного роута — ДОСЛОВНО (без deviceId/hscEvents,
     // чтобы ответ совпадал с прежним побайтово; потребители читают через ?? [])
+    // v2.41.0 (N-8): + cacheV — свежесть поля проверяется по штампу payload
     return {
       sessionId,
+      cacheV: CACHE_PIPELINE_VERSIONS.events,
       maneuvers: [],
       harshEvents: [],
       gg: { points: [], rings: [0.2, 0.4, 0.6] },
@@ -193,6 +199,8 @@ export function computeSessionEvents(sessionId: string, deviceId: string, rawPoi
 
   return {
     sessionId,
+    // v2.41.0 (N-8): штамп конвейера событий — переживёт «лжесвежесть» строки
+    cacheV: CACHE_PIPELINE_VERSIONS.events,
     deviceId,
     // Все манёвры для G-G точек
     maneuvers,

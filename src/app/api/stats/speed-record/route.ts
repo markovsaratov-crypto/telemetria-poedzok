@@ -39,6 +39,8 @@ import {
   parseCachedJson,
   type SessionCacheMeta,
 } from "@/lib/session-cache";
+// v2.41.0 (P0-A, N-8): проверка штампа конвейера статов в payload
+import { payloadCacheV, CACHE_PIPELINE_VERSIONS } from "@/lib/cache-versions";
 import type { SessionStatsResult } from "@/lib/session-stats";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -134,7 +136,13 @@ export async function GET(request: NextRequest) {
       for (const row of cacheRes.rows as Record<string, unknown>[]) {
         const meta = freshMetaById.get(String(row.id));
         if (!meta) continue;
-        const result = parseCachedJson<SessionStatsResult>(row.statsCache == null ? null : String(row.statsCache));
+        let result = parseCachedJson<SessionStatsResult>(row.statsCache == null ? null : String(row.statsCache));
+        // v2.41.0 (P0-A, N-8): payload СТАРОГО конвейера — не «свежий», сессия
+        // не участвует по кэш-ветке до пересчёта (write-through stats/batch /
+        // backfill-caches); maxSpeed честнее пропустить, чем взять из до-N-3
+        if (result != null && payloadCacheV(result) !== CACHE_PIPELINE_VERSIONS.stats) {
+          result = null;
+        }
         const payloadMax = result && result.kind === "full" ? result.payload.maxSpeed : null;
         if (payloadMax != null && (result?.payload.pointCount ?? 0) >= 5) {
           consider(payloadMax, meta.id, meta.startTime);

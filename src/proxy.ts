@@ -59,7 +59,9 @@ function rateLimitForPath(pathname: string, method: string): { limit: number; wi
     // (дамп + релиз + аплоад 6 МБ) — второй раньше попадал в 60/мин default.
     // v2.26.0 (ТЗ §13): POST /api/admin/backfill-trips — backfill поездок
     // (полный recompute истории + постановка план-джобов) — тот же класс.
-    ((pathname === "/api/admin/backup" || pathname.startsWith("/api/admin/backup/") || pathname === "/api/admin/restore" || pathname === "/api/admin/backfill-trips") &&
+    // v2.41.0 (P0-B): POST /api/admin/backfill-caches — офлайн-пересчёт
+    // протухших кэш-payload'ов (N-8) ДО первого зрителя — тот же класс.
+    ((pathname === "/api/admin/backup" || pathname.startsWith("/api/admin/backup/") || pathname === "/api/admin/restore" || pathname === "/api/admin/backfill-trips" || pathname === "/api/admin/backfill-caches") &&
       method !== "GET")
   ) {
     return { limit: e.RATE_LIMIT_MAX_ADMIN, windowSec: 3600, scope: "admin:heavy" };

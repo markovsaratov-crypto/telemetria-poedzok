@@ -34,6 +34,7 @@ import {
   useRouteTrend,
   useSessions,
   useReverseGeocode,
+  useHealth,
   type SessionStats,
   type RouteGroupInfo,
   type HeavySegmentGroup,
@@ -2655,6 +2656,14 @@ const REL_RATING_RU: Record<string, string> = {
 };
 function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats | null | undefined; aggregated?: boolean }) {
   void aggregated; // качество данных в период-режиме — средние по поездкам
+  // v2.41.0 (P1, m-21): дневной бюджет D1 — из АВТОРИТЕТНОГО метра шлюза
+  // (/health → d1Quota.rowsReadToday, KV-ключ quota:day: шлюза). Счётчик
+  // ПРИЛОЖЕНИЯ d1_rows_read_total умирает с ресайклами Render и не видит
+  // чтений других изолейтов (4,49 млн vs 510 тыс. — m-21) — больше НЕ показываем.
+  // useHealth уже опрашивается лейаутом каждые 30 с — тот же запрос, ноль лишних.
+  const health = useHealth();
+  const d1 = health.data?.d1Quota;
+  const d1Pct = d1?.readPct ?? null;
   // v2.10.1: Все значения из live API; fallback только при отсутствии stats (загрузка).
   const completeness = stats?.methodology?.completenessScore ?? null;
   const reliability = stats?.methodology?.sessionReliability;
@@ -2765,6 +2774,14 @@ function DataQualityBlock({ stats, aggregated = false }: { stats: SessionStats |
               value={`${fmtNumber(activeIdleTime / 60)} мин`}
               tip="Остановки в поездке | Светофоры, ожидание, парковка — без пауз до старта и после финиша | Меньше — лучше"
               label="Активные стоянки"
+            />
+          ) : null}
+          {d1?.meter === "gateway-kv" && d1.rowsReadToday != null ? (
+            <Stat
+              value={d1Pct != null ? `${fmtNum(d1Pct, 1)}%` : "—"}
+              cls={d1Pct == null ? "c-faint" : d1Pct < 50 ? "c-plum" : d1Pct <= 80 ? "c-amber" : "c-red"}
+              tip={`Дневной бюджет D1 | ${fmtNumber(d1.rowsReadToday)} из ${fmtNumber(d1.readLimit ?? 5_000_000)} строк чтения за UTC-сутки по метру шлюза (учитывает ВСЕ изоляты: приложение, cron, бэкапы) | Сброс 00:00 UTC`}
+              label="Бюджет D1 (день)"
             />
           ) : null}
         </div>

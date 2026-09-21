@@ -434,6 +434,7 @@ export interface BackupItem {
 export interface HealthResponse {
   status: "ok" | "degraded";
   db: "ok" | "degraded";
+  dbError?: string;
   worker: "ok" | "degraded";
   circuits?: Record<string, { state: string; failures: number }>;
   rateLimiter?: { buckets: number; backend?: string };
@@ -441,6 +442,18 @@ export interface HealthResponse {
   uptime: number;
   targetLoadRpm?: number;
   rateLimitMaxIngest?: number;
+  // v2.41.0 (P1, m-21): авторитетный дневной бюджет D1 из метра шлюза
+  d1Quota?: {
+    readExhaustedAt?: string | null;
+    writeExhaustedAt?: string | null;
+    rowsReadToday?: number;
+    rowsWrittenToday?: number;
+    readLimit?: number;
+    readPct?: number;
+    meter?: "gateway-kv" | null;
+    meterDay?: string;
+    meterExhaustedAt?: string | null;
+  };
 }
 
 export interface ExportSyncResponse {
@@ -493,9 +506,11 @@ export interface TrackPoint {
   lat: number;
   lng: number;
   v: number | null; // м/с
-  alt: number | null;
-  brg: number | null;
-  acc: number | null;
+  // v2.41.0 (P0-C): рендер-режим батча отдаёт компактные точки без этих полей
+  // (клиент их не читает — высотный профиль из speedProfile статов)
+  alt?: number | null;
+  brg?: number | null;
+  acc?: number | null;
   st: 0 | 1; // 0=idle, 1=moving
 }
 

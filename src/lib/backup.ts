@@ -90,7 +90,20 @@ async function dumpChildRows(table: string, sessionIds: string[], includeNullSes
   return out;
 }
 
-export async function runBackup(actorId?: string): Promise<{ backupId: string; filePath: string; checksum: string; fileSize: number; tableCounts: Record<string, number> }> {
+export interface BackupResult {
+  backupId: string;
+  filePath: string;
+  checksum: string;
+  fileSize: number;
+  tableCounts: Record<string, number>;
+  /** v2.42.2 (§B6/вариант A): in-memory копия дампа — на Cloudflare Workers
+   *  записи на диск нет (node:fs mkdir/writeFile бросает ENOSYS-подобное);
+   *  durable-уровень (GitHub) забирает контент отсюда, минуя файл. На Node
+   *  значение тоже присутствуем — лишней перечитки файла не требуется. */
+  content: string;
+}
+
+export async function runBackup(actorId?: string): Promise<BackupResult> {
   // Создаём BackupJob
   const job = await db.backupJob.create({
     data: { status: "running", type: "full", lockedBy: env().WORKER_ID },
@@ -257,18 +270,40 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
     const checksum = createHash("sha256").update(content).digest("hex");
     const fileSize = Buffer.byteLength(content);
 
-    // Сохраняем в файл (статический путь — Turbopack-friendly, см. коммент в начале файла)
-    await fs.mkdir(BACKUP_STORAGE_DIR, { recursive: true });
+    // v2.42.2 (§B6/вариант A — переезд poedzok.fun на telemat-web воркер):
+    // сохранение в файл — ТОЛЕРАНТНО к отсутствию файловой системы. На Node
+    // (Render/локально) — прежнее поведение: дамп в /tmp/backups. На Cloudflare
+    // Workers fs.mkdir/writeFile бросает — дамп остаётся в памяти (content),
+    // filePath получает memory://-маркер: локальный источник restore честно
+    // скажет «файла нет», durable-уровень (GitHub) работает как прежде.
+    // Статический путь — Turbopack-friendly (см. коммент в начале файла).
     const fileName = `backup-${Date.now()}-${job.id}.json`;
-    const filePath = path.join(BACKUP_STORAGE_DIR, fileName);
-    await fs.writeFile(filePath, content, "utf8");
+    let filePath = `memory://backups/${fileName}`;
+    let filePersisted = false;
+    try {
+      await fs.mkdir(BACKUP_STORAGE_DIR, { recursive: true });
+      filePath = path.join(BACKUP_STORAGE_DIR, fileName);
+      await fs.writeFile(filePath, content, "utf8");
+      filePersisted = true;
+    } catch (fsErr) {
+      logger.warn("backup: файловая запись недоступна (edge-рантайм) — дамп остаётся в памяти, durable-копия = GitHub", {
+        jobId: String(job.id),
+        error: fsErr instanceof Error ? fsErr.message : String(fsErr),
+      });
+    }
 
-    // Верификация: перечитываем и сравниваем checksum
+    // Верификация: на Node перечитываем файл и сверяем checksum (ловит порчу
+    // диска); в памяти — контент уже есть, сверка тривиальна (порча носителя
+    // невозможна, строка та же самая).
     let verified = false;
     if (env().BACKUP_VERIFICATION_ENABLED === "true") {
-      const reread = await fs.readFile(filePath, "utf8");
-      const recheck = createHash("sha256").update(reread).digest("hex");
-      verified = recheck === checksum;
+      if (filePersisted) {
+        const reread = await fs.readFile(filePath, "utf8");
+        const recheck = createHash("sha256").update(reread).digest("hex");
+        verified = recheck === checksum;
+      } else {
+        verified = createHash("sha256").update(content).digest("hex") === checksum;
+      }
       if (!verified) {
         throw new Error("Backup verification failed: checksum mismatch");
       }
@@ -294,7 +329,7 @@ export async function runBackup(actorId?: string): Promise<{ backupId: string; f
       metadata: { filePath, fileSize, checksum, verified, tableCounts },
     });
 
-    return { backupId: String(job.id), filePath, checksum, fileSize, tableCounts };
+    return { backupId: String(job.id), filePath, checksum, fileSize, tableCounts, content };
   } catch (err) {
     // v2.18.0: изоляция записи статуса — если упала сама БД (частая причина
     // сбоя бэкапа), этот UPDATE падал вторым и ЗАМЕНЯЛ исходную ошибку в стеке,

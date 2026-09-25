@@ -38,6 +38,10 @@ export interface LocalBackupHandle {
   checksum: string;
   fileSize: number;
   tableCounts: Record<string, number>;
+  /** v2.42.2 (§B6): дамп в памяти — когда файловой системы нет (Cloudflare
+   *  Workers) либо хэндл пришёл из runBackup с уже собранным контентом.
+   *  При отсутствии — прежний путь fs.readFile(filePath) (Node). */
+  content?: string;
 }
 
 // ——— v2.38.1 (ревью F13): шифрование durable-копий AES-256-GCM ———
@@ -110,11 +114,21 @@ export async function backupToGitHub(actorId?: string, existing?: LocalBackupHan
   if (!cfg) throw new Error("GITHUB_TOKEN not configured");
 
   const { runBackup } = await import("./backup");
-  const { promises: fs } = await import("fs");
+  // v2.42.2 (§B6): fs импортируется лениво ТОЛЬКО на Node-пути (ниже) —
+  // на Cloudflare Workers модуль fs недоступен для записи, обращение к нему
+  // не происходит вовсе.
   // v2.32.0: existing — уже сделанный локальный дамп (ежедневный backup-крон
   // делает дамп и аплоадит ЕГО, без второго полного дампа).
   const local = existing ?? (await runBackup(actorId));
-  const content = await fs.readFile(local.filePath);
+  // v2.42.2 (§B6): edge-рантайм без файловой системы — контент дампа уже в
+  // памяти (runBackup возвращает content). fs.readFile остаётся путём Node.
+  let content: Buffer;
+  if (typeof local.content === "string") {
+    content = Buffer.from(local.content, "utf8");
+  } else {
+    const { promises: fs } = await import("fs");
+    content = await fs.readFile(local.filePath);
+  }
 
   // v2.38.1 (ревью F13) FAIL-CLOSED: дамп содержит PII (треки, deviceId, email)
   // и настройки — plaintext больше НЕ выгружается в GitHub Releases даже

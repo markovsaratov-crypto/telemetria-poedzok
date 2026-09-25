@@ -37,6 +37,9 @@ export async function POST(request: NextRequest) {
           checksum: result.checksum,
           fileSize: result.fileSize,
           tableCounts: result.tableCounts,
+          // v2.42.2 (§B6): контент в памяти — на edge-рантайме без fs durable
+          // аплоад идёт напрямую из него (повторный дамп не нужен и на Node).
+          content: result.content,
         });
         github = { ok: true, releaseUrl: gh.releaseUrl, tagName: gh.releaseUrl.split("/").pop() ?? "", drill: gh.drill };
       } catch (err) {

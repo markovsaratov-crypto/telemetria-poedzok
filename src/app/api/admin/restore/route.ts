@@ -63,6 +63,11 @@ async function loadLocalSource(backupId: string): Promise<RestoreSourceMeta | { 
   if (!filePath) {
     return { error: json({ error: "Backup has no filePath (not yet completed)" }, 400) };
   }
+  // v2.42.2 (§B6): memory://-маркер — дамп существовал только в памяти инвокации
+  // (edge-рантайм без fs). Восстановление — из durable-копии: {source:"github"}.
+  if (filePath.startsWith("memory://")) {
+    return { error: json({ error: "Backup exists only in memory (edge runtime, no filesystem) — restore it from GitHub durable copy: {source:'github'}", backupId }, 400) };
+  }
   if (job.status !== "completed") {
     return { error: json({ error: `Backup status is '${job.status}', must be 'completed'` }, 400) };
   }
@@ -120,12 +125,26 @@ async function loadGitHubSource(tagName: string | undefined): Promise<RestoreSou
       return { error: json({ error: "Checksum mismatch — GitHub asset is corrupt", tagName: src.tagName, expected: src.checksum, actual }, 422) };
     }
   }
-  // Файл в /tmp + BackupJob-строка: провенанс этого restore виден в UI/API
-  await fs.mkdir(BACKUP_STORAGE_DIR, { recursive: true });
-  const safeTag = src.tagName.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const fileName = `restore-gh-${safeTag}-${Date.now()}.json`;
-  const filePath = path.join(BACKUP_STORAGE_DIR, fileName);
-  await fs.writeFile(filePath, content, "utf8");
+  // Файл в /tmp + BackupJob-строка: провенанс этого restore виден в UI/API.
+  // v2.42.2 (§B6): на edge-рантайме (Cloudflare Workers) файловой записи нет —
+  // контент уже в памяти, локальная копия ПРОПУСКАЕТСЯ (memory://-маркер),
+  // BackupJob-провенанс сохраняется. Restore-конвейер ниже работает с content
+  // независимо от наличия файла.
+  let filePath: string;
+  try {
+    await fs.mkdir(BACKUP_STORAGE_DIR, { recursive: true });
+    const safeTag = src.tagName.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const fileName = `restore-gh-${safeTag}-${Date.now()}.json`;
+    filePath = path.join(BACKUP_STORAGE_DIR, fileName);
+    await fs.writeFile(filePath, content, "utf8");
+  } catch (fsErr) {
+    const safeTag = src.tagName.replace(/[^a-zA-Z0-9._-]/g, "_");
+    filePath = `memory://backups/restore-gh-${safeTag}-${Date.now()}.json`;
+    logger.warn("Restore: локальная копия дампа не сохранена (edge-рантайм без fs) — restore идёт из памяти", {
+      tagName: src.tagName,
+      error: fsErr instanceof Error ? fsErr.message : String(fsErr),
+    });
+  }
   const job = await db.backupJob.create({
     data: {
       status: "completed",

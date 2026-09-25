@@ -2,6 +2,7 @@
 // дамп через d1-gateway (HTTP) → AES-256-GCM → GitHub draft-релиз → read-back drill.
 // Почему не на воркере: free-план CF (CPU/память) не тянет 35МБ-дамп — 1102.
 // bun scripts/backup-remote.ts (секреты в окружении).
+export {}; // файл — ES-модуль (top-level await)
 const required = ["D1_GATEWAY_URL", "D1_GATEWAY_SECRET", "GITHUB_TOKEN", "GITHUB_BACKUP_ENCRYPTION_KEY"] as const;
 for (const k of required) {
   if (!process.env[k]) {
@@ -9,7 +10,7 @@ for (const k of required) {
     process.exit(1);
   }
 }
-process.env.NODE_ENV = "production";
+(process.env as { NODE_ENV?: string }).NODE_ENV = "production"; // readonly в типах Next — каст
 process.env.GITHUB_REPO = process.env.GITHUB_REPO || "markovsaratov-crypto/telemetria-poedzok";
 process.env.WORKER_ID = process.env.WORKER_ID || "backup-remote-01";
 process.env.BACKUP_STORAGE_DIR = "/tmp/backups";

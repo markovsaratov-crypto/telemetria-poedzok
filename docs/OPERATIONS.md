@@ -735,3 +735,46 @@ end-to-end работают. Код исправен — сбой исключи
 тихий 503 без алертов; cron-pinger песочницы из §CUSTOM_DOMAIN более не
 существует), календарная проверка биллинга Render, датчик «бэкапа нет >25 ч»
 (последний успешный asset — маркер здоровья origin, см. этот инцидент).
+
+## §12. 2026-09-25: эвакуация с Render — воркер v2.42.2, бэкапы в GitHub Actions
+
+**Продолжение §11.** Render resume невозможен: API отвечает «only services
+suspended by a user can be resumed», суспендер — `billing` (неоплаченные
+инвойсы платных cron-сервисов, удалённых до нас). Крон-сервисов в аккаунте
+уже нет, web-сервис free — единственный, приостановлен 23.09 12:39 UTC
+(последняя точка инжеста 06:46 UTC; окно потери поездок: 23.09 утро → далее,
+восстановимо ZIP-импортом).
+
+**Данные целы** (перепроверено 25.09): D1 «telemetria» — 215 сессий / 87 739
+точек / 35 поездок / 16 849 IngestMessage. «Пропажа» при логине через legacy
+`__owner__` — scope-иллюзия (данные принадлежат `admin@telemetria.local`).
+
+**Выполнено 25.09 (v2.42.2, деплой на telemat-web):**
+1. `834cba9` fs-толерантность бэкапа/restore на edge-рантайме (memory://-
+   маркеры, контент в BackupResult.content); tsc/eslint 0, 299/299.
+2. Ротация `GATEWAY_SECRET`/`D1_GATEWAY_SECRET` (d1-gateway + telemat-web +
+   Render env синхронизированы новым значением); прямое чтение D1 через
+   `/query` шлюза для диагностики.
+3. Фикс стоячей нестыковки снапшот-чека (она валила бэкапы 21–23.09 и
+   выжигала subrequest-лимит ретраями): Session `bbdcfa84…` (22.09)
+   pointCount 2670 → 2671. Σ pointCount = COUNT(GpsPoint) = 87 739 ✅.
+4. Обнаружен предел воркера: полный дамп (64 МБ) упирается в CPU/память
+   free-плана (`1102`) — POST /api/admin/backup НА ВОРКЕРЕ невозможен.
+5. Ночные бэкапы переехали в GitHub Actions: `.github/workflows/backup.yml`
+   (cron 03:30 UTC + dispatch) гонит `scripts/backup-remote.ts` — тот же
+   production-код (дамп через шлюз → TELMENC1 → draft-релиз → drill).
+   Секреты репо: `D1_GATEWAY_SECRET`, `BACKUP_ENCRYPTION_KEY` (значение =
+   прежний GITHUB_BACKUP_ENCRYPTION_KEY; имя без GITHUB_-префикса — запрет
+   GitHub) + 6 прикладных для env() FAIL-CLOSED. Верифицировано: run #1
+   success, релизы backup-2026-09-25-112023 (ручной) и -112513 (GHA),
+   оба 64.3 МБ, drill OK.
+
+**Не закрыто (владелец):** origin poedzok.fun / push.poedzok.fun в TurboFlare
+всё ещё → onrender (503). Смена origin на `https://telemat-web.markov-
+saratov.workers.dev` — в панели turboflare.ru (учётка не восстановима
+агентом: пароль REG.RU не подходит; регистрация на markov.saratov@mail.ru).
+После переключения оживают cron-каналы d1-gateway (tick/finalize/alerts/
+retention — статус в /admin/cron-status перестанет быть 503). Cron 03:30
+backup на воркере будет падать 1102 (бэкап живёт в GH Actions — это ожидаемо).
+Turso-мигратор: статус blocked (квота чтений Turso), дельта 17–18.09 уже
+восстановлена ZIP-импортом 20.09 — блокировка индифферентна.

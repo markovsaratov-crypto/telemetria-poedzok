@@ -689,3 +689,49 @@ GitHub GC. Тикет подаёт владелец (Support API нет) — т�
 (истина расхода, переживает ресайклы приложения); расход чтений должен расти
 как O(новых данных), всплеск после релиза = симптом N-6 (больше не должен
 воспроизводиться — инвалидация точечная).
+
+## §11. Инцидент 2026-09-25: прод-даунтайм — Render suspend-by-user
+
+**Симптом:** `https://poedzok.fun` → 503 «This service has been suspended by its
+owner» (заголовок `x-render-routing: suspend-by-user`), `push.poedzok.fun` —
+тоже 503 (оба хоста терминируются TurboFlare → origin).
+
+**Диагноз:** web-сервис `telemetria-poedzok` на Render приостановлен
+(suspend-by-user). Не при чём: домен (REG.RU, активен до 07.09.2027, NS
+trbcdn/TurboFlare), CDN (пропускает код origin честно), D1-шлюз
+`d1-gateway.markov-saratov.workers.dev` — ЖИВ (`/health` → `{"ok":true,
+"db":"bound","version":"2.40.9"}`, инжест-эндпоинты отвечают 401 без токена,
+как положено), GitHub-бэкапы целы.
+
+**Окно инцидента:** последний успешный GitHub-бэкап `backup-2026-09-20-040109`
+(04:01 UTC 20.09, ассет 34.5 МБ `.sql.enc`); бэкапа 21.09 нет → приостановка
+произошла между 20.09 04:01 и 21.09 03:30 UTC. Последний код на main — v2.42.1
+(CI green, 21.09 08:56 UTC); локальная верификация 25.09: install/test/tsc/
+lint/build/start — 299/299 тестов, 0 ошибок типов, `/health` ok, инжест и UI
+end-to-end работают. Код исправен — сбой исключительно инфраструктурный.
+
+**Идущая потеря данных:** телефон шлёт инжест на poedzok.fun/push.poedzok.fun →
+503 → поездки с ~21.09 не записываются. **Стоп-кран (не ждать resume):**
+перевести Sensor Logger на edge-инжест (§9.3): хост →
+`https://d1-gateway.markov-saratov.workers.dev`, путь и Bearer-токен НЕ
+меняются — точки начнут писаться в D1 немедленно, даже пока Render приостановлен.
+
+**Восстановление (владелец, ~2 минуты):**
+1. dashboard.render.com → сервис `telemetria-poedzok` → переключатель
+   Suspend → **Resume**. Если Resume «серый» — проверить Billing: просроченная
+   карта/неоплаченные инвойсы приводят к suspend всех сервисов аккаунта.
+2. После resume убедиться, что задеплоена свежая сборка: Manual Deploy →
+   Deploy latest commit (main = v2.42.1). TurboFlare/домен/DNS не трогать.
+3. Самовосстановление остального автоматически: cron'ы d1-gateway
+   (worker-tick */1, finalize+alerts */5, retention 03:00, backup 03:30,
+   github-backup ВС 04:00) стучат в APP_ORIGIN=poedzok.fun и оживут сами;
+   следующий ночной бэкап создаст новый draft-релиз.
+4. Проверка: из РФ без VPN `https://poedzok.fun/health` →
+   `{"status":"ok","version":"2.42.1"}`; дашборд «Записи» — точки пошли.
+   Пропущенные за даунтайм поездки — добраться ZIP-архивами Sensor Logger:
+   `POST /api/import/zip` (идемпотентен по csv-хэшу, M-1).
+
+**Профилактика:** внешний uptime-монитор `poedzok.fun/health` (Render suspend =
+тихий 503 без алертов; cron-pinger песочницы из §CUSTOM_DOMAIN более не
+существует), календарная проверка биллинга Render, датчик «бэкапа нет >25 ч»
+(последний успешный asset — маркер здоровья origin, см. этот инцидент).

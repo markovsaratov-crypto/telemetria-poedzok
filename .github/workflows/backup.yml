@@ -1,0 +1,65 @@
+# .github/workflows/backup.yml — v2.42.2: ночной бэкап БД в GitHub Releases.
+#
+# ПОЧЕМУ ЗДЕСЬ, А НЕ НА ВОРКЕРЕ: полный дамп (64+ МБ: JSON.stringify 87K строк,
+# sha256, AES-256-GCM, read-back drill) упирается в лимиты free-плана Cloudflare
+# Workers (CPU ~10 мс/инвокацию, память 128 МБ) — инцидент 1102 при попытке
+# POST /api/admin/backup на telemat-web. GitHub Actions (public runner, 2000
+# мин/мес free) выполняет тот же production-код scripts/backup-remote.ts без
+# этих лимитов. Заменяет cron 03:30 UTC (бывшие Render backup-cron и cron-
+# триггер d1-gateway, который теперь терминируется site-воркером).
+#
+# Секреты репозитория (Settings → Secrets → Actions):
+#   D1_GATEWAY_SECRET            — секрет шлюза d1-gateway (ротация: docs/SECURITY-ROTATION.md)
+#   BACKUP_ENCRYPTION_KEY        — 64 hex (AES-256-GCM, формат TELMENC1); имя без
+#                                  префикса GITHUB_ — GitHub запрещает такие секреты
+#   LOGIN_PASSWORD / SESSION_SECRET / API_KEY / INGEST_TOKEN / CRON_SECRET /
+#   ADMIN_TOKEN                  — приложение требует их в env() (PRODUCTION FAIL-CLOSED)
+#   GH_BACKUP_PAT (опционально)  — персональный токен; иначе встроенный GITHUB_TOKEN
+#
+# Восстановление не меняется: POST /api/admin/restore {source:"github"} —
+# сайт-воркер скачивает и расшифровывает ассет ключом из своих секретов.
+name: backup
+
+on:
+  schedule:
+    - cron: "30 3 * * *" # 03:30 UTC ежедневно (прежнее расписание)
+  workflow_dispatch: {} # ручной запуск
+
+permissions:
+  contents: write # draft-релизы с ассетами
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run backup (dump → encrypt → GitHub draft release → drill)
+        env:
+          D1_GATEWAY_URL: https://d1-gateway.markov-saratov.workers.dev
+          D1_GATEWAY_SECRET: ${{ secrets.D1_GATEWAY_SECRET }}
+          GITHUB_BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_BACKUP_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: markovsaratov-crypto/telemetria-poedzok
+          LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          API_KEY: ${{ secrets.API_KEY }}
+          INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          WORKER_ID: backup-gha-01
+        run: bun scripts/backup-remote.ts
+
+      # Дамп пишется в /tmp раннера — ничего не артифактим (durable-копия уже в релизе)

@@ -876,3 +876,35 @@ multipart metadata `keep_secrets=true` + ЯВНЫЕ не-секретные би
 - GHA: `POST /repos/…/actions/workflows/backup.yml/dispatches` → run
   success («=== БЭКАП ГОТОВ ===»), draft-релиз `backup-YYYY-MM-DD-*`,
   BackupJob completed (~68 МБ).
+
+### Деплой-журнал 2026-09-30
+
+- **17:07 UTC** — репо-секрет `D1_GATEWAY_SECRET` (GitHub Actions) обновлён
+  (libsodium-рецепт CR-B §4; значение = `GHA_GATEWAY_SECRET` шлюза).
+- **17:08 UTC** — деплой gateway v3 (PUT бандла через Workers API,
+  keep_secrets + явные биндинги): `/health` → `version: "2.43.0"`, db
+  bound, 13 биндингов, включая новый plain_text `GHA_GATEWAY_SECRET`.
+- **17:09 UTC** — расписания обновлены атомарным PUT: ровно 2 (`*/1` тик,
+  `0 3` retention); `*/5`, `30 3`, `0 4 SUN` сняты (%5-свёртка в тике).
+- **17:11 / 17:17 UTC** — два GHA workflow_dispatch-рана бэкапа — ОБА
+  failed: 401 unauthorized больше НЕТ (двойной секрет F0 работает),
+  падение — на консистент-чеке «Σ pointCount активных сессий (97100) !=
+  точек в дампе (97101)» (Δ=1; до-существующая болезнь purged-сессий —
+  точки purged/archived-сессий остаются в GpsPoint, а Σ pointCount
+  считается по активным; телефон был offline с 15:00 UTC → НЕ гонка
+  инжеста, ретраи бессмысленны). **Фикс (CR-E):** толерантность дрейфа
+  ≤ max(10, 0.1% числа точек) в `src/lib/backup.ts` — WARN «consistency
+  drift tolerated» и дамп продолжается; больше порога — fail-closed, как
+  раньше. Код исполняется в GHA из репо (workflow backup.yml НЕ менялся) —
+  деплой воркеров не требуется, telemat-web не тронут.
+- **17:24 UTC** — дневная квота чтений D1 free-tier ИСЧЕРПАНА (2
+  dispatch-рана × 3 попытки полного дампа дожгли квоту поверх дневного
+  трафика): `finalize-sessions` 429, FM-движки adopt/merge стоят с
+  17:20:37. Сброс в 00:00 UTC. До сброса НЕ форсить бэкапы/тяжёлые
+  SELECT (каждый полный дамп ≈ сотни тысяч строк чтения).
+- **Движки adopt/merge (до исчерпания квоты):** сироты pointCount≥3
+  8→5 (+5 новых Trip fmAdoptOrphans в 17:15/17:20; живых Trip 51→54);
+  пары кусков — 2 из 3 слиты (52a23bec+241e96ae, 418e1600+6c2ad0ac,
+  жёсткий DELETE b), 3-я (e9b7947c+27280f61) — корректный skip по
+  реальному сессионному гэпу ≥ 900 с. Новые 5 смежных пар из
+  adopted-поездок (гэпы 252–749 с) ждут merge-движка после сброса квоты.

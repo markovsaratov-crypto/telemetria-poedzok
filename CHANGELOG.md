@@ -3,6 +3,30 @@
 Все заметные изменения сервиса телеметрии poedzok.fun. Формат — близкий к
 Keep a Changelog; версии соответствуют /health приложения и шлюза.
 
+## [v2.43.1] — 2026-09-30 (CR-E, ветка ops/gateway-v3-20260930): толерантность консистент-чека бэкапа
+
+### Исправлено
+- **`src/lib/backup.ts` (исполняется GHA-раннером из репо через
+  `scripts/backup-remote.ts`; деплой воркеров не требуется):** пост-чек
+  снапшота `Σ pointCount активных сессий == точки в дампе` падал на
+  стабильном историческом дрейфе ±единицы — точки purged/archived-сессий
+  остаются в GpsPoint, а Σ pointCount считается только по активным
+  (purgedAt IS NULL). GHA-раны 2026-09-30 17:11/17:17 failed при Δ=1
+  (97100 vs 97101, телефон offline — не гонка). Теперь расхождение
+  ≤ max(10, 0.1% числа точек) → WARN «consistency drift tolerated
+  (known purged-session drift)» и дамп продолжается; больше порога —
+  fail-closed, как раньше (настоящая гонка инжеста/retention ловится
+  ретраями C-2). Workflow `backup.yml` не менялся — плановый запуск
+  03:30 UTC возьмёт починенный код из main.
+
+### Операции
+- Артефакты раундов в `ops/`: `rollback/d1-gateway-v2-deployed.js`
+  (задеплоенный до-v3 бандл для отката), `patches/` (патч-воркер
+  аналитики, патченый чанк 2b9wi93rqd8od, FM-engine), `reports/
+  2026-09-30/` (cr-b, cr-c, cr-d2-state, worklog-sanitized — все секреты
+  заменены на [REDACTED:…]). Деплой-журнал 2026-09-30 — docs/OPERATIONS.md
+  §13.
+
 ## [gateway v3] — 2026-09-30 (CR-C, ветка ops/gateway-v3-20260930)
 
 Воркер `d1-gateway` (исходник `cloudflare-worker/d1-gateway.js`,

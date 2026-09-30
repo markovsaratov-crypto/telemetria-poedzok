@@ -778,3 +778,101 @@ retention — статус в /admin/cron-status перестанет быть 5
 backup на воркере будет падать 1102 (бэкап живёт в GH Actions — это ожидаемо).
 Turso-мигратор: статус blocked (квота чтений Turso), дельта 17–18.09 уже
 восстановлена ZIP-импортом 20.09 — блокировка индифферентна.
+
+## §13. Gateway v3 (2026-09-30, CR-C): двойной секрет GHA, схлопывание кронов, adopt/merge-движки
+
+**Исходники:** ветка `ops/gateway-v3-20260930` (репо `markovsaratov-crypto/
+telemetria-poedzok`), `cloudflare-worker/d1-gateway.js` (v3, /health →
+`version: "2.43.0"`), `cloudflare-worker/wrangler.toml`. До этого FM-движок
+существовал только в прод-бандле (раунд frozen-metrics-fix); в v3 он внесён в
+исходник репо. Развёртывание — PUT бандла через Workers API (рунбук §8/§12:
+multipart metadata `keep_secrets=true` + ЯВНЫЕ не-секретные биндинги).
+
+### Что изменено
+
+1. **F0 Двойной секрет.** Гейты `POST /query` (+`/batch`, `/kvcache`,
+   `/kvstore`, `/admin/turso-migrate`) и `GET /admin/*` принимают ЛЮБОЙ из
+   `GATEWAY_SECRET` (secret_text, основной — приложение) ИЛИ
+   `GHA_GATEWAY_SECRET` (plain_text, канал GitHub Actions). Оба —
+   constant-time (SHA-256, `gatewaySecretOk()`). Причина: ротация
+   `GATEWAY_SECRET` 2026-09-29 16:54 UTC сломала GHA-бэкап (репо-секрет
+   `D1_GATEWAY_SECRET` не обновлялся с 09-25) → 25+ ч без durable-копий.
+   Теперь GHA-секрет независим от ротаций основного. Не задан/пуст → вторая
+   проверка пропускается.
+2. **F1 Схлопывание расписаний.** Триггеры воркера: `*/1 * * * *` (tick) и
+   `0 3 * * *` (retention) — PUT `/workers/scripts/d1-gateway/schedules`.
+   Джобы `finalize-sessions`/`alerts`/`turso-migrate` (бывший `*/5`)
+   запускаются ИЗ тика на минутах `getUTCMinutes() % 5 === 0` —
+   последовательно, каждый в своём try/catch. Убраны `30 3 * * *` (backup)
+   и `0 4 * * SUN` (backup-github): полный дамп на воркере невозможен
+   (CPU 1102, §12) — бэкап живёт ТОЛЬКО в GHA (cron 03:30 UTC). KV-ключи
+   `cron:last:backup*` и `CRON_APP_PATHS` сохранены для наблюдаемости.
+3. **FM-движок перенесён в исходник** (порт из прод-бандла, семантика 1:1):
+   `fmEngineTick` (StatsRollup сегодня/заморозка `fm:frozenThru`/refresh7d),
+   перехватчики `fmInterceptQuery` в `/query` (4 шаблона: heal-kill
+   1970-01-01, счётчики KPI из rollup), рекон stuck BackupJob (>2 ч →
+   failed), прогрев tsw (`statsComputedAt IS NULL` → `GET
+   /api/trips/batch?ids=` с Bearer User.apiKey).
+4. **F2 fmAdoptOrphans** — усыновление сессий-сирот (born-completed через
+   /ingest-порт, `tripId IS NULL`): раз в 5 мин ≤3 сессий с
+   `pointCount >= 3`; attach к пересекающейся по времени поездке того же
+   устройства (`session.startTime ≤ Trip.spanEnd` И `session.endTime ≥
+   Trip.spanStart`, обе стороны через `datetime()`) либо create новой
+   поездки (INSERT по образцу `recomputeTripsForDevice`); spanStart/spanEnd
+   только расширяются (min/max); метрики/`statsComputedAt` NULL → tsw
+   пересчитает; план-джоб — ensure-INSERT как у приложения. Мусорные
+   парковочные сердцебиения (1–2 точки) не трогаются. Лог:
+   `{"t":"fm:adopt","sessionId":…,"tripId":…,"mode":"attach"|"create"}`.
+5. **F3 fmMergeUndercut** — слияние «недосклеенных» кусков: пары живых Trip
+   одного устройства с гэпом `spanEnd(a) → spanStart(b)` < 900 с
+   (TRIP_SPLIT_SEC); ≤2 пары за прогон; ПЕРЕД слиянием проверка по сессиям
+   (MAX(endTime сессий a) vs MIN(startTime сессий b) — реальный гэп ≥ 900 с
+   → skip: span мог быть растянут back-extension поверх парковки). Keeper =
+   ранний: spanEnd/endTime = max, sessionIds = объединение, sessionCount =
+   сумма, метрики NULL; сессии b → `tripId = a`; план-джоб keeper'а
+   переочередью; b — жёсткий DELETE (как `recomputeTripsForDevice`;
+   сырые Session/GpsPoint не трогаются — поездка восстановима
+   `POST /api/admin/backfill-trips`). Лог: `{"t":"fm:merge","tripA":…,
+   "tripB":…,"gapMs":…}`.
+6. Прочее: пустые `catch {}` → `console.warn` с контекстом; заголовок-шапка
+   v3; `/health` version 2.43.0.
+
+### Как откатиться (rollback)
+
+1. **Код:** `PUT /accounts/b8e4…/workers/scripts/d1-gateway` с телом
+   `download/telemat-fm/patched-d1-gateway.js` (задеплоенный до-v3 бандл;
+   метод — тот же: multipart, metadata `keep_secrets=true` + явные
+   не-секретные биндинги; plain_text-биндинг GHA_GATEWAY_SECRET при откате
+   можно НЕ подставлять — код до-v3 его игнорирует).
+2. **Расписания:** `PUT /accounts/b8e4…/workers/scripts/d1-gateway/schedules`
+   с прежними пятью:
+   `["*/1 * * * *", "*/5 * * * *", "0 3 * * *", "30 3 * * *", "0 4 * * SUN"]`.
+   (Внимание: `30 3`/`0 4 SUN` на до-v3 коде снова начнут падать 1102/530 —
+   это ожидаемое до-F0 поведение; см. §12.)
+3. **Данные adopt/merge:** идемпотентны к повторам, но НЕ обратимы кодом —
+   при ошибочном слиянии запустить канонический пересчёт
+   `POST /api/admin/backfill-trips` (пересобирает Trip из точек по
+   deviceId); слитые b-поездки восстановит именно он. Журнал действий —
+   логи воркера (`fm:adopt`/`fm:merge`/`fm:merge:skip`).
+
+### Как проверить (после деплоя v3)
+
+- `GET /health` → `{"ok":true,"version":"2.43.0"}`; `GET
+  /workers/scripts/d1-gateway/settings` → 13 биндингов (6 секретов, включая
+  GHA_GATEWAY_SECRET, 6 text/vars, DB, KV).
+- `GET /workers/scripts/d1-gateway/schedules` → 2 записи (`*/1`, `0 3`).
+- KV (namespace `telemetria-kvcache-probe`): `cron:last:tick` ok каждую
+  минуту; `cron:last:finalize-sessions|alerts|turso-migrate` ok каждые 5 мин
+  (пишутся из свёрнутого тика); `cron:last:backup*` больше не обновляются
+  (заморожены на откате) — бэкап виден только в GHA.
+- SQL (read-only через шлюз/аудит): `SELECT count(*) FROM Session WHERE
+  tripId IS NULL AND status='completed' AND pointCount>=3` → дрейф к 0
+  (мусор 1–2-точечных остаётся намеренно); пары кусков: `SELECT count(*)
+  FROM Trip a JOIN Trip b ON a.deviceId=b.deviceId AND a.id<>b.id AND
+  datetime(a.spanStart)<datetime(b.spanStart) AND datetime(b.spanStart)>=
+  datetime(a.spanEnd) AND datetime(b.spanStart)<datetime(a.spanEnd,'+900
+  seconds') WHERE a.deletedAt IS NULL AND b.deletedAt IS NULL` → к 0 (или
+  стабильно мало из-за session-verify skip).
+- GHA: `POST /repos/…/actions/workflows/backup.yml/dispatches` → run
+  success («=== БЭКАП ГОТОВ ===»), draft-релиз `backup-YYYY-MM-DD-*`,
+  BackupJob completed (~68 МБ).

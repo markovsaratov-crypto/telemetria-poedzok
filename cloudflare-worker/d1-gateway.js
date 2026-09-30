@@ -1,6 +1,36 @@
-// d1-gateway — аутентифицированный SQL-шлюз над Cloudflare D1.
+// d1-gateway v3 (CR-C, 2026-09-30) — аутентифицированный SQL-шлюз над Cloudflare D1.
 // Деплой: Workers API (module syntax). БД привязана биндингом DB.
-// Auth: заголовок X-Gateway-Secret (секрет GATEWAY_SECRET в env воркера).
+// Auth: заголовок X-Gateway-Secret — основной секрет GATEWAY_SECRET (secret_text)
+// ИЛИ v3-второй секрет GHA_GATEWAY_SECRET (plain_text, канал GitHub Actions).
+//
+// ─── v3 (CR-C, ветка ops/gateway-v3-20260930) — что изменено ───
+//  F0 Двойной секрет: POST/GET-гейты принимают ЛЮБОЙ из GATEWAY_SECRET |
+//     GHA_GATEWAY_SECRET (оба constant-time, SHA-256). Причина: секрет
+//     GATEWAY_SECRET ротировали 2026-09-29, а репо-секрет D1_GATEWAY_SECRET
+//     (GitHub Actions бэкап) с 2026-09-25 не обновлялся → 401, durable-бэкапов
+//     нет 25+ ч. GHA теперь ходит со своим секретом, независимым от ротаций
+//     основного (см. docs/OPERATIONS.md §13).
+//  F1 Схлопывание расписаний: триггеры воркера = "*/1 * * * *" (tick) и
+//     "0 3 * * *" (retention). Джобы finalize-sessions/alerts/turso-migrate
+//     (бывший */5) запускаются ИЗ ТИКА на минутах %5===0 — последовательно,
+//     каждый в своём try/catch (раньше */1 и */5 вызывали приложение ДВАЖДЫ
+//     в одну минуту :00/:05/:10…). Записи backup (30 3) и backup-github
+//     (0 4 SUN) УДАЛЕНЫ: полный дамп на воркере невозможен (CPU 1102, §12),
+//     бэкап живёт ТОЛЬКО в GitHub Actions (cron 03:30 UTC, workflow backup.yml).
+//  + FM-движок замороженных суточных метрик перенесён в исходник из
+//     прод-бандла (раунд frozen-metrics-fix 2026-09-30): fmEngineTick на тике
+//     (StatsRollup сегодня/заморозка/refresh7d), перехватчики SQL в /query
+//     (4 шаблона: heal-kill 1970, счётчики из rollup), рекон stuck BackupJob,
+//     прогрев tsw (statsComputedAt IS NULL → GET /api/trips/batch?ids=).
+//  F2 fmAdoptOrphans: усыновление сессий-сирот (born-completed через
+//     /ingest-порт, tripId IS NULL): ≤3 сессий/тик с pointCount ≥ 3 — attach
+//     к пересекающейся по времени поездке или create новой; метрики NULL →
+//     tsw пересчитает. Мусор 1–2-точечных парковочных сердцебиений не трогаем.
+//  F3 fmMergeUndercut: слияние «недосклеенных» кусков Trip (гэп < 900 с =
+//     TRIP_SPLIT_SEC): ≤2 пары/тик, проверка по сессиям (сырьё, не span),
+//     keeper = ранний, b удаляется как в recomputeTripsForDevice (жёсткий
+//     DELETE; сырые Session/GpsPoint не трогаются).
+//  Мелочи: пустые catch {} → console.warn с контекстом; /health version 2.43.0.
 //
 // Эндпоинты:
 //   GET  /health                          → {ok, gateway:"d1", db:"bound"}
@@ -66,7 +96,9 @@
 //      задокументировано в edge-gateway.ts), инвалидация — list по префиксу
 //      с пагинацией (кап 100 страниц = 100k ключей, полный сброс «dash:»).
 
-import { handleEdgeIngest, handleEdgeSensorLogger } from "./ingest-port.js";
+import { handleEdgeIngest, handleEdgeSensorLogger, rollupDayKey } from "./ingest-port.js";
+// rollupDayKey — из ingest-port.js: ключ rollup-дня (YYYY-MM-DD) в TZ оператора;
+// используется FM-движком (fmComputeDays) — тот же расчёт дня, что у приложения.
 
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
@@ -174,6 +206,27 @@ async function secretEquals(a, b) {
   let diff = 0;
   for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
   return diff === 0;
+}
+
+/** v3 (CR-C F0): гейт секрета шлюза — ЛЮБОЙ из двух секретов.
+ *  • GATEWAY_SECRET (secret_text) — основной, им ходится приложение
+ *    (telemat-web) и рунбук /admin/cron-status;
+ *  • GHA_GATEWAY_SECRET (plain_text) — второй, независимый канал GitHub
+ *    Actions (бэкап 03:30 UTC): ротация основного секрета 2026-09-29
+ *    оставила GHA с протухшим D1_GATEWAY_SECRET → 401 → 25+ ч без
+ *    durable-бэкапов (CR-B §3.5). Второй секрет ротируется отдельно
+ *    (PUT репо-секрета + plain_text-биндинг при деплое шлюза).
+ *  Оба сравнения — constant-time (secretEquals, SHA-256-дайджесты).
+ *  GHA_GATEWAY_SECRET не задан/пуст → вторая проверка просто пропускается.
+ *  Ни один не сконфигурирован → гейт закрыт наглухо (как раньше). */
+async function gatewaySecretOk(env, presented) {
+  const s = typeof presented === "string" ? presented : "";
+  const hasPrimary = typeof env.GATEWAY_SECRET === "string" && env.GATEWAY_SECRET.length > 0;
+  const hasGha = typeof env.GHA_GATEWAY_SECRET === "string" && env.GHA_GATEWAY_SECRET.length > 0;
+  if (!hasPrimary && !hasGha) return false;
+  if (hasPrimary && (await secretEquals(s, env.GATEWAY_SECRET))) return true;
+  if (hasGha && (await secretEquals(s, env.GHA_GATEWAY_SECRET))) return true;
+  return false;
 }
 
 function json(data, status = 200) {
@@ -319,7 +372,11 @@ async function readBodyLimited(request, maxBytes) {
     if (done) break;
     total += value.byteLength;
     if (total > maxBytes) {
-      try { await reader.cancel(); } catch {}
+      try { await reader.cancel(); } catch (e) {
+        // v3 (CR-C): отмена стрима сорвалась — не критично (клиент всё равно
+        // получит 413), но фиксируем в логе для диагностики утечек.
+        console.warn(JSON.stringify({ level: "warn", msg: "body reader.cancel failed", error: String((e && e.message) || e) }));
+      }
       return { ok: false, status: 413, error: "payload too large", limitBytes: maxBytes };
     }
     chunks.push(value);
@@ -680,12 +737,21 @@ function normalizeCron(expr) {
   const dow = dowMap[String(fixed[4]).toUpperCase()] ?? fixed[4];
   return [fixed[0], fixed[1], fixed[2], fixed[3], dow].join(" ");
 }
+// v3 (CR-C F1): СХЛОПНУТО до двух триггеров (PUT /workers/scripts/d1-gateway/
+// schedules). Прежние */5 / 30 3 / 0 4 SUN убраны:
+//   • finalize-sessions + alerts + turso-migrate (быв. */5) запускаются ИЗ
+//     тика — на минутах, где getUTCMinutes() % 5 === 0 (см. scheduled()):
+//     раньше */1 и */5 падали в одну минуту :00/:05/:10… и вызывали
+//     приложение ДВАЖДЫ; теперь — одна инвокация, джобы последовательно;
+//   • backup (30 3) и backup-github (0 4 SUN) — in-worker полный дамп
+//     невозможен на free-CPU (1102, OPERATIONS.md §12), бэкап живёт ТОЛЬКО
+//     в GitHub Actions (workflow backup.yml, cron 03:30 UTC). KV-ключи
+//     cron:last:backup* и пути в CRON_APP_PATHS СОХРАНЕНЫ (наблюдаемость
+//     истории в /admin/cron-status; повторное добавление триггера через
+//     дашборд БЕЗ отката кода станет no-op — это осознанно).
 const CRON_SCHEDULES = {
   "*/1 * * * *": ["tick"],
-  "*/5 * * * *": ["finalize-sessions", "alerts", "turso-migrate"],
   "0 3 * * *": ["retention"],
-  "30 3 * * *": ["backup"],
-  "0 4 * * SUN": ["backup-github"],
 };
 const CRON_SCHEDULES_BY_NORM = new Map(
   Object.entries(CRON_SCHEDULES).map(([expr, jobs]) => [normalizeCron(expr), jobs])
@@ -756,7 +822,11 @@ async function putCronLastThrottled(env, job, record) {
           ) {
             return; // тот же исход недавно — не тратим квоту записи
           }
-        } catch {}
+        } catch (e) {
+          // v3 (CR-C): битая/чужая запись cron:last — троттл-промах, пишем как
+          // новую (ниже); в лог, чтобы видеть деградацию формата KV-записей.
+          console.warn(JSON.stringify({ level: "warn", msg: "cron:last parse failed (throttle miss)", job, error: String((e && e.message) || e) }));
+        }
       }
     }
     await env.KV.put(TURSO_CRON_LAST_KEY(job), JSON.stringify(record));
@@ -1115,6 +1185,627 @@ function TURSO_CRON_LAST_KEY(job) {
   return CRON_LAST_PREFIX + job;
 }
 
+// ——— v2.42.3-FM (CR-C v3): FM-движок замороженных суточных метрик ———
+// Порт из прод-бандла d1-gateway (раунд frozen-metrics-fix, деплой
+// 2026-09-30 ~08:05 UTC; до v3 существовал ТОЛЬКО в прод-бандле — см.
+// worklog Task frozen-metrics-fix/verify и docs/OPERATIONS.md §13).
+// Архитектура «суточные записи + замороженная история»:
+//   1) backfill-once всей истории (KV-маркер fm:backfill:v1, идемпотентно,
+//      чистка мусорных строк StatsRollup NOT IN живым составам);
+//   2) суточная строка «сегодня» пересчитывается КАЖДУЮ МИНУТУ из дневного
+//      окна сессий (±18 ч от границ суток — запас TZ Europe/Saratov);
+//   3) заморозка при смене суток (KV fm:frozenThru): прошедший день
+//      пересчитывается один раз и навсегда;
+//   4) часовой refresh последних 7 дней (самолечение дрейфа rollup);
+//   5) раз в 5 мин: рекон stuck BackupJob (>2 ч running → failed),
+//      fmAdoptOrphans (v3 F2), fmMergeUndercut (v3 F3), прогрев tsw —
+//      «старые» поездки со statsComputedAt IS NULL пересчитываются САМИМ
+//      ПРИЛОЖЕНИЕМ (GET /api/trips/batch?ids= с Bearer User.apiKey из БД —
+//      методология приложения = 100% согласованность, ключ не логируется).
+// Перехватчики fmInterceptQuery в /query нейтрализуют CPU-пожиратели
+// приложения (heal 1970-01-01, fallback-скан GpsPoint) — KPI всегда из rollup.
+const FM_ENABLED = true;
+
+/** Следующий rollup-день (UTC-ключ YYYY-MM-DD + 1 сутки). */
+function fmNextDayKey(key) {
+  return new Date(Date.parse(key + "T00:00:00Z") + 86400000).toISOString().slice(0, 10);
+}
+
+/** Парсер Session.statsCache (копия методологии приложения): дистанция/
+ *  длительность/эко из кэша финальной записи. Битый/oversized кэш → нули. */
+function fmParseStatsCache(s) {
+  const t = { distanceM: 0, durationSec: 0, ecoSum: 0, ecoCount: 0 };
+  if (typeof s != "string" || s.length === 0 || s === "__TELEMAT_CACHE_OVERSIZED__") return t;
+  try {
+    const n = JSON.parse(s);
+    if (n?.kind !== "full" || !n.payload) return t;
+    const a = Number(n.payload.distance);
+    if (Number.isFinite(a) && a > 0) t.distanceM += a;
+    const d = Number(n.payload.duration);
+    if (Number.isFinite(d) && d > 0) t.durationSec += d;
+    const e = n.payload?.methodology?.ecoScore?.value;
+    if (e != null && Number.isFinite(Number(e))) {
+      t.ecoSum += Number(e);
+      t.ecoCount += 1;
+    }
+  } catch {
+    // битый JSON кэша — вклад нулевой (как в приложении)
+  }
+  return t;
+}
+
+/** UPSERT-стейтменты StatsRollup (ON CONFLICT day|userId DO UPDATE). */
+function fmRollupUpserts(rows, nowIso) {
+  return rows.map((r) => ({
+    sql: `INSERT INTO StatsRollup (day, userId, sessions, points, distanceM, durationSec, ecoSum, ecoCount, updatedAt)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(day, userId) DO UPDATE SET
+  sessions = excluded.sessions,
+  points = excluded.points,
+  distanceM = excluded.distanceM,
+  durationSec = excluded.durationSec,
+  ecoSum = excluded.ecoSum,
+  ecoCount = excluded.ecoCount,
+  updatedAt = excluded.updatedAt`,
+    args: [r.day, r.userId, r.sessions, r.points, Math.round(r.distanceM), Math.round(r.durationSec), Math.round(1000 * r.ecoSum) / 1000, r.ecoCount, nowIso],
+  }));
+}
+
+/** Живые сессии окна [fromMs, toMs) — индекс Session_startTime_idx. */
+async function fmSessionsInRange(env, fromMs, toMs) {
+  const res = await env.DB.prepare(
+    "SELECT startTime, userId, pointCount, statsCache FROM Session WHERE deletedAt IS NULL AND startTime >= ? AND startTime < ?"
+  ).bind(new Date(fromMs).toISOString(), new Date(toMs).toISOString()).all();
+  return res.results ?? [];
+}
+
+/** Агрегация сессий по rollup-дням (день — в TZ оператора, rollupDayKey из
+ *  ingest-port.js = тот же расчёт, что у приложения). */
+function fmComputeDays(rows, dayFrom, dayTo, zone) {
+  const agg = new Map();
+  for (const s of rows) {
+    const ts = Date.parse(String(s.startTime));
+    if (!Number.isFinite(ts)) continue;
+    const day = rollupDayKey(ts, zone);
+    if (day < dayFrom || day > dayTo) continue;
+    const uid = s.userId == null ? "" : String(s.userId);
+    const k = day + "|" + uid;
+    let d = agg.get(k);
+    if (!d) {
+      d = { day, userId: uid, sessions: 0, points: 0, distanceM: 0, durationSec: 0, ecoSum: 0, ecoCount: 0 };
+      agg.set(k, d);
+    }
+    d.sessions += 1;
+    d.points += Number(s.pointCount ?? 0);
+    const sc = fmParseStatsCache(s.statsCache);
+    d.distanceM += sc.distanceM;
+    d.durationSec += sc.durationSec;
+    d.ecoSum += sc.ecoSum;
+    d.ecoCount += sc.ecoCount;
+  }
+  return [...agg.values()];
+}
+
+/** Запись дневных строк чанками ≤100 стейтментов (D1-батч). */
+async function fmWriteDayRows(env, rows) {
+  if (rows.length === 0) return 0;
+  const nowIso = new Date().toISOString();
+  const stmts = fmRollupUpserts(rows, nowIso);
+  for (let i = 0; i < stmts.length; i += 100) {
+    const chunk = stmts.slice(i, i + 100).map((s) => env.DB.prepare(s.sql).bind(...s.args));
+    await env.DB.batch(chunk);
+  }
+  return rows.length;
+}
+
+/** Разовый бэкфилл всей истории + чистка мусорных StatsRollup-строк.
+ *  KV-маркер fm:backfill:v1 — идемпотентность (повтор = no-op). */
+async function fmBackfillOnce(env, zone, yesterdayKey) {
+  const kv = env.KV;
+  if (!kv) return;
+  const marker = await kv.get("fm:backfill:v1").catch(() => null);
+  if (marker) return;
+  const res = await env.DB.prepare("SELECT startTime, userId, pointCount, statsCache FROM Session WHERE deletedAt IS NULL").all();
+  const rows = fmComputeDays(res.results ?? [], "0000-00-00", "9999-12-31", zone);
+  const written = await fmWriteDayRows(env, rows);
+  const keep = rows.map((r) => r.day + "|" + r.userId);
+  if (keep.length > 0) {
+    const ph = keep.map(() => "?").join(", ");
+    await env.DB.prepare(`DELETE FROM StatsRollup WHERE (day || '|' || userId) NOT IN (${ph})`).bind(...keep).run();
+  } else {
+    await env.DB.prepare("DELETE FROM StatsRollup").run();
+  }
+  await kv.put("fm:backfill:v1", JSON.stringify({ at: new Date().toISOString(), days: rows.length, written }));
+  await kv.put("fm:frozenThru", yesterdayKey);
+  console.log(JSON.stringify({ level: "info", msg: "fm backfill-once complete (history frozen)", days: rows.length, written, frozenThru: yesterdayKey }));
+}
+
+// ——— v3 (CR-C F2): fmAdoptOrphans — усыновление сессий-сирот ———
+// Проблема (CR-B D1.2): устройство phone шлёт через /ingest-порт ГОТОВЫЕ
+// (born-completed) сессии — finalize-крон приложения смотрит только
+// status='recording' и их не видит → сессии висят tripId IS NULL (78 шт на
+// 2026-09-30, из них 8 «настоящих» поездок на 10–1523 точек — их метрики не
+// видны в аналитике вовсе). Движок раз в 5 минут подбирает ≤3 сирот с
+// pointCount ≥ 3 (≤36/ч — фонтан 1–2-точечных парковочных сердцебиений
+// НЕ трогаем: канон «парковка между поездками не принадлежит никому»):
+//   • attach: живая поездка ТОГО ЖЕ устройства с пересечением по времени —
+//     session.startTime ≤ Trip.spanEnd И session.endTime ≥ Trip.spanStart
+//     (обе стороны через datetime() — в D1 даты лежат ISO-строками, «сырое»
+//     лексикографическое сравнение смешанных форматов ломается); из кандидатов
+//     берётся максимальный по перекрытию; spanStart/spanEnd расширяются
+//     min/max (НИКОГДА не сжимаются), sessionIds = объединение JSON-массивов,
+//     sessionCount = |объединение|;
+//   • create: подходящей поездки нет → INSERT новой (образец — INSERT
+//     recomputeTripsForDevice, src/lib/trip-grouping.ts: колонки сверены с
+//     prisma/schema.prisma; startLat/Lon,endLat/Lon — первый/последний фикс
+//     сессии по индексу (sessionId, timestamp); pointCountActual =
+//     pointCount сессии; status='completed'; statsComputedAt=NULL);
+//   • TrafficJob: ensure-INSERT — ТОЧНАЯ копия приложения (trip-grouping.ts:481 /
+//     closeStaleTrips:635: INSERT … WHERE NOT EXISTS pending/running —
+//     идемпотентен) + trafficJobId = COALESCE(последний джоб, прежний);
+//   • метрики обнуляются (список инвалидации — как у приложения в
+//     trip-grouping.ts «compositionChanged»: distanceM/movingTime/…/
+//     statsComputedAt = NULL) → tsw-прогрев пересчитает их сам через
+//     GET /api/trips/batch?ids= (методология приложения).
+// Идемпотентно: после UPDATE Session.tripId сирота выпадает из выборки;
+// каждый шаг — только чтение + атомарный D1-batch (UPDATE/INSERT).
+async function fmAdoptOrphans(env, now, out) {
+  const orphans = await env.DB.prepare(
+    `SELECT id, deviceId, userId, startTime, endTime, pointCount
+       FROM Session
+      WHERE tripId IS NULL AND status = 'completed' AND deletedAt IS NULL
+        AND pointCount >= 3
+      ORDER BY startTime ASC LIMIT 3`
+  ).all();
+  for (const s of orphans.results ?? []) {
+    const sid = String(s.id);
+    const startMs = Date.parse(String(s.startTime));
+    const endMs = s.endTime == null ? startMs : Date.parse(String(s.endTime));
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) continue;
+    const startIso = new Date(startMs).toISOString();
+    const endIso = new Date(endMs).toISOString();
+    // поездка-кандидат: пересечение по времени (datetime() на ОБЕИХ сторонах)
+    const cands = await env.DB.prepare(
+      `SELECT id, sessionIds, sessionCount, spanStart, spanEnd, startTime, endTime, userId
+         FROM Trip
+        WHERE deviceId = ? AND deletedAt IS NULL
+          AND datetime(spanEnd) >= datetime(?)
+          AND datetime(spanStart) <= datetime(?)
+        ORDER BY datetime(spanStart) ASC LIMIT 5`
+    ).bind(String(s.deviceId), startIso, endIso).all();
+    let best = null;
+    let bestOverlap = -Infinity;
+    for (const t of cands.results ?? []) {
+      const tStart = Date.parse(String(t.spanStart));
+      const tEnd = t.spanEnd == null ? null : Date.parse(String(t.spanEnd));
+      if (!Number.isFinite(tStart)) continue;
+      const lo = Math.max(tStart, startMs);
+      const hi = tEnd == null ? endMs : Math.min(tEnd, endMs);
+      const overlap = hi - lo;
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        best = t;
+      }
+    }
+    const nowIso = new Date(now).toISOString();
+    const userId = s.userId == null ? null : String(s.userId);
+    if (best) {
+      // — attach: присоединяем сироту к существующей поездке —
+      const tid = String(best.id);
+      let ids;
+      try { ids = JSON.parse(String(best.sessionIds ?? "[]")); } catch { ids = []; }
+      if (!Array.isArray(ids)) ids = [];
+      const set = new Set(ids.map(String));
+      set.add(sid);
+      const arr = [...set];
+      const tStartMs = Date.parse(String(best.spanStart));
+      const tEndMs = best.spanEnd == null ? null : Date.parse(String(best.spanEnd));
+      const newStartIso = new Date(Math.min(Number.isFinite(tStartMs) ? tStartMs : startMs, startMs)).toISOString();
+      const newEndIso = new Date(Math.max(tEndMs != null && Number.isFinite(tEndMs) ? tEndMs : endMs, endMs)).toISOString();
+      await env.DB.batch([
+        env.DB.prepare(
+          `UPDATE Trip SET sessionIds = ?, sessionCount = ?, spanStart = ?, spanEnd = ?,
+                  statsComputedAt = NULL, activeDurationSec = NULL, movingTimeSec = NULL,
+                  idleTimeSec = NULL, gapTimeSec = NULL, internalStopTimeSec = NULL,
+                  distanceM = NULL, pointCountActual = NULL, maxSpeedMs = NULL, ecoScore = NULL,
+                  planDistanceM = NULL, planDurationSec = NULL, planComparable = NULL,
+                  planCoverage = NULL, routingLegCount = NULL, updatedAt = ?
+            WHERE id = ?`
+        ).bind(JSON.stringify(arr), arr.length, newStartIso, newEndIso, nowIso, tid),
+        env.DB.prepare(`UPDATE Session SET tripId = ?, updatedAt = ? WHERE id = ?`)
+          .bind(tid, nowIso, sid),
+        // ensure-INSERT план-джоба — точная копия приложения (идемпотентен)
+        env.DB.prepare(
+          `INSERT INTO TrafficJob (id, tripId, status, priority, attempts, createdAt, updatedAt)
+                 SELECT ?, ?, 'pending', 0, 0, ?, ?
+                 WHERE NOT EXISTS (SELECT 1 FROM TrafficJob WHERE tripId = ? AND status IN ('pending', 'running'))`
+        ).bind(crypto.randomUUID(), tid, nowIso, nowIso, tid),
+        env.DB.prepare(
+          `UPDATE Trip SET trafficJobId = COALESCE(
+                      (SELECT id FROM TrafficJob WHERE tripId = ? ORDER BY createdAt DESC LIMIT 1), trafficJobId)
+            WHERE id = ? AND trafficJobId IS NULL`
+        ).bind(tid, tid),
+      ]);
+      console.log(JSON.stringify({ t: "fm:adopt", sessionId: sid, tripId: tid, mode: "attach" }));
+      out.adopted = (out.adopted ?? 0) + 1;
+    } else {
+      // — create: новой поездке — координаты первого/последнего фикса сессии —
+      let startLat = null;
+      let startLon = null;
+      let endLat = null;
+      let endLon = null;
+      try {
+        const first = await env.DB.prepare(
+          `SELECT lat, lon FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp ASC LIMIT 1`
+        ).bind(sid).first();
+        const last = await env.DB.prepare(
+          `SELECT lat, lon FROM GpsPoint WHERE sessionId = ? ORDER BY timestamp DESC LIMIT 1`
+        ).bind(sid).first();
+        if (first) { startLat = Number(first.lat); startLon = Number(first.lon); }
+        if (last) { endLat = Number(last.lat); endLon = Number(last.lon); }
+      } catch (e) {
+        console.warn(JSON.stringify({ level: "warn", msg: "fm adopt coords lookup failed", sessionId: sid, error: String((e && e.message) || e) }));
+      }
+      const nid = crypto.randomUUID();
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO Trip (id, deviceId, userId, status, startTime, endTime, spanStart, spanEnd,
+                  startLat, startLon, endLat, endLon, sessionIds, sessionCount,
+                  interFragmentGapSec, pointCountActual, statsComputedAt, createdAt, updatedAt)
+           VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)`
+        ).bind(
+          nid, String(s.deviceId), userId,
+          startIso, endIso, startIso, endIso,
+          startLat, startLon, endLat, endLon,
+          JSON.stringify([sid]), 1,
+          Number(s.pointCount ?? 0), nowIso, nowIso
+        ),
+        env.DB.prepare(`UPDATE Session SET tripId = ?, updatedAt = ? WHERE id = ?`)
+          .bind(nid, nowIso, sid),
+        // новая закрытая поездка — план-джоб (§9 ТЗ; копия приложения)
+        env.DB.prepare(
+          `INSERT INTO TrafficJob (id, tripId, status, priority, attempts, createdAt, updatedAt)
+                 SELECT ?, ?, 'pending', 0, 0, ?, ?
+                 WHERE NOT EXISTS (SELECT 1 FROM TrafficJob WHERE tripId = ? AND status IN ('pending', 'running'))`
+        ).bind(crypto.randomUUID(), nid, nowIso, nowIso, nid),
+        env.DB.prepare(
+          `UPDATE Trip SET trafficJobId = COALESCE(
+                      (SELECT id FROM TrafficJob WHERE tripId = ? ORDER BY createdAt DESC LIMIT 1), trafficJobId)
+            WHERE id = ? AND trafficJobId IS NULL`
+        ).bind(nid, nid),
+      ]);
+      console.log(JSON.stringify({ t: "fm:adopt", sessionId: sid, tripId: nid, mode: "create" }));
+      out.adopted = (out.adopted ?? 0) + 1;
+    }
+  }
+}
+
+// ——— v3 (CR-C F3): fmMergeUndercut — слияние «недосклеенных» кусков ———
+// Проблема (CR-B D1.1): пары живых Trip ОДНОГО устройства с гэпом между
+// spanEnd(a) и spanStart(b) < TRIP_SPLIT_SEC (900 c) — по канону «поездка
+// не рвётся» (trip-grouping.ts: соседние интервалы < 900 c — одна поездка)
+// это ОДНА поездка; куски возникли из-за поздно пришедших мостов точек и
+// матчинга ±120 c (MATCH_MS) в recomputeTripsForDevice. На 2026-09-30 таких
+// пар ровно 3 (гэпы 582/867/899 с).
+// Алгоритм (≤2 пар за прогон, идемпотентно — слитая пара исчезает из выборки):
+//   1) пары по span-гэпу < 900 c (datetime() на обеих сторонах, дедуб a-b/b-a
+//      условием a.spanStart < b.spanStart — a = более ранний, keeper);
+//   2) ПЕРЕД слиянием — проверка по СЫРЫМ данным (сессии, не span):
+//      MAX(endTime сессий a) vs MIN(startTime сессий b) (чанками ≤90 id —
+//      лимит D1 на параметры); реальный гэп ≥ 900 c → НЕ сливаем (span мог
+//      быть растянут back-extension поверх парковки — кейс e9b7947c/
+//      27280f61, у которого сессии между кусками — стоянка);
+//   3) слияние (один атомарный batch): keeper a ← spanStart/startTime = min,
+//      spanEnd/endTime = max, sessionIds = объединение, sessionCount = сумма,
+//      метрики/statsComputedAt = NULL (tsw пересчитает; список инвалидации —
+//      как у приложения); userId = COALESCE(a, b); Session.tripId b → a;
+//      план-джоб keeper'а переочередью (ensure-INSERT приложения),
+//      pending/running-джобы b — DELETE; b — ЖЁСТКИЙ DELETE Trip (ровно как
+//      recomputeTripsForDevice, trip-grouping.ts:507 «DELETE FROM Trip WHERE
+//      id = ?»). Сырые данные (Session/GpsPoint) НЕ трогаются — поездка
+//      восстановима каноническим POST /api/admin/backfill-trips.
+const TRIP_SPLIT_MS = 900_000; // = TRIP_SPLIT_SEC (900 c) приложения, src/lib/env.ts
+
+/** MAX(endTime)/MIN(startTime) живых сессий по списку id (чанки ≤90 — лимит
+ *  связанных параметров D1). Возвращает мс или null. */
+async function fmSessionBound(env, ids, agg) {
+  const isMax = agg.startsWith("MAX");
+  let acc = null;
+  for (let i = 0; i < ids.length; i += 90) {
+    const chunk = ids.slice(i, i + 90);
+    const ph = chunk.map(() => "?").join(", ");
+    const r = await env.DB.prepare(
+      `SELECT ${agg} AS v FROM Session WHERE id IN (${ph}) AND deletedAt IS NULL`
+    ).bind(...chunk.map(String)).first();
+    if (!r || r.v == null) continue;
+    const v = Date.parse(String(r.v));
+    if (!Number.isFinite(v)) continue;
+    if (acc == null) acc = v;
+    else acc = isMax ? Math.max(acc, v) : Math.min(acc, v);
+  }
+  return acc;
+}
+
+async function fmMergeUndercut(env, now, out) {
+  const pairs = await env.DB.prepare(
+    `SELECT a.id AS idA, b.id AS idB, a.deviceId AS deviceId,
+            a.sessionIds AS idsA, b.sessionIds AS idsB,
+            a.spanStart AS aSpanStart, a.spanEnd AS aSpanEnd,
+            a.startTime AS aStartTime, a.endTime AS aEndTime,
+            b.spanStart AS bSpanStart, b.spanEnd AS bSpanEnd,
+            b.startTime AS bStartTime, b.endTime AS bEndTime,
+            a.userId AS aUserId, b.userId AS bUserId,
+            CAST((julianday(datetime(b.spanStart)) - julianday(datetime(a.spanEnd))) * 86400000 AS INTEGER) AS gapMs
+       FROM Trip a
+       JOIN Trip b ON a.deviceId = b.deviceId AND a.id <> b.id
+         AND datetime(a.spanStart) < datetime(b.spanStart)
+         AND datetime(b.spanStart) >= datetime(a.spanEnd)
+         AND datetime(b.spanStart) < datetime(a.spanEnd, '+900 seconds')
+      WHERE a.deletedAt IS NULL AND b.deletedAt IS NULL
+      ORDER BY datetime(a.spanEnd) ASC LIMIT 2`
+  ).all();
+  for (const p of pairs.results ?? []) {
+    const idA = String(p.idA);
+    const idB = String(p.idB);
+    let idsA;
+    let idsB;
+    try { idsA = JSON.parse(String(p.idsA ?? "[]")); } catch { idsA = []; }
+    try { idsB = JSON.parse(String(p.idsB ?? "[]")); } catch { idsB = []; }
+    if (!Array.isArray(idsA)) idsA = [];
+    if (!Array.isArray(idsB)) idsB = [];
+    // проверка по сессиям (сырьё, не span) — до любых записей
+    let gapMs = Number(p.gapMs);
+    if (idsA.length > 0 && idsB.length > 0) {
+      try {
+        const aEnd = await fmSessionBound(env, idsA, "MAX(endTime)");
+        const bStart = await fmSessionBound(env, idsB, "MIN(startTime)");
+        if (aEnd != null && bStart != null) {
+          const realGap = bStart - aEnd;
+          if (realGap >= TRIP_SPLIT_MS) {
+            console.log(JSON.stringify({ t: "fm:merge:skip", tripA: idA, tripB: idB, spanGapMs: gapMs, sessionGapMs: realGap, reason: "session-gap >= 900s" }));
+            continue;
+          }
+          gapMs = realGap;
+        }
+      } catch (e) {
+        // сбой проверки — консервативно пропускаем пару в этом прогоне
+        console.warn(JSON.stringify({ level: "warn", msg: "fm merge session-verify failed (skip pair this run)", tripA: idA, tripB: idB, error: String((e && e.message) || e) }));
+        continue;
+      }
+    }
+    // — слияние: keeper = a (ранний) —
+    const set = new Set([...idsA.map(String), ...idsB.map(String)]);
+    const arr = [...set];
+    const aSpanStart = Date.parse(String(p.aSpanStart));
+    const bSpanStart = Date.parse(String(p.bSpanStart));
+    const aSpanEnd = p.aSpanEnd == null ? null : Date.parse(String(p.aSpanEnd));
+    const bSpanEnd = p.bSpanEnd == null ? null : Date.parse(String(p.bSpanEnd));
+    const aStartTime = Date.parse(String(p.aStartTime));
+    const bStartTime = Date.parse(String(p.bStartTime));
+    const aEndTime = p.aEndTime == null ? null : Date.parse(String(p.aEndTime));
+    const bEndTime = p.bEndTime == null ? null : Date.parse(String(p.bEndTime));
+    const spanStartIso = new Date(Math.min(aSpanStart, bSpanStart)).toISOString();
+    const spanEndIso = new Date(
+      Math.max(
+        aSpanEnd != null && Number.isFinite(aSpanEnd) ? aSpanEnd : bSpanStart,
+        bSpanEnd != null && Number.isFinite(bSpanEnd) ? bSpanEnd : bSpanStart
+      )
+    ).toISOString();
+    const startTimeIso = new Date(Math.min(aStartTime, bStartTime)).toISOString();
+    const endCandidates = [aEndTime, bEndTime].filter((v) => v != null && Number.isFinite(v));
+    const endTimeIso = endCandidates.length > 0 ? new Date(Math.max(...endCandidates)).toISOString() : null;
+    const userId = p.aUserId != null ? String(p.aUserId) : (p.bUserId != null ? String(p.bUserId) : null);
+    const nowIso = new Date(now).toISOString();
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE Trip SET startTime = ?, endTime = ?, spanStart = ?, spanEnd = ?,
+                sessionIds = ?, sessionCount = ?, userId = ?,
+                statsComputedAt = NULL, activeDurationSec = NULL, movingTimeSec = NULL,
+                idleTimeSec = NULL, gapTimeSec = NULL, internalStopTimeSec = NULL,
+                distanceM = NULL, pointCountActual = NULL, maxSpeedMs = NULL, ecoScore = NULL,
+                planDistanceM = NULL, planDurationSec = NULL, planComparable = NULL,
+                planCoverage = NULL, routingLegCount = NULL, updatedAt = ?
+          WHERE id = ?`
+      ).bind(startTimeIso, endTimeIso, spanStartIso, spanEndIso, JSON.stringify(arr), arr.length, userId, nowIso, idA),
+      env.DB.prepare(`UPDATE Session SET tripId = ?, updatedAt = ? WHERE tripId = ?`).bind(idA, nowIso, idB),
+      // джобы b: живые — как у приложения при удалении поездки (DELETE pending/running)
+      env.DB.prepare(`DELETE FROM TrafficJob WHERE tripId = ? AND status IN ('pending', 'running')`).bind(idB),
+      // план-джоб keeper'а — переочередь (ensure-INSERT приложения)
+      env.DB.prepare(
+        `INSERT INTO TrafficJob (id, tripId, status, priority, attempts, createdAt, updatedAt)
+               SELECT ?, ?, 'pending', 0, 0, ?, ?
+               WHERE NOT EXISTS (SELECT 1 FROM TrafficJob WHERE tripId = ? AND status IN ('pending', 'running'))`
+      ).bind(crypto.randomUUID(), idA, nowIso, nowIso, idA),
+      env.DB.prepare(
+        `UPDATE Trip SET trafficJobId = COALESCE(
+                    (SELECT id FROM TrafficJob WHERE tripId = ? ORDER BY createdAt DESC LIMIT 1), trafficJobId)
+          WHERE id = ? AND trafficJobId IS NULL`
+      ).bind(idA, idA),
+      // b — жёсткий DELETE (как recomputeTripsForDevice; сырьё не трогаем)
+      env.DB.prepare(`DELETE FROM Trip WHERE id = ?`).bind(idB),
+    ]);
+    console.log(JSON.stringify({ t: "fm:merge", tripA: idA, tripB: idB, gapMs }));
+    out.merged = (out.merged ?? 0) + 1;
+  }
+}
+
+/** Тик FM-движка — вызывается из scheduled() на минутном триггере (до джобов).
+ *  Каждый шаг в своём try/catch: сбой одного не роняет остальные.
+ *  Возвращает счётчики для структурного лога "fm engine tick". */
+async function fmEngineTick(env) {
+  if (!FM_ENABLED || !env.DB) return { ok: false, reason: "disabled" };
+  const zone = env.TELEMAT_TIMEZONE || "UTC";
+  const now = Date.now();
+  const todayKey = rollupDayKey(now, zone);
+  const yesterdayKey = rollupDayKey(now - 86400000, zone);
+  const kv = env.KV;
+  const out = { todayRows: 0, froze: 0, refresh7d: false, tsw: null, backupReaped: 0, adopted: 0, merged: 0 };
+  // 1) backfill-once (идемпотентен по KV-маркеру)
+  try {
+    await fmBackfillOnce(env, zone, yesterdayKey);
+  } catch (e) {
+    console.log(JSON.stringify({ level: "warn", msg: "fm backfill step failed", error: String((e && e.message) || e) }));
+  }
+  // 2) суточная строка «сегодня» — каждую минуту (±18 ч запас TZ)
+  try {
+    const fromMs = Date.parse(todayKey + "T00:00:00Z") - 64800000;
+    const toMs = Date.parse(fmNextDayKey(todayKey) + "T00:00:00Z") + 64800000;
+    const rows = fmComputeDays(await fmSessionsInRange(env, fromMs, toMs), todayKey, todayKey, zone);
+    out.todayRows = await fmWriteDayRows(env, rows);
+  } catch (e) {
+    console.log(JSON.stringify({ level: "warn", msg: "fm today step failed", error: String((e && e.message) || e) }));
+  }
+  if (kv) {
+    // 3) заморозка прошедшего дня при смене суток (fm:frozenThru, с валидацией формата)
+    let frozenThru = null;
+    try {
+      frozenThru = await kv.get("fm:frozenThru").catch(() => null);
+      if (typeof frozenThru !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(frozenThru)) frozenThru = null;
+    } catch {
+      // чтение маркера не удалось — заморозка пропускается (не критично)
+    }
+    try {
+      if (frozenThru == null) {
+        await kv.put("fm:frozenThru", yesterdayKey);
+      } else if (frozenThru < yesterdayKey) {
+        const from = fmNextDayKey(frozenThru);
+        const fromMs = Math.max(Date.parse(from + "T00:00:00Z") - 64800000, 1262304e6); // 1262304e6 = 2010-01-01: нижний кламп заморозки
+        const toMs = Date.parse(fmNextDayKey(yesterdayKey) + "T00:00:00Z") + 64800000;
+        const rows = fmComputeDays(await fmSessionsInRange(env, fromMs, toMs), from, yesterdayKey, zone);
+        await fmWriteDayRows(env, rows);
+        await kv.put("fm:frozenThru", yesterdayKey);
+        out.froze = rows.length;
+        console.log(JSON.stringify({ level: "info", msg: "fm day-flip freeze", from, thru: yesterdayKey, rows: rows.length }));
+      }
+    } catch (e) {
+      console.log(JSON.stringify({ level: "warn", msg: "fm freeze step failed", error: String((e && e.message) || e) }));
+    }
+    // 4) часовой refresh последних 7 дней (самолечение дрейфа rollup)
+    try {
+      const last7 = await kv.get("fm:refresh7d:at").catch(() => null);
+      if (!last7 || now - Date.parse(last7) > 3600000) {
+        const fromKey = rollupDayKey(now - 7 * 86400000, zone);
+        const fromMs = Date.parse(fromKey + "T00:00:00Z") - 64800000;
+        const rows = fmComputeDays(await fmSessionsInRange(env, fromMs, now + 64800000), fromKey, todayKey, zone);
+        await fmWriteDayRows(env, rows);
+        await kv.put("fm:refresh7d:at", new Date(now).toISOString());
+        out.refresh7d = true;
+      }
+    } catch (e) {
+      console.log(JSON.stringify({ level: "warn", msg: "fm refresh7d step failed", error: String((e && e.message) || e) }));
+    }
+  }
+  // 5) раз в 5 минут: рекон BackupJob → adopt (F2) → merge (F3) → прогрев tsw
+  if (new Date(now).getUTCMinutes() % 5 === 0) {
+    try {
+      const bj = await env.DB.prepare(
+        "UPDATE BackupJob SET status = 'failed', error = 'fm: reclaimed stuck running > 2h (worker CPU limit)', completedAt = ? WHERE status = 'running' AND createdAt < ?"
+      ).bind(new Date(now).toISOString(), new Date(now - 7200000).toISOString()).run();
+      out.backupReaped = Number(bj.meta?.changes ?? 0);
+    } catch (e) {
+      console.warn(JSON.stringify({ level: "warn", msg: "fm BackupJob reap failed", error: String((e && e.message) || e) }));
+    }
+    try {
+      await fmAdoptOrphans(env, now, out);
+    } catch (e) {
+      console.log(JSON.stringify({ level: "warn", msg: "fm adopt failed", error: String((e && e.message) || e) }));
+    }
+    try {
+      await fmMergeUndercut(env, now, out);
+    } catch (e) {
+      console.log(JSON.stringify({ level: "warn", msg: "fm merge failed", error: String((e && e.message) || e) }));
+    }
+    try {
+      const t = await env.DB.prepare(
+        "SELECT id, userId FROM Trip WHERE deletedAt IS NULL AND statsComputedAt IS NULL AND status = 'completed' AND spanEnd < ? ORDER BY spanStart ASC LIMIT 3"
+      ).bind(new Date(now - 21600000).toISOString()).all();
+      for (const tr of t.results ?? []) {
+        const id = String(tr.id);
+        const key = "fm:tsw:" + id;
+        const last = kv ? await kv.get(key).catch(() => null) : null;
+        if (last) continue;
+        if (kv) await kv.put(key, new Date(now).toISOString(), { expirationTtl: 21600 });
+        const uid = tr.userId == null ? null : String(tr.userId);
+        let apiKey = null;
+        if (uid) {
+          const u = await env.DB.prepare("SELECT apiKey FROM User WHERE id = ?").bind(uid).first().catch(() => null);
+          apiKey = u && u.apiKey ? String(u.apiKey) : null;
+        }
+        if (apiKey && env.APP_ORIGIN) {
+          const ctrl = new AbortController();
+          const tm = setTimeout(() => ctrl.abort(), 30000);
+          try {
+            const r = await fetch(env.APP_ORIGIN + "/api/trips/batch?ids=" + encodeURIComponent(id), { headers: { authorization: "Bearer " + apiKey }, signal: ctrl.signal });
+            out.tsw = { tripId: id, status: r.status };
+          } catch (e) {
+            out.tsw = { tripId: id, error: String((e && e.message) || e) };
+          } finally {
+            clearTimeout(tm);
+          }
+        }
+        break;
+      }
+    } catch (e) {
+      console.warn(JSON.stringify({ level: "warn", msg: "fm tsw warm step failed", error: String((e && e.message) || e) }));
+    }
+  }
+  return out;
+}
+
+// ——— FM: перехватчики SQL в /query (после validateStatement) ———
+// Приложение (бандл telemat-web) слает дословные шаблоны; перехват до D1
+// убирает CPU-пожиратели (полный heal истории 1970-01-01, fallback-сканы
+// GpsPoint) — KPI всегда собирается из StatsRollup. Любой сбой — fallthrough
+// на реальный запрос (перехватчик НИКОГДА не блокирует).
+
+/** Скоуп-предикат приложения (userId = ? / IS NULL) → в rollup userId = ''. */
+function fmScopeClause(sql) {
+  if (/AND\s+userId\s+IS\s+NULL/i.test(sql)) return { clause: " WHERE userId = ''", param: null };
+  if (/AND\s+userId\s*=\s*\?/i.test(sql)) return { clause: " WHERE userId = ?", param: 0 };
+  return { clause: "", param: null };
+}
+
+async function fmInterceptQuery(env, sql, params) {
+  if (!FM_ENABLED || typeof sql !== "string") return null;
+  try {
+    const s = sql.replace(/\s+/g, " ").trim();
+    // Q4: heal 1970-01-01 (recomputeRollupRange всей истории) → пустой ответ
+    if (/^SELECT startTime, userId, pointCount(, statsCache)? FROM Session WHERE deletedAt IS NULL AND startTime >= \? AND startTime < \?/i.test(s) && typeof params[0] === "string" && params[0] < "2001-01-01") {
+      return json({ rows: [], rowsAffected: 0, meta: { rowsRead: 0, rowsWritten: 0, durationMs: 0, fm: "heal-neutralized" } });
+    }
+    // Q2: sessionScopeCounters (COUNT + MAX(updatedAt)) → SUM/MAX из rollup
+    if (/^SELECT COUNT\(\*\) AS c, MAX\(updatedAt\) AS m FROM Session WHERE deletedAt IS NULL( AND userId = \?| AND userId IS NULL)?$/i.test(s)) {
+      const scope = fmScopeClause(s);
+      const stmt = env.DB.prepare("SELECT COALESCE(SUM(sessions), 0) AS c, MAX(updatedAt) AS m FROM StatsRollup" + scope.clause);
+      const res = await (scope.param === 0 ? stmt.bind(params[0]) : stmt).all();
+      budgetTrack(res.meta?.rows_read ?? 0, res.meta?.rows_written ?? 0);
+      const r = (res.results ?? [])[0] ?? {};
+      return json({ rows: [{ c: Number(r.c ?? 0), m: r.m ?? null }], rowsAffected: 0, meta: { rowsRead: res.meta?.rows_read ?? 0, rowsWritten: 0, durationMs: res.meta?.duration ?? 0, fm: "rollup-scope-counters" } });
+    }
+    // Q1: totalSessions → SUM(sessions) из rollup
+    if (/^SELECT COUNT\(\*\) as count FROM Session WHERE deletedAt IS NULL( AND userId = \?| AND userId IS NULL)?$/i.test(s)) {
+      const scope = fmScopeClause(s);
+      const stmt = env.DB.prepare("SELECT COALESCE(SUM(sessions), 0) AS count FROM StatsRollup" + scope.clause);
+      const res = await (scope.param === 0 ? stmt.bind(params[0]) : stmt).all();
+      budgetTrack(res.meta?.rows_read ?? 0, res.meta?.rows_written ?? 0);
+      const r = (res.results ?? [])[0] ?? {};
+      return json({ rows: [{ count: Number(r.count ?? 0) }], rowsAffected: 0, meta: { rowsRead: res.meta?.rows_read ?? 0, rowsWritten: 0, durationMs: res.meta?.duration ?? 0, fm: "rollup-total-sessions" } });
+    }
+    // Q3: fallback COUNT точек (скан GpsPoint) → SUM(points) из rollup
+    if (/^SELECT COUNT\(\*\) AS c FROM GpsPoint WHERE sessionId IN \(SELECT id FROM Session WHERE deletedAt IS NULL( AND userId = \?| AND userId IS NULL)?\)$/i.test(s)) {
+      const scope = fmScopeClause(s);
+      const stmt = env.DB.prepare("SELECT COALESCE(SUM(points), 0) AS c FROM StatsRollup" + scope.clause);
+      const res = await (scope.param === 0 ? stmt.bind(params[0]) : stmt).all();
+      budgetTrack(res.meta?.rows_read ?? 0, res.meta?.rows_written ?? 0);
+      const r = (res.results ?? [])[0] ?? {};
+      return json({ rows: [{ c: Number(r.c ?? 0) }], rowsAffected: 0, meta: { rowsRead: res.meta?.rows_read ?? 0, rowsWritten: 0, durationMs: res.meta?.duration ?? 0, fm: "rollup-total-points" } });
+    }
+  } catch (e) {
+    console.log(JSON.stringify({ level: "warn", msg: "fm intercept failed (fallthrough)", error: String((e && e.message) || e) }));
+  }
+  return null;
+}
+
 // v2.38.2 (линт): воркер вынесен в именованную переменную ДО export default
 // (import/no-anonymous-default-export) — поведение идентично module-syntax.
 const worker = {
@@ -1129,7 +1820,9 @@ const worker = {
       // v2.40.5 (Pack B): version — маркер деплоя шлюза (как APP_VERSION у
       // приложения): верификация «в воркере новый код» без wrangler tail.
       // v2.42.0: + TripCalc в ALLOWED_TABLES + CREATE_TRIPCALC_RE.
-      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.42.0" });
+      // v3 (CR-C): gateway v3 — двойной секрет + схлопывание кронов + FM +
+      // adopt/merge (полный список — шапка файла / docs/OPERATIONS.md §13).
+      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.43.0" });
     }
 
     // v2.39.1 (§B1): edge-инжест — ДО гейта X-Gateway-Secret: канал имеет
@@ -1152,9 +1845,11 @@ const worker = {
 
     // v2.40.0 (§B5/§T-DELTA): статус-эндпоинты наблюдаемости (GET, свой
     // секрет-гейт — до общего метод-чека POST-канала).
+    // v3 (CR-C F0): гейт — ЛЮБОЙ из GATEWAY_SECRET | GHA_GATEWAY_SECRET
+    // (gatewaySecretOk, constant-time для обоих).
     if (url.pathname === "/admin/turso-migrate/status" || url.pathname === "/admin/cron-status") {
       if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
-      if (!env.GATEWAY_SECRET || !(await secretEquals(request.headers.get("x-gateway-secret") ?? "", env.GATEWAY_SECRET))) {
+      if (!(await gatewaySecretOk(env, request.headers.get("x-gateway-secret") ?? ""))) {
         return json({ error: "unauthorized" }, 401);
       }
       const turso = await loadTursoState(env);
@@ -1167,8 +1862,11 @@ const worker = {
 
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
     const secret = request.headers.get("x-gateway-secret") ?? "";
-    // v2.38.2 (ревью F33): await — сравнение теперь по SHA-256-дайджестам (async)
-    if (!env.GATEWAY_SECRET || !(await secretEquals(secret, env.GATEWAY_SECRET))) {
+    // v2.38.2 (ревью F33): сравнение по SHA-256-дайджестам (constant-time).
+    // v3 (CR-C F0): принимается ЛЮБОЙ из двух секретов — основной
+    // GATEWAY_SECRET (приложение/рунбук) ИЛИ GHA_GATEWAY_SECRET (GitHub
+    // Actions бэкап — ротируется независимо; не задан → проверка пропускается).
+    if (!(await gatewaySecretOk(env, secret))) {
       return json({ error: "unauthorized" }, 401);
     }
 
@@ -1217,6 +1915,11 @@ const worker = {
         // v2.38.1 (ревью F1): вайтлист операций ДО prepare/exec
         const violation = validateStatement(sql, isReadOnly(env));
         if (violation) return json({ error: "forbidden", reason: violation }, 403);
+        // v2.42.3-FM (CR-C v3): перехватчики FM-движка — ПОСЛЕ валидации, ДО
+        // D1: CPU-пожиратели приложения (heal 1970-01-01, fallback-скан
+        // GpsPoint) отвечаются из StatsRollup; промах шаблона — fallthrough.
+        const fmRes = await fmInterceptQuery(env, sql, Array.isArray(params) ? params : []);
+        if (fmRes) return fmRes;
         let stmt = env.DB.prepare(sql);
         if (Array.isArray(params) && params.length > 0) stmt = stmt.bind(...params.map(normParam));
         const res = await stmt.all();
@@ -1327,15 +2030,39 @@ const worker = {
   // Каждый тик: разбор расписания → вызов исполнителей приложения (или
   // внутренний шаг мигратора Turso) → запись cron:last:<job> в KV
   // (наблюдаемость через GET /admin/cron-status) + структурный лог.
+  // v2.42.3-FM (CR-C v3): на тике первым делом — FM-движок (замороженные
+  // суточные метрики StatsRollup, рекон BackupJob, adopt/merge, прогрев tsw;
+  // см. блок fm* выше по файлу).
+  // v3 (CR-C F1): расписание схлопнуто до ДВУХ триггеров (минутный тик +
+  // retention 03:00 UTC): джобы бывшего триггера каждые-5-минут
+  // (finalize-sessions, alerts, turso-migrate) запускаются ИЗ ТИКА — на
+  // минутах, кратных 5, последовательно, каждый в своём try/catch (цикл run
+  // ниже исполняет их по одному за итерацию — как раньше в отдельной
+  // инвокации; теперь НЕ будет двойного вызова приложения в одну минуту).
+  // Записи cron:last:* и троттлы putCronLastThrottled не изменились —
+  // наблюдаемость /admin/cron-status прежняя.
   async scheduled(controller, env, ctx) {
-    // v2.40.9 (Pack C §P1-a): флаш бюджета дня (троттл внутри; тик */1 —
+    // v2.40.9 (Pack C §P1-a): флаш бюджета дня (троттл внутри; минутный тик —
     // дожим хвоста после тихих минут)
     __envKV = env.KV ?? null;
     const budgetFlush = flushBudgetPending({ force: true }).catch(() => {});
     // нормализуем ОБЕ стороны (ключи карты и controller.cron): CF может
     // прислать выражение как в канонической форме («* * * * *»), так и
     // дословно («*/1 * * * *») — точное сравнение ненадёжно в обе стороны.
-    const jobs = CRON_SCHEDULES_BY_NORM.get(normalizeCron(controller.cron)) ?? [];
+    // v3 (CR-C F1): копия массива — ниже пушим в неё свёрнутые 5-минутные
+    // джобы (значения в CRON_SCHEDULES_BY_NORM общие, мутировать нельзя).
+    const jobs = [...(CRON_SCHEDULES_BY_NORM.get(normalizeCron(controller.cron)) ?? [])];
+    if (jobs.includes("tick") && new Date().getUTCMinutes() % 5 === 0) {
+      jobs.push("finalize-sessions", "alerts", "turso-migrate");
+    }
+    if (jobs.includes("tick")) {
+      try {
+        const fmOut = await fmEngineTick(env);
+        console.log(JSON.stringify({ level: "info", msg: "fm engine tick", today: fmOut.todayRows, froze: fmOut.froze, refresh7d: fmOut.refresh7d, tsw: fmOut.tsw, backupReaped: fmOut.backupReaped, adopted: fmOut.adopted, merged: fmOut.merged }));
+      } catch (e) {
+        console.log(JSON.stringify({ level: "warn", msg: "fm engine tick failed", error: String((e && e.message) || e) }));
+      }
+    }
     const run = (async () => {
       const results = {};
       for (const job of jobs) {

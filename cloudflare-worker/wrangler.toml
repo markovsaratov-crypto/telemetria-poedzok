@@ -19,19 +19,26 @@ compatibility_date = "2026-09-01"
 account_id = "b8e4eee2f19ba22f8d9ccce80691e719"
 workers_dev = true
 
-# v2.40.0 (§B5): Cron Triggers — расписание бывших cron-сервисов Render 1:1
-# (render.yaml) + новый */1 worker-tick (драйвер инжест-воркера приложения
-# на бессерверном рантайме) + */30 мигратор Turso-дельты (§T-DELTA).
-# Схема работы: scheduled() → POST APP_ORIGIN+путь с Bearer CRON_SECRET
-# (исполнители — в приложении; их код и расписания не менялись).
+# v3 (CR-C F1, 2026-09-30): расписание СХЛОПНУТО до двух триггеров.
+# Прежние 5 (см. git history / docs/OPERATIONS.md §13):
+#   "*/1 * * * *" (tick), "*/5 * * * *" (finalize+alerts+turso),
+#   "0 3 * * *" (retention), "30 3 * * *" (backup), "0 4 * * SUN" (backup-github).
+# Что убрано и почему:
+#   • "*/5" — свёрнут в тик: код scheduled() запускает finalize-sessions /
+#     alerts / turso-migrate ИЗ минутного тика на минутах %5===0 (последовательно,
+#     каждый в своём try/catch) — раньше */1 и */5 вызывали приложение ДВАЖДЫ
+#     в одну минуту :00/:05/:10…;
+#   • "30 3" backup и "0 4 * * SUN" backup-github — in-worker полный дамп
+#     (64+ МБ) упирается в CPU-лимит free-плана (1102, §12): бэкап живёт
+#     ТОЛЬКО в GitHub Actions (.github/workflows/backup.yml, cron 03:30 UTC).
+# ВАЖНО: расписания на проде меняются НЕ этим файлом, а PUT
+# /accounts/{acc}/workers/scripts/d1-gateway/schedules (см. §13).
 [triggers]
-# free-план CF: ≤5 триггеров на аккаунт — turso-migrate свёрнут в */5.
 crons = [
-  "*/1 * * * *",    # worker-tick (TrafficJob/ExportJob/жнецы сессий и поездок)
-  "*/5 * * * *",    # finalize-sessions + alerts + turso-migrate (шаги троттлятся KV-состоянием)
+  "*/1 * * * *",    # worker-tick (TrafficJob/ExportJob/жнецы) + на %5-минутах
+                     # finalize-sessions+alerts+turso-migrate + FM-движок
+                     # (adopt/merge/tsw — d1-gateway.js, блок fm*)
   "0 3 * * *",      # retention (чистка по grace/purgedAt)
-  "30 3 * * *",     # backup (дамп + GitHub durable-копия)
-  "0 4 * * SUN",    # github-backup (еженедельная страховка ВС 04:00)
 ]
 
 [[d1_databases]]
@@ -61,3 +68,16 @@ TURSO_URL = "https://tele-markovsaratov-crypto.aws-ap-south-1.turso.io"
 # тот же секрет, что у приложения — cron-канал), TURSO_AUTH_TOKEN (§T-DELTA:
 # JWT базы Turso — только на время миграции дельты, отозвать после статуса
 # done через /admin/turso-migrate/status).
+
+# v3 (CR-C F0): ВТОРОЙ секрет шлюза — GHA_GATEWAY_SECRET (plain_text-биндинг).
+# Канал GitHub Actions (бэкап 03:30 UTC): workflow backup.yml шлёт заголовок
+# x-gateway-secret со значением репо-секрета D1_GATEWAY_SECRET, а код шлюза
+# принимает ЛЮБОЙ из GATEWAY_SECRET | GHA_GATEWAY_SECRET (оба constant-time;
+# не задан/пуст → вторая проверка пропускается — см. gatewaySecretOk в
+# d1-gateway.js). ЗНАЧЕНИЕ В РЕПО НЕ ХРАНИТСЯ: генерируется при деплое
+# (например 43 символа base62: openssl rand -base64 32 | tr -dc 'A-Za-z0-9')
+# и подставляется ЯВНЫМ plain_text-биндингом в PUT /workers/scripts/
+# d1-gateway (Workers API), синхронно с PUT репо-секрета D1_GATEWAY_SECRET
+# (libsodium sealed box, рецепт — docs/OPERATIONS.md §13). Пример для
+# локального wrangler-деплоя (не для прода — там API-метод):
+#   GHA_GATEWAY_SECRET = "<сгенерировать при деплое — см. §13>"

@@ -1,0 +1,59 @@
+# .github/workflows/trip-heal.yml — GHA-движок лечения «кусков поездок» (CR-G).
+#
+# ЗАЧЕМ ЗДЕСЬ (а не в воркере): CF API-токен песочницы не имеет права PUT
+# workers/scripts (проверено 2026-10-01) — редеплой d1-gateway недоступен,
+# а три корневые причины фрагментации (docs/OPERATIONS.md §14) чинить надо
+# СЕЙЧАС. Шлюз d1-gateway принимает SQL через POST /query|/batch по секрету
+# (D1_GATEWAY_SECRET, тот же канал, что у backup.yml) — движок живёт здесь.
+# Репозиторий публичный → лимит минут GHA не расходуется.
+#
+# РАСПИСАНИЕ: */5 — зеркалит каденс FM-движков воркера (adopt/merge каждые
+# 5 мин): мусорные артефакты живут в UI ≤ ~10 мин до выметания. Расход
+# чтений D1 ~2-3К строк/прогон (~0.7М/день) — в бюджете free-плана (5М).
+#
+# ПОСЛЕ ДЕПЛОЯ d1-gateway v3.1 (OPERATIONS.md §14): cron ниже ОТКЛЮЧИТЬ
+# (закомментировать расписание), workflow_dispatch оставить как ручной
+# инструмент/страховку — движки переедут в воркер.
+name: trip-heal
+
+on:
+  schedule:
+    - cron: "*/5 * * * *" # каждые 5 минут (джиттер GHA возможен — не критично)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Только показать план (без записей в БД)"
+        type: boolean
+        default: false
+      deep:
+        description: "Глубокая чистка (окно сирот 30 дней вместо 2)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trip-heal
+  cancel-in-progress: false # не рвать идущий прогон
+
+jobs:
+  heal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Run trip-heal (retire fake trips → soft-delete standing orphans → merge undercut pairs → device-silence audit)
+        env:
+          D1_GATEWAY_URL: https://d1-gateway.markov-saratov.workers.dev
+          D1_GATEWAY_SECRET: ${{ secrets.D1_GATEWAY_SECRET }}
+          TRIP_MERGE_MAX_SEC: "1800" # окно слияния «один выезд со стоянкой до 30 минут»
+          HEAL_TZ: Europe/Saratov
+          HEAL_DRY_RUN: ${{ inputs.dry_run == true && 'true' || 'false' }}
+          HEAL_DEEP: ${{ inputs.deep == true && 'true' || 'false' }}
+        run: bun scripts/trip-heal.ts

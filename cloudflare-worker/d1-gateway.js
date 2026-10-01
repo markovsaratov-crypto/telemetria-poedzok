@@ -1844,7 +1844,7 @@ async function fmEngineTick(env) {
     }
     try {
       const t = await env.DB.prepare(
-        "SELECT id, userId FROM Trip WHERE deletedAt IS NULL AND statsComputedAt IS NULL AND status = 'completed' AND spanEnd < ? ORDER BY spanStart ASC LIMIT 3"
+        "SELECT id, userId FROM Trip WHERE deletedAt IS NULL AND statsComputedAt IS NULL AND status = 'completed' AND spanEnd < ? ORDER BY spanStart ASC LIMIT 9" // v3.1 (CR-G): 9 кандидатов — 6ч-KV-ключи старейших не должны блокировать хвост (голова очереди)
       ).bind(new Date(now - 21600000).toISOString()).all();
       for (const tr of t.results ?? []) {
         const id = String(tr.id);
@@ -1870,7 +1870,8 @@ async function fmEngineTick(env) {
             clearTimeout(tm);
           }
         }
-        break;
+        // v3.1 (CR-G): убран break из v3 — грелся ровно 1 поездка за тик
+        // (замерло: очередь 14 стояла 40+ мин при живых тиках). Теперь — до 3.
       }
     } catch (e) {
       console.warn(JSON.stringify({ level: "warn", msg: "fm tsw warm step failed", error: String((e && e.message) || e) }));

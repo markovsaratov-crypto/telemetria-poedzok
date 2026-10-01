@@ -30,7 +30,28 @@
 //     TRIP_SPLIT_SEC): ≤2 пары/тик, проверка по сессиям (сырьё, не span),
 //     keeper = ранний, b удаляется как в recomputeTripsForDevice (жёсткий
 //     DELETE; сырые Session/GpsPoint не трогаются).
-//  Мелочи: пустые catch {} → console.warn с контекстом; /health version 2.43.0.
+//
+// ─── v3.1 (CR-G, 2026-10-01 «куски поездок» — см. docs/OPERATIONS.md §14) ───
+//  F6 Гейт движения в fmAdoptOrphans (create-ветка): стационарная сессия
+//     (maxSpeed < 2 м/с И bbox < 250 м) НЕ становится поездкой — как канон
+//     приложения (computeActiveTrip требует движения для leg). RC1: adopt v3
+//     создал 5 «поездок» 0 км из стоянок с открытым приложением.
+//  F7 fmRetireStaticTrips: вывод ГОТОВЫХ фейков — Trip с честными метриками
+//     (statsComputedAt NOT NULL) и distanceM < 100 м И movingTimeSec < 60 c →
+//     отцепить сессии + hard-DELETE (≤2/тик, перед adopt).
+//  F8 Окно слияния fmMergeUndercut: биндинг FM_TRIP_MERGE_MAX_SEC (сек,
+//     дефолт 1800 = «один выезд со стоянкой до 30 минут»; было 900 жёстко).
+//     RC3: спека TRIP_SPLIT_SEC=900 c рвёт один выезд на любой стоянке >15 мин.
+//  F9 device-silence аудит: устройство молчит 3-9 ч / 21-27 ч при локальных
+//     часах 7..23 → AuditLog action='device.silent' (RC4: «вечерняя поездка
+//     не записалась» — приложение на телефоне умерло в 10 утра, никто не
+//     узнал). Троттлинг 20 ч по индексу AuditLog(action, createdAt).
+//  + ДЕПЛОЙ-ТРЕБОВАНИЕ (рунбук §14): биндинг plain_text SESSION_GAP_MS=
+//     900000 — склейка фоновых сердцебиений телефона (5 мин) в ОДНУ запись
+//     вместо фабрики сирот (RC2: 60 c дефолт < интервала фона).
+//  + GHA-мост scripts/trip-heal.ts (cron */5) уже чинит те же RC1/RC3 в
+//     данных через /query|/batch — после деплоя v3.1 его cron отключить.
+//  Мелочи: пустые catch {} → console.warn с контекстом; /health version 2.44.0.
 //
 // Эндпоинты:
 //   GET  /health                          → {ok, gateway:"d1", db:"bound"}
@@ -1429,6 +1450,30 @@ async function fmAdoptOrphans(env, now, out) {
       console.log(JSON.stringify({ t: "fm:adopt", sessionId: sid, tripId: tid, mode: "attach" }));
       out.adopted = (out.adopted ?? 0) + 1;
     } else {
+      // — v3.1 (CR-G F6): гейт движения — стационарная сирота НЕ поездка —
+      // MAX(speed) < 2 м/с И bbox < 250 м → пропускаем (парковка между
+      // поездками не принадлежит никому — канон §6). Сбой проверки — тоже
+      // пропуск (консервативно, повторится следующим тиком).
+      try {
+        const mv = await env.DB.prepare(
+          `SELECT MAX(speed) AS maxSpeed, MIN(lat) AS minLat, MAX(lat) AS maxLat, MIN(lon) AS minLon, MAX(lon) AS maxLon FROM GpsPoint WHERE sessionId = ?`
+        ).bind(sid).first();
+        if (mv) {
+          const maxSpeed = mv.maxSpeed == null ? null : Number(mv.maxSpeed);
+          const latSpanM = Math.abs(Number(mv.maxLat) - Number(mv.minLat)) * 111320;
+          const midLat = (Number(mv.maxLat) + Number(mv.minLat)) / 2;
+          const lonSpanM = Math.abs(Number(mv.maxLon) - Number(mv.minLon)) * 111320 * Math.cos((midLat * Math.PI) / 180);
+          const speedStill = maxSpeed == null || maxSpeed < 2.0;
+          const bboxStill = latSpanM < 250 && lonSpanM < 250;
+          if (speedStill && bboxStill) {
+            console.log(JSON.stringify({ t: "fm:adopt:skip", sessionId: sid, reason: "stationary (no movement)" }));
+            continue;
+          }
+        }
+      } catch (e) {
+        console.warn(JSON.stringify({ level: "warn", msg: "fm adopt movement check failed (skip this tick)", sessionId: sid, error: String((e && e.message) || e) }));
+        continue;
+      }
       // — create: новой поездке — координаты первого/последнего фикса сессии —
       let startLat = null;
       let startLon = null;
@@ -1505,6 +1550,15 @@ async function fmAdoptOrphans(env, now, out) {
 //      id = ?»). Сырые данные (Session/GpsPoint) НЕ трогаются — поездка
 //      восстановима каноническим POST /api/admin/backfill-trips.
 const TRIP_SPLIT_MS = 900_000; // = TRIP_SPLIT_SEC (900 c) приложения, src/lib/env.ts
+// v3.1 (CR-G F8): окно слияния — биндинг FM_TRIP_MERGE_MAX_SEC (сек; дефолт
+// 1800 = «один выезд со стоянкой до 30 минут»). Спека 900 c остаётся
+// ГРАНИЦЕЙ при каноническом пересчёте приложения; это окно — досклейка
+// готовых кусков (в т.ч. самоисцеление recompute-флип-флопа: canonical
+// re-split → merge-движок вклеивает обратно).
+function fmMergeMaxMs(env) {
+  const v = Number(env && env.FM_TRIP_MERGE_MAX_SEC);
+  return Number.isFinite(v) && v >= 60 ? v * 1000 : 1_800_000;
+}
 
 /** MAX(endTime)/MIN(startTime) живых сессий по списку id (чанки ≤90 — лимит
  *  связанных параметров D1). Возвращает мс или null. */
@@ -1527,6 +1581,7 @@ async function fmSessionBound(env, ids, agg) {
 }
 
 async function fmMergeUndercut(env, now, out) {
+  const mergeSec = String(Math.floor(fmMergeMaxMs(env) / 1000));
   const pairs = await env.DB.prepare(
     `SELECT a.id AS idA, b.id AS idB, a.deviceId AS deviceId,
             a.sessionIds AS idsA, b.sessionIds AS idsB,
@@ -1540,10 +1595,10 @@ async function fmMergeUndercut(env, now, out) {
        JOIN Trip b ON a.deviceId = b.deviceId AND a.id <> b.id
          AND datetime(a.spanStart) < datetime(b.spanStart)
          AND datetime(b.spanStart) >= datetime(a.spanEnd)
-         AND datetime(b.spanStart) < datetime(a.spanEnd, '+900 seconds')
+         AND datetime(b.spanStart) < datetime(a.spanEnd, '+' || ? || ' seconds')
       WHERE a.deletedAt IS NULL AND b.deletedAt IS NULL
-      ORDER BY datetime(a.spanEnd) ASC LIMIT 2`
-  ).all();
+      ORDER BY datetime(a.spanEnd) DESC LIMIT 2`
+  ).bind(mergeSec).all(); // v3.1 F8: динамическое окно (дефолт 1800 c)
   for (const p of pairs.results ?? []) {
     const idA = String(p.idA);
     const idB = String(p.idB);
@@ -1561,8 +1616,8 @@ async function fmMergeUndercut(env, now, out) {
         const bStart = await fmSessionBound(env, idsB, "MIN(startTime)");
         if (aEnd != null && bStart != null) {
           const realGap = bStart - aEnd;
-          if (realGap >= TRIP_SPLIT_MS) {
-            console.log(JSON.stringify({ t: "fm:merge:skip", tripA: idA, tripB: idB, spanGapMs: gapMs, sessionGapMs: realGap, reason: "session-gap >= 900s" }));
+          if (realGap >= fmMergeMaxMs(env)) {
+            console.log(JSON.stringify({ t: "fm:merge:skip", tripA: idA, tripB: idB, spanGapMs: gapMs, sessionGapMs: realGap, reason: "session-gap >= merge window (FM_TRIP_MERGE_MAX_SEC)" }));
             continue;
           }
           gapMs = realGap;
@@ -1629,6 +1684,36 @@ async function fmMergeUndercut(env, now, out) {
   }
 }
 
+// ——— v3.1 (CR-G F7): fmRetireStaticTrips — вывод «фейковых» поездок ———
+// RC1 (docs/OPERATIONS.md §14): adopt v3 без гейта движения создал Trip'ы
+// из стационарных сессий — «поездки» 0 км / 0 мин движения. Критерий честный:
+// метрики УЖЕ посчитаны приложением (statsComputedAt NOT NULL — не «ещё не
+// знаем», а «точно не ехали») и distanceM < 100 м И movingTimeSec < 60 c.
+// ≤2/тик (свежие первыми — они в текущем UI): отцепить сессии (tripId=NULL),
+// DELETE pending/running TrafficJob, hard-DELETE Trip (как у приложения в
+// recomputeTripsForDevice — сырьё восстановимо POST /api/admin/backfill-trips).
+// Идемпотентно: удалённая поездка выпадает из выборки.
+async function fmRetireStaticTrips(env, now, out) {
+  const rows = await env.DB.prepare(
+    `SELECT id, deviceId FROM Trip
+      WHERE deletedAt IS NULL AND statsComputedAt IS NOT NULL
+        AND distanceM IS NOT NULL AND distanceM < 100
+        AND movingTimeSec IS NOT NULL AND movingTimeSec < 60
+      ORDER BY updatedAt DESC LIMIT 2`
+  ).all();
+  for (const r of rows.results ?? []) {
+    const id = String(r.id);
+    const nowIso = new Date(now).toISOString();
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE Session SET tripId = NULL, updatedAt = ? WHERE tripId = ? AND deletedAt IS NULL`).bind(nowIso, id),
+      env.DB.prepare(`DELETE FROM TrafficJob WHERE tripId = ? AND status IN ('pending', 'running')`).bind(id),
+      env.DB.prepare(`DELETE FROM Trip WHERE id = ?`).bind(id),
+    ]);
+    console.log(JSON.stringify({ t: "fm:retire", tripId: id, deviceId: String(r.deviceId) }));
+    out.retired = (out.retired ?? 0) + 1;
+  }
+}
+
 /** Тик FM-движка — вызывается из scheduled() на минутном триггере (до джобов).
  *  Каждый шаг в своём try/catch: сбой одного не роняет остальные.
  *  Возвращает счётчики для структурного лога "fm engine tick". */
@@ -1639,7 +1724,7 @@ async function fmEngineTick(env) {
   const todayKey = rollupDayKey(now, zone);
   const yesterdayKey = rollupDayKey(now - 86400000, zone);
   const kv = env.KV;
-  const out = { todayRows: 0, froze: 0, refresh7d: false, tsw: null, backupReaped: 0, adopted: 0, merged: 0 };
+  const out = { todayRows: 0, froze: 0, refresh7d: false, tsw: null, backupReaped: 0, adopted: 0, merged: 0, retired: 0, silentAudits: 0 }; // v3.1: +retired/silentAudits
   // 1) backfill-once (идемпотентен по KV-маркеру)
   try {
     await fmBackfillOnce(env, zone, yesterdayKey);
@@ -1706,6 +1791,11 @@ async function fmEngineTick(env) {
       console.warn(JSON.stringify({ level: "warn", msg: "fm BackupJob reap failed", error: String((e && e.message) || e) }));
     }
     try {
+      await fmRetireStaticTrips(env, now, out); // v3.1 F7: фейки — до adopt
+    } catch (e) {
+      console.log(JSON.stringify({ level: "warn", msg: "fm retire failed", error: String((e && e.message) || e) }));
+    }
+    try {
       await fmAdoptOrphans(env, now, out);
     } catch (e) {
       console.log(JSON.stringify({ level: "warn", msg: "fm adopt failed", error: String((e && e.message) || e) }));
@@ -1714,6 +1804,43 @@ async function fmEngineTick(env) {
       await fmMergeUndercut(env, now, out);
     } catch (e) {
       console.log(JSON.stringify({ level: "warn", msg: "fm merge failed", error: String((e && e.message) || e) }));
+    }
+    // v3.1 (CR-G F9): device-silence аудит — RC4 «вечерняя поездка не
+    // записалась, потому что приложение умерло утром»: молчание устройства
+    // 3-9 ч / 21-27 ч при локальных часах 7..23 → AuditLog device.silent.
+    // Троттлинг 20 ч (индекс action,createdAt); тест-девайсы не будоражим.
+    try {
+      const devs = await env.DB.prepare(
+        `SELECT deviceId, MAX(endTime) AS lastEnd FROM Session WHERE deletedAt IS NULL AND startTime > ? GROUP BY deviceId`
+      ).bind(new Date(now - 7 * 86400000).toISOString()).all();
+      const hourFmt = new Intl.DateTimeFormat("en-GB", { timeZone: zone, hour: "2-digit", hour12: false });
+      const localHour = Number(hourFmt.format(new Date(now)));
+      for (const d of devs.results ?? []) {
+        const dev = String(d.deviceId);
+        if (/^(proxy-|diag-)|-test$|e2e/i.test(dev)) continue;
+        const lastEnd = Date.parse(String(d.lastEnd));
+        if (!Number.isFinite(lastEnd)) continue;
+        const silentMs = now - lastEnd;
+        const inBand = (silentMs >= 3 * 3600000 && silentMs < 9 * 3600000) || (silentMs >= 21 * 3600000 && silentMs < 27 * 3600000);
+        if (!inBand || localHour < 7 || localHour > 23) continue;
+        const seen = await env.DB.prepare(
+          `SELECT 1 FROM AuditLog WHERE action = 'device.silent' AND targetId = ? AND createdAt > ? LIMIT 1`
+        ).bind(dev, new Date(now - 20 * 3600000).toISOString()).first();
+        if (seen) continue;
+        await env.DB.prepare(
+          `INSERT INTO AuditLog (id, userId, action, targetId, targetType, actorType, actorId, metadata, sessionId, createdAt)
+           VALUES (?, NULL, 'device.silent', ?, 'Device', 'system', 'fm-engine', ?, NULL, ?)`
+        ).bind(
+          crypto.randomUUID(),
+          dev,
+          JSON.stringify({ silentHours: Math.round(silentMs / 3600000), lastPointAt: new Date(lastEnd).toISOString(), hint: "нет данных с устройства — приложение закрыто/убито ОС; поездки НЕ записываются" }),
+          new Date(now).toISOString()
+        ).run();
+        out.silentAudits = (out.silentAudits ?? 0) + 1;
+        console.log(JSON.stringify({ t: "fm:deviceSilent", deviceId: dev, silentHours: Math.round(silentMs / 3600000) }));
+      }
+    } catch (e) {
+      console.log(JSON.stringify({ level: "warn", msg: "fm device-silence audit failed", error: String((e && e.message) || e) }));
     }
     try {
       const t = await env.DB.prepare(
@@ -1822,7 +1949,7 @@ const worker = {
       // v2.42.0: + TripCalc в ALLOWED_TABLES + CREATE_TRIPCALC_RE.
       // v3 (CR-C): gateway v3 — двойной секрет + схлопывание кронов + FM +
       // adopt/merge (полный список — шапка файла / docs/OPERATIONS.md §13).
-      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.43.0" });
+      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.44.0" });
     }
 
     // v2.39.1 (§B1): edge-инжест — ДО гейта X-Gateway-Secret: канал имеет
@@ -2058,7 +2185,7 @@ const worker = {
     if (jobs.includes("tick")) {
       try {
         const fmOut = await fmEngineTick(env);
-        console.log(JSON.stringify({ level: "info", msg: "fm engine tick", today: fmOut.todayRows, froze: fmOut.froze, refresh7d: fmOut.refresh7d, tsw: fmOut.tsw, backupReaped: fmOut.backupReaped, adopted: fmOut.adopted, merged: fmOut.merged }));
+        console.log(JSON.stringify({ level: "info", msg: "fm engine tick", today: fmOut.todayRows, froze: fmOut.froze, refresh7d: fmOut.refresh7d, tsw: fmOut.tsw, backupReaped: fmOut.backupReaped, adopted: fmOut.adopted, merged: fmOut.merged, retired: fmOut.retired, silentAudits: fmOut.silentAudits })); // v3.1
       } catch (e) {
         console.log(JSON.stringify({ level: "warn", msg: "fm engine tick failed", error: String((e && e.message) || e) }));
       }

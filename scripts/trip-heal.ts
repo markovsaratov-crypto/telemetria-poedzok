@@ -153,12 +153,32 @@ try {
   for (const f of fakes) {
     const id = String(f.id);
     log({ t: "heal:retire", tripId: id, deviceId: String(f.deviceId), startTime: String(f.startTime), distLt: 100, movLt: 60, dryRun: DRY_RUN });
+    // состав фейка ДО открепления (для мягкого удаления доказанно стационарных сессий)
+    const fakeIds = parseIds((await q("SELECT sessionIds AS ids FROM Trip WHERE id = ?", [id]))[0]?.ids);
     if (!DRY_RUN) {
       await qBatch([
         { sql: "UPDATE Session SET tripId = NULL, updatedAt = ? WHERE tripId = ? AND deletedAt IS NULL", params: [nowIso, id] },
         { sql: "DELETE FROM TrafficJob WHERE tripId = ? AND status IN ('pending', 'running')", params: [id] },
         { sql: "DELETE FROM Trip WHERE id = ?", params: [id] },
       ]);
+      // v2: сессии фейка, на которые НЕ ссылается ни одна другая живая поездка,
+      // — мягко удаляем (метрики поездки 0 км — стационарность доказана
+      // приложением): иначе adopt-движок воркера ПЕРЕСОЗДАСТ фейк из сироты
+      // (флип-флоп retire↔adopt, кейс 01.10 f53153d4)
+      for (const sid of fakeIds) {
+        try {
+          const ref = await q(
+            "SELECT count(*) AS c FROM Trip WHERE deletedAt IS NULL AND id <> ? AND sessionIds LIKE ?",
+            [id, `%"${sid}"%`]
+          );
+          if (Number(ref[0]?.c ?? 0) === 0) {
+            await qBatch([{ sql: "UPDATE Session SET deletedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL AND tripId IS NULL", params: [nowIso, nowIso, sid] }]);
+            log({ t: "heal:retireSession", sessionId: sid, ofTrip: id, dryRun: DRY_RUN });
+          }
+        } catch {
+          /* ссылку не проверили — оставим сессию живой (safe) */
+        }
+      }
     }
     summary.retired++;
   }
@@ -191,9 +211,16 @@ try {
     const midLat = (maxLat + minLat) / 2;
     const lonSpanM = Math.abs(maxLon - minLon) * 111_320 * Math.cos((midLat * Math.PI) / 180);
     const speedStill = maxSpeed == null || maxSpeed < 2.0; // < 7,2 км/ч
-    const bboxStill = latSpanM < 250 && lonSpanM < 250;
-    if (speedStill && bboxStill) {
-      log({ t: "heal:softDelete", sessionId: sid, deviceId: String(s.deviceId), startTime: String(s.startTime), points: pc, maxSpeed, bboxM: Math.round(Math.max(latSpanM, lonSpanM)), dryRun: DRY_RUN });
+    const bboxMaxM = Math.max(latSpanM, lonSpanM);
+    const bboxStill = bboxMaxM < 250;
+    // v2 (кейс f53153d4 01.10): стоянка с GPS-дрейфом (bbox 250-400 м при
+    // accuracy 16-52 м) — дискриминатор СКОРОСТЬ СМЕЩЕНИЯ: bbox/длительность
+    // < 1,4 м/с (5 км/ч — пешеход) при maxSpeed < 2 — это не поездка.
+    // Реальная езда даёт либо maxSpeed ≥ 2 (стоп-н-гоу), либо км-масштаб bbox.
+    const durSec = Math.max(Math.abs(Date.parse(String(s.endTime ?? s.startTime)) - Date.parse(String(s.startTime))) / 1000, 60);
+    const rateStill = bboxMaxM / durSec < 1.4;
+    if (speedStill && (bboxStill || rateStill)) {
+      log({ t: "heal:softDelete", sessionId: sid, deviceId: String(s.deviceId), startTime: String(s.startTime), points: pc, maxSpeed, bboxM: Math.round(bboxMaxM), rateMs: +(bboxMaxM / durSec).toFixed(2), dryRun: DRY_RUN });
       if (!DRY_RUN) {
         await qBatch([
           { sql: "UPDATE Session SET deletedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL", params: [nowIso, nowIso, sid] },
@@ -302,6 +329,15 @@ try {
         },
         { sql: "DELETE FROM Trip WHERE id = ?", params: [b.id] },
       ]);
+      // v2: сброс tsw-KV-ключа keeper'а (ttl 60 c платформы) — иначе прогрев
+      // метрик слитой поездки ждёт до 6 ч (кейс cf7c71d4 01.10: ключ с
+      // утреннего прогрева жив до ~22:00 при statsComputedAt=NULL с 16:39)
+      try {
+        await gwCall("/kvstore/put", { key: "fm:tsw:" + a.id, value: "heal-merge-reset", ttlSec: 1 });
+        log({ t: "heal:tswReset", tripId: a.id, dryRun: DRY_RUN });
+      } catch {
+        /* сброс не удался — прогрев доберёт по истечении 6ч TTL */
+      }
     }
     summary.merged++;
   }

@@ -54,6 +54,7 @@ jobs:
           D1_GATEWAY_SECRET: ${{ secrets.D1_GATEWAY_SECRET }}
           TRIP_MERGE_MAX_SEC: "1800" # окно слияния «один выезд со стоянкой до 30 минут»
           HEAL_TZ: Europe/Saratov
+          APP_ORIGIN: https://poedzok.fun
           HEAL_DRY_RUN: ${{ inputs.dry_run == true && 'true' || 'false' }}
           HEAL_DEEP: ${{ inputs.deep == true && 'true' || 'false' }}
         run: bun scripts/trip-heal.ts

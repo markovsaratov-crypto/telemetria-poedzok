@@ -33,9 +33,25 @@
 //      (локальные часы 7..23) → запись AuditLog action='device.silent'
 //      (троттлинг: полосы 3-9 ч и 21-27 ч + проверка «не писали ли за
 //      последние 20 ч» по индексу action,createdAt).
+//   5. repairDanglingRefs (CR-H 2026-10-03): сессии, чей tripId указывает
+//      на НЕСУЩЕСТВУЮЩУЮ поездку (жертвы конкурентных писателей Trip —
+//      движки adopt/merge шлюза против recomputeTripsForDevice приложения
+//      в разных каденсах) — данные таких сессий невидимы во вкладке
+//      «Поездки» и не входят в метрики. Стационарные (bbox < 250 м,
+//      скорость смещения < 1.4 м/с — ТОЛЬКО геометрия: поле speed мусорит,
+//      кейс 06b81f98 7337 м/с при 2.9 км, 8953bbd9 51 м/с при нулевом
+//      bbox) → soft-delete; движущиеся → tripId = NULL (adopt-движок
+//      воркера создаст поездку на ближайшем тике).
+//   6. warmStats (CR-H): воркер v3 (прод) греет ≤1 поездку/тик с 6ч-KV-
+//      голоданием (исправлено в v3.1, не задеплоено) → свежие поездки
+//      показывают «— км» в списке (метрики из БД, ленивый persist только
+//      при просмотре детали). Здесь: completed-поездки со statsComputedAt
+//      IS NULL и spanEnd старше 10 мин → GET {APP_ORIGIN}/api/trips/batch
+//      с Bearer apiKey владельца (методология приложения, persist там же).
 //
 // ЗАПУСК: bun scripts/trip-heal.ts (env: D1_GATEWAY_URL, D1_GATEWAY_SECRET;
-// опционально TRIP_MERGE_MAX_SEC, HEAL_TZ, HEAL_DRY_RUN, HEAL_DEEP).
+// опционально TRIP_MERGE_MAX_SEC, HEAL_TZ, HEAL_DRY_RUN, HEAL_DEEP,
+// APP_ORIGIN — дефолт https://poedzok.fun).
 // Контракт шлюза: POST /query {sql,params} и POST /batch {statements} —
 // заголовок x-gateway-secret; воркер НЕ в read-only (GATEWAY_READ_ONLY не
 // задан), вайтлист таблиц покрывает Session/Trip/TrafficJob/AuditLog.
@@ -52,6 +68,7 @@ const GW_SECRET = process.env.D1_GATEWAY_SECRET ?? "";
 const MERGE_MAX_SEC = Number(process.env.TRIP_MERGE_MAX_SEC) > 0 ? Number(process.env.TRIP_MERGE_MAX_SEC) : 1800;
 const MERGE_MAX_MS = MERGE_MAX_SEC * 1000;
 const TZ = process.env.HEAL_TZ ?? "Europe/Saratov";
+const APP_ORIGIN = (process.env.APP_ORIGIN ?? "https://poedzok.fun").replace(/\/+$/, "");
 const DRY_RUN = (process.env.HEAL_DRY_RUN ?? "") === "true";
 const DEEP = (process.env.HEAL_DEEP ?? "") === "true";
 if (!GW_URL || !GW_SECRET) {
@@ -65,6 +82,8 @@ const RETIRE_LIMIT = 4;
 const SOFT_DELETE_LIMIT = 40;
 const MERGE_LIMIT = 3;
 const MAX_SESSION_POINTS_FOR_CHECK = 3000; // очень большие сироты — движку воркера
+const DANGLING_LIMIT = 50;
+const WARM_LIMIT = 8;
 
 // ——— SQL-клиент шлюза ———
 interface GwRow {
@@ -139,9 +158,56 @@ function log(obj: Record<string, unknown>): void {
 const t0 = Date.now();
 const now = Date.now();
 const nowIso = iso(now);
-const summary = { dryRun: DRY_RUN, deep: DEEP, retired: 0, softDeleted: 0, skippedMoving: 0, merged: 0, mergeSkipped: 0, audits: 0, errors: [] as string[] };
+const summary = { dryRun: DRY_RUN, deep: DEEP, retired: 0, softDeleted: 0, skippedMoving: 0, merged: 0, mergeSkipped: 0, audits: 0, repaired: 0, warmed: 0, errors: [] as string[] };
 
 try {
+  // ============ 0) repairDanglingRefs (CR-H 2026-10-03) ============
+  // Сессии, чей tripId указывает на несуществующую поездку: стационарные
+  // (геометрия!) — soft-delete, движущиеся — освободить (tripId = NULL) для
+  // adopt-движка воркера. Дискриминатор ТОЛЬКО bbox/скорость смещения — поле
+  // speed непригодно (мусорные 51–7337 м/с при нулевом bbox, известный N-5).
+  try {
+    const danglings = await q(
+      `SELECT s.id, s.deviceId, s.startTime, s.endTime, s.pointCount FROM Session s
+        WHERE s.tripId IS NOT NULL AND s.deletedAt IS NULL
+          AND s.tripId NOT IN (SELECT id FROM Trip)
+        ORDER BY s.startTime ASC LIMIT ${DANGLING_LIMIT}`
+    );
+    for (const s of danglings) {
+      const sid = String(s.id);
+      const pc = Number(s.pointCount ?? 0);
+      if (pc <= 0 || pc > MAX_SESSION_POINTS_FOR_CHECK) continue;
+      const m = (await q(
+        `SELECT COUNT(*) AS n, MIN(lat) AS minLat, MAX(lat) AS maxLat, MIN(lon) AS minLon, MAX(lon) AS maxLon
+           FROM GpsPoint WHERE sessionId = ?`,
+        [sid]
+      ))[0];
+      const n = Number(m?.n ?? 0);
+      if (n === 0) continue; // нет точек — не наш мусор
+      const latSpanM = Math.abs(Number(m.maxLat) - Number(m.minLat)) * 111_320;
+      const midLat = (Number(m.maxLat) + Number(m.minLat)) / 2;
+      const lonSpanM = Math.abs(Number(m.maxLon) - Number(m.minLon)) * 111_320 * Math.cos((midLat * Math.PI) / 180);
+      const bboxMaxM = Math.max(latSpanM, lonSpanM);
+      const durSec = Math.max(Math.abs(Date.parse(String(s.endTime ?? s.startTime)) - Date.parse(String(s.startTime))) / 1000, 60);
+      const rateStill = bboxMaxM / durSec < 1.4; // < 5 км/ч — не поездка
+      if (bboxMaxM < 250 && rateStill) {
+        log({ t: "heal:repairDangling", sessionId: sid, mode: "softDelete", deviceId: String(s.deviceId), points: pc, bboxM: Math.round(bboxMaxM), dryRun: DRY_RUN });
+        if (!DRY_RUN) {
+          await qBatch([{ sql: "UPDATE Session SET deletedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL", params: [nowIso, nowIso, sid] }]);
+        }
+        summary.softDeleted++;
+      } else {
+        log({ t: "heal:repairDangling", sessionId: sid, mode: "release", deviceId: String(s.deviceId), points: pc, bboxM: Math.round(bboxMaxM), dryRun: DRY_RUN });
+        if (!DRY_RUN) {
+          await qBatch([{ sql: "UPDATE Session SET tripId = NULL, updatedAt = ? WHERE id = ?", params: [nowIso, sid] }]);
+        }
+        summary.repaired++;
+      }
+    }
+  } catch (e) {
+    summary.errors.push(`repairDangling: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   // ============ 1) retireStaticTrips ============
   const fakes = await q(
     `SELECT id, deviceId, startTime, endTime, sessionCount FROM Trip
@@ -384,6 +450,63 @@ try {
     }
   } catch (e) {
     summary.errors.push(`deviceSilent: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // ============ 5) warmStats (CR-H 2026-10-03) ============
+  // Замена мёртвого tsw-прогрева воркера v3 (прод): поездки со
+  // statsComputedAt IS NULL (созданные adopt-движком / слитые merge)
+  // греются самим приложением — GET /api/trips/batch?ids=… с Bearer
+  // apiKey владельца (persist метрик — в том же запросе, методология
+  // приложения 1:1). Спим 10 минут после spanEnd — состав устаканился.
+  try {
+    const cold = await q(
+      `SELECT id, userId FROM Trip
+        WHERE deletedAt IS NULL AND statsComputedAt IS NULL AND status = 'completed'
+          AND spanEnd IS NOT NULL AND spanEnd < ?
+        ORDER BY spanStart ASC LIMIT ${WARM_LIMIT}`,
+      [iso(now - 10 * 60_000)]
+    );
+    if (cold.length > 0) {
+      const byUser = new Map<string, string[]>();
+      for (const c of cold) {
+        const uid = c.userId == null ? "" : String(c.userId);
+        const arr = byUser.get(uid) ?? [];
+        arr.push(String(c.id));
+        byUser.set(uid, arr);
+      }
+      for (const [uid, ids] of byUser) {
+        if (DRY_RUN) {
+          log({ t: "heal:warm", trips: ids.length, dryRun: true });
+          continue;
+        }
+        let apiKey: string | null = null;
+        if (uid !== "") {
+          const u = (await q("SELECT apiKey FROM User WHERE id = ?", [uid]))[0];
+          apiKey = u?.apiKey == null ? null : String(u.apiKey);
+        }
+        if (!apiKey) {
+          log({ t: "heal:warm:skip", reason: "no apiKey", userId: uid.slice(0, 8) });
+          continue;
+        }
+        const ctrl = new AbortController();
+        const tm = setTimeout(() => ctrl.abort(), 45_000);
+        try {
+          const res = await fetch(`${APP_ORIGIN}/api/trips/batch?ids=${encodeURIComponent(ids.join(","))}`, {
+            headers: { authorization: `Bearer ${apiKey}` },
+            signal: ctrl.signal,
+          });
+          log({ t: "heal:warm", trips: ids.length, userId: uid.slice(0, 8), status: res.status });
+          if (res.ok) summary.warmed += ids.length;
+          else summary.errors.push(`warm HTTP ${res.status} (user ${uid.slice(0, 8)})`);
+        } catch (e) {
+          summary.errors.push(`warm: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+          clearTimeout(tm);
+        }
+      }
+    }
+  } catch (e) {
+    summary.errors.push(`warmStats: ${e instanceof Error ? e.message : String(e)}`);
   }
 } catch (e) {
   summary.errors.push(`fatal: ${e instanceof Error ? e.message : String(e)}`);

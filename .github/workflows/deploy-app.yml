@@ -82,7 +82,8 @@ jobs:
 
       - name: "Preflight-only stop"
         if: github.event.inputs.mode == 'preflight'
-        run: echo "PREFLIGHT OK — деплой не выполнялся. Для деплоя: Run workflow → mode=deploy."
+        run: |
+          echo "PREFLIGHT OK — деплой не выполнялся. Для деплоя запустите Run workflow с mode=deploy."
 
       - name: "Rollback"
         if: github.event.inputs.mode == 'rollback'

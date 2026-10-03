@@ -1,0 +1,89 @@
+# deploy-app.yml — деплой telemat-web (сайт poedzok.fun) через GitHub Actions.
+# CR-K «деплой сейчас» (2026-10-03), рунбук docs/OPERATIONS.md §18.
+#
+# ЗАЧЕМ GHA-исполнитель: репо ПУБЛИЧНОЕ — значения секретов нельзя выносить
+# в артефакты/логи; здесь они живут в env шага и уходят только в parity-пробы
+# и repair-PUT. Оркестратор scripts/deploy-telemat-web.mjs НИКОГДА не логирует
+# значения (только имена и HTTP-коды).
+#
+# МЕХАНИКА (мина v24, §12/§15): последняя версия telemat-web — пустой черновик;
+# wrangler deploy может унаследовать пустоту и стереть 10 секретов. Оркестратор
+# ПОСЛЕ deploy сверяет биндинги и восстанавливает стёртое через
+# PUT /workers/scripts/{name}/secrets; D1_GATEWAY_SECRET при стирании
+# заменяется НОВЫМ значением с синхронной ротацией GATEWAY_SECRET на шлюзе.
+# Откат: mode=rollback + version_id из снапшота префлайта.
+#
+# ТРЕБУЕТ репо-секрет CLOUDFLARE_API_TOKEN (шаблон «Edit Cloudflare Workers»):
+#   дашборд CF → My Profile → API Tokens → Create Token → Edit Cloudflare
+#   Workers → вставить в репо Settings → Secrets → Actions → CLOUDFLARE_API_TOKEN.
+#
+# ЗАПУСК: Actions → deploy-app → Run workflow → mode:
+#   preflight — проверки без деплоя (parity + снапшоты; токен не обязателен
+#               для parity-части, но CF-часть его требует);
+#   deploy    — полный прогон (build → wrangler deploy → repair → verify);
+#   rollback  — вернуть версию version_id (вводится отдельно).
+name: deploy-app
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "preflight | deploy | rollback"
+        required: true
+        default: "preflight"
+      rollback_version_id:
+        description: "(только mode=rollback) version_id для восстановления"
+        required: false
+        default: ""
+
+concurrency:
+  group: deploy-app
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: b8e4eee2f19ba22f8d9ccce80691e719
+      # Паритет/repair: значения из секретов репо (зеркало Render-env §12)
+      LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
+      SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+      API_KEY: ${{ secrets.API_KEY }}
+      INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
+      CRON_SECRET: ${{ secrets.CRON_SECRET }}
+      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+      BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies (bun — lockfile-точно)
+        run: bun install --frozen-lockfile
+
+      - name: "Preflight (parity + CF-снапшоты)"
+        if: github.event.inputs.mode != 'rollback'
+        run: node scripts/deploy-telemat-web.mjs preflight
+
+      - name: "Deploy (build → wrangler → repair → verify)"
+        if: github.event.inputs.mode == 'deploy'
+        run: node scripts/deploy-telemat-web.mjs deploy
+
+      - name: "Preflight-only stop"
+        if: github.event.inputs.mode == 'preflight'
+        run: echo "PREFLIGHT OK — деплой не выполнялся. Для деплоя: Run workflow → mode=deploy."
+
+      - name: "Rollback"
+        if: github.event.inputs.mode == 'rollback'
+        run: node scripts/deploy-telemat-web.mjs rollback "${{ github.event.inputs.rollback_version_id }}"

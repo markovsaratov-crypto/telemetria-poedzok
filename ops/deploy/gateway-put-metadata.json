@@ -1,0 +1,16 @@
+{
+  "main_module": "d1-gateway.js",
+  "compatibility_date": "2026-09-01",
+  "keep_secrets": true,
+  "bindings": [
+    { "type": "plain_text", "name": "APP_ORIGIN", "text": "https://poedzok.fun" },
+    { "type": "plain_text", "name": "EDGE_INGEST_MAX_BYTES", "text": "1048576" },
+    { "type": "plain_text", "name": "EDGE_INGEST_ROLLUP_ENABLED", "text": "true" },
+    { "type": "plain_text", "name": "FM_TRIP_MERGE_MAX_SEC", "text": "900" },
+    { "type": "plain_text", "name": "SESSION_GAP_MS", "text": "900000" },
+    { "type": "plain_text", "name": "TELEMAT_TIMEZONE", "text": "Europe/Saratov" },
+    { "type": "plain_text", "name": "TURSO_URL", "text": "https://tele-markovsaratov-crypto.aws-ap-south-1.turso.io" },
+    { "type": "d1", "name": "DB", "id": "9dec0a90-7d38-46ae-9921-29eb83706b3d" },
+    { "type": "kv_namespace", "name": "KV", "namespace_id": "be49735094b14ad3a41e053c4b1cd308" }
+  ]
+}

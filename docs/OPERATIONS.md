@@ -1241,3 +1241,52 @@ v3.3 read-only убил прогон 37136737540)
    старым GHA-значением → 401; SELECT 1 основным секретом (приложение) →
    200; сайт /api/trips → 200; workflow_dispatch backup.yml → success
    (drill ok). Откат: PUT бандла v3.2 (коммит 5304962) тем же методом.
+
+## §18. 2026-10-03 (CR-K «деплой сейчас»): деплой telemat-web через GitHub Actions — обход мины v24
+
+**Директива юзера:** «деплой сейчас» — деплой приложения с фиксами CR-J
+(коммиты 7c1787f + d960214: канонические фиксы логики поездок, zip-бомба,
+absolute session TTL, посессионная нормализация скоростей).
+
+**Блокер и его разбор.** Деплой telemat-web упирался в «мину v24» (§12/§15:
+последняя версия скрипта — пустой черновик; wrangler deploy / PUT
+с keep_secrets наследует пустоту → 10 секретов воркера стираются, значения
+невосстановимы). Решение — **GHA-исполнитель** (репо публичное, значения
+секретов не покидают GitHub Actions):
+
+1. **Паритет секретов репо ↔ прод ПОДТВЕРЖДЁН (preflight-прогон run
+   37149284560, 2026-10-03 19:49 UTC):** LOGIN_PASSWORD → логин 200 ✓;
+   INGEST_TOKEN → 400 (признан) ✓; CRON_SECRET → /api/worker/tick 200 ✓;
+   ADMIN_TOKEN → 200 ✓. Значения секретов репо == воркера → repair через
+   PUT /secrets безопасен.
+2. **Инструмент:** `scripts/deploy-telemat-web.mjs` (паритет/preflight/
+   deploy/verify/rollback; значения секретов НЕ логируются никогда —
+   только имена и HTTP-коды) + `.github/workflows/deploy-app.yml`
+   (workflow_dispatch: preflight | deploy | rollback) + шаблон PUT шлюза
+   `ops/deploy/gateway-put-metadata.json`.
+3. **Механика deploy-прогона:** preflight (parity-гейт + снапшот активного
+   деплоя = точка отката) → `opennextjs-cloudflare build` (cf-proxy-swap) →
+   `wrangler deploy` (код + vars + ассеты + GATEWAY_SVC) → **repair-secrets**
+   (GET settings; стёртое восстанавливается PUT /secrets из секретов репо;
+   D1_GATEWAY_SECRET при стирании генерируется заново + синхронная ротация
+   GATEWAY_SECRET на d1-gateway по шаблону, keep_secrets=true — цепочка
+   версий шлюза чистая) → verify (функциональная матрица).
+4. **Откат:** `node scripts/deploy-telemat-web.mjs rollback <version_id>`
+   — POST deployments {percentage:100} возвращает версию с ЕЁ биндингами и
+   секретами (значения хранятся на стороне CF внутри версии).
+5. **Сборка проверена в песочнице** (2026-10-03 19:37 UTC): opennextjs-
+   cloudflare build → .open-next/worker.js + assets; wrangler 4.134
+   (bun.lock).
+
+**Единственный недостающий вход:** репо-секрет `CLOUDFLARE_API_TOKEN`
+(шаблон «Edit Cloudflare Workers»: dash → My Profile → API Tokens → Create
+Token). После его установки (Settings → Secrets → Actions) деплой = Run
+workflow → mode=deploy (или API dispatch). Скрипт установки из песочницы:
+`tmp-scripts/cr-k/set-cf-token-secret.sh <токен>` (libsodium sealed, PUT).
+
+**Текущее состояние прода на момент §18:** poedzok.fun = telemat-web
+деплой v19 (v2.42.2 + чанк-патч аналитики); d1-gateway v3.4 (2.47.0);
+D1-квота чтения free-тира ИСЧЕРПАНА до 00:00 UTC 04.10 (данные сайта
+недоступны, статика жива; окно идеально для деплоя — секрет-ротация
+шлюза не видна поверх квоты). Preflight показал: tick=200 (CR-J-эра 503
+самоустранилась после сброса квоты предыдущего дня).

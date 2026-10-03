@@ -77,6 +77,20 @@
 //     фикс-поинт). Биндинг SESSION_GAP_MS=900000 (RC2) не меняется.
 //  Мелочи: /health version 2.45.0.
 //
+// ─── v3.3 (CR-J, 2026-10-03 кодревью топ-архитектора — hardening GHA-канала) ───
+//  J-B3 Канальные привилегии: gatewaySecretChannel() возвращает "main"|"gha"
+//     вместо bool. GHA-канал (репо-секреты GitHub) — read-only ПО УМОЛЧАНИЮ
+//     (SELECT+PRAGMA): бэкапу 03:30 UTC больше ничего не нужно, мост
+//     trip-heal остановлен (CR-I). Аварийный DML — ЯВНЫЙ биндинг
+//     GATEWAY_GHA_DML="true" (рунбук §14.3: включить → прогнать → выключить).
+//     Таблица User (passwordHash/apiKey) — read-only на GHA-канале ВСЕГДА,
+//     даже при включённом флаге: PAT-компрометация GitHub больше не даёт
+//     канал модификации аккаунтов прод-D1. Main-канал (приложение) — без
+//     изменений: полный вайтлист, как в v3.2.
+//  Мелочи: /health version 2.46.0; GHA_GATEWAY_SECRET деплоится теперь
+//     биндингом secret_text (был plain_text — читался из /settings любым
+//     токеном с правом чтения настроек воркера).
+//
 // Эндпоинты:
 //   GET  /health                          → {ok, gateway:"d1", db:"bound"}
 //   POST /query   {sql, params?}          → {rows, rowsAffected, meta}
@@ -256,22 +270,34 @@ async function secretEquals(a, b) {
 /** v3 (CR-C F0): гейт секрета шлюза — ЛЮБОЙ из двух секретов.
  *  • GATEWAY_SECRET (secret_text) — основной, им ходится приложение
  *    (telemat-web) и рунбук /admin/cron-status;
- *  • GHA_GATEWAY_SECRET (plain_text) — второй, независимый канал GitHub
+ *  • GHA_GATEWAY_SECRET (secret_text, v3.3) — второй, независимый канал GitHub
  *    Actions (бэкап 03:30 UTC): ротация основного секрета 2026-09-29
  *    оставила GHA с протухшим D1_GATEWAY_SECRET → 401 → 25+ ч без
  *    durable-бэкапов (CR-B §3.5). Второй секрет ротируется отдельно
- *    (PUT репо-секрета + plain_text-биндинг при деплое шлюза).
+ *    (PUT репо-секрета + биндинг при деплое шлюза).
  *  Оба сравнения — constant-time (secretEquals, SHA-256-дайджесты).
  *  GHA_GATEWAY_SECRET не задан/пуст → вторая проверка просто пропускается.
- *  Ни один не сконфигурирован → гейт закрыт наглухо (как раньше). */
-async function gatewaySecretOk(env, presented) {
+ *  Ни один не сконфигурирован → гейт закрыт наглухо (как раньше).
+ *
+ *  v3.3 (CR-J, ревью J-B3): гейт возвращает КАНАЛ ("main" | "gha" | null),
+ *  а не просто bool — канал определяет привилегии DML (см. isGhaDmlEnabled
+ *  и ghaUserDmlViolation ниже): GHA-канал по умолчанию READ-ONLY (бэкапу
+ *  нужны только SELECT), DML на нём — только явным флагом GATEWAY_GHA_DML,
+ *  а таблица User — НИКОГДА (passwordHash/apiKey вне досягаемости GHA-канала,
+ *  даже при включённом флаге). Мотив: GHA-секрет живёт в репо-секретах
+ *  GitHub — PAT-компрометация не должна давать канал полного DML к прод-D1. */
+async function gatewaySecretChannel(env, presented) {
   const s = typeof presented === "string" ? presented : "";
   const hasPrimary = typeof env.GATEWAY_SECRET === "string" && env.GATEWAY_SECRET.length > 0;
   const hasGha = typeof env.GHA_GATEWAY_SECRET === "string" && env.GHA_GATEWAY_SECRET.length > 0;
-  if (!hasPrimary && !hasGha) return false;
-  if (hasPrimary && (await secretEquals(s, env.GATEWAY_SECRET))) return true;
-  if (hasGha && (await secretEquals(s, env.GHA_GATEWAY_SECRET))) return true;
-  return false;
+  if (!hasPrimary && !hasGha) return null;
+  if (hasPrimary && (await secretEquals(s, env.GATEWAY_SECRET))) return "main";
+  if (hasGha && (await secretEquals(s, env.GHA_GATEWAY_SECRET))) return "gha";
+  return null;
+}
+
+async function gatewaySecretOk(env, presented) {
+  return (await gatewaySecretChannel(env, presented)) !== null;
 }
 
 function json(data, status = 200) {
@@ -315,6 +341,29 @@ function extractTableNames(sql) {
 // включение режима требует перевода приложения на read-only-потребление.
 function isReadOnly(env) {
   return env.GATEWAY_READ_ONLY === "true" || env.GATEWAY_READ_ONLY === "1";
+}
+
+// v3.3 (CR-J, ревью J-B3): GHA-канал — read-only ПО УМОЛЧАНИЮ. Аварийный DML
+// (ручной trip-heal / repair-скрипты) включается ЯВНЫМ биндингом
+// GATEWAY_GHA_DML="true" на время операции и выключается обратно (рунбук
+// §14.3). Fail-closed: не задан/мусор → только SELECT+PRAGMA.
+function isGhaDmlEnabled(env) {
+  return env.GATEWAY_GHA_DML === "true" || env.GATEWAY_GHA_DML === "1";
+}
+
+// v3.3 (CR-J, J-B3): таблица User (passwordHash/apiKey) — НИКОГДА не пишется
+// через GHA-канал, даже при GATEWAY_GHA_DML=true. Возвращает причину отказа
+// или null (разрешено). Для main-канала не вызывается (приложение легитимно
+// пишет User: регистрация/логин/ротация apiKey).
+function ghaUserDmlViolation(sql) {
+  const clean = stripSqlComments(String(sql).replace(/;\s*$/, "")).trim();
+  const verbMatch = clean.match(/^([A-Za-z]+)/);
+  if (!verbMatch) return null;
+  const verb = verbMatch[1].toUpperCase();
+  if (verb !== "INSERT" && verb !== "UPDATE" && verb !== "DELETE") return null;
+  const tables = extractTableNames(clean);
+  if (tables.has("user")) return "gha channel: User table is read-only (passwordHash/apiKey are out of scope)";
+  return null;
 }
 
 // Валидация ОДНОГО стейтмента. null = разрешено; строка = причина отказа (403).
@@ -2038,7 +2087,7 @@ const worker = {
       // v2.42.0: + TripCalc в ALLOWED_TABLES + CREATE_TRIPCALC_RE.
       // v3 (CR-C): gateway v3 — двойной секрет + схлопывание кронов + FM +
       // adopt/merge (полный список — шапка файла / docs/OPERATIONS.md §13).
-      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.45.0" });
+      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.46.0" });
     }
 
     // v2.39.1 (§B1): edge-инжест — ДО гейта X-Gateway-Secret: канал имеет
@@ -2082,9 +2131,14 @@ const worker = {
     // v3 (CR-C F0): принимается ЛЮБОЙ из двух секретов — основной
     // GATEWAY_SECRET (приложение/рунбук) ИЛИ GHA_GATEWAY_SECRET (GitHub
     // Actions бэкап — ротируется независимо; не задан → проверка пропускается).
-    if (!(await gatewaySecretOk(env, secret))) {
+    // v3.3 (CR-J, J-B3): гейт определяет КАНАЛ — GHA по умолчанию read-only
+    // (SELECT+PRAGMA), User-DML на нём заблокирован навсегда; флаг
+    // GATEWAY_GHA_DML — аварийный DML без User (рунбук §14.3).
+    const channel = await gatewaySecretChannel(env, secret);
+    if (channel == null) {
       return json({ error: "unauthorized" }, 401);
     }
+    const ghaReadOnly = channel === "gha" && !isGhaDmlEnabled(env);
 
     // v2.38.1 (ревью F1): лимит тела — предчек по content-length (дёшево, до
     // чтения) и фактический по байтам стрима (readBodyLimited ниже).
@@ -2128,9 +2182,15 @@ const worker = {
       if (url.pathname === "/query") {
         const { sql, params } = body ?? {};
         if (typeof sql !== "string" || sql.length === 0) return json({ error: "sql required" }, 400);
-        // v2.38.1 (ревью F1): вайтлист операций ДО prepare/exec
-        const violation = validateStatement(sql, isReadOnly(env));
+        // v2.38.1 (ревью F1): вайтлист операций ДО prepare/exec.
+        // v3.3 (CR-J, J-B3): read-only = глобальный флаг ИЛИ GHA-канал без
+        // аварийного DML-флага; User-DML на GHA — блок всегда.
+        const violation = validateStatement(sql, isReadOnly(env) || ghaReadOnly);
         if (violation) return json({ error: "forbidden", reason: violation }, 403);
+        if (channel === "gha") {
+          const userViolation = ghaUserDmlViolation(sql);
+          if (userViolation) return json({ error: "forbidden", reason: userViolation }, 403);
+        }
         // v2.42.3-FM (CR-C v3): перехватчики FM-движка — ПОСЛЕ валидации, ДО
         // D1: CPU-пожиратели приложения (heal 1970-01-01, fallback-скан
         // GpsPoint) отвечаются из StatsRollup; промах шаблона — fallthrough.
@@ -2196,7 +2256,9 @@ const worker = {
         // v2.38.1 (ревью F1): вайтлист операций — ВСЕ стейтменты батча ДО
         // построения prepare-объектов (атомарный batch не начинает исполняться)
         // v2.38.2 (ревью F33): + read-only флаг (один вызов isReadOnly на батч)
-        const batchReadOnly = isReadOnly(env);
+        // v3.3 (CR-J, J-B3): read-only = глобальный флаг ИЛИ GHA-канал без
+        // аварийного DML-флага; User-DML на GHA — блок всегда.
+        const batchReadOnly = isReadOnly(env) || ghaReadOnly;
         for (const s of statements) {
           if (typeof s?.sql !== "string" || s.sql.length === 0) {
             return json({ error: "each statement requires non-empty sql" }, 400);
@@ -2204,6 +2266,10 @@ const worker = {
           const violation = validateStatement(s.sql, batchReadOnly);
           if (violation) {
             return json({ error: "forbidden", reason: violation }, 403);
+          }
+          if (channel === "gha") {
+            const userViolation = ghaUserDmlViolation(s.sql);
+            if (userViolation) return json({ error: "forbidden", reason: userViolation }, 403);
           }
         }
         const stmts = statements.map((s) => {

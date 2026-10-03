@@ -986,6 +986,12 @@ max(10 мин, SESSION_GAP_MS×10) не меняется (сессия живё�
 
 #### Рунбук деплоя v3.1 (когда появится CF-токен с правом Workers Scripts:Edit)
 
+> **v3.3 (CR-J): РУНБУК НИЖЕ — ИСТОРИЧЕСКИЙ (SUPERSEDED).** Исполнен 03.10
+> 14:35 UTC (CR-I, деплой v3.2) и ОБНОВЛЁН 03.10 ~16:30 UTC (CR-J, v3.3 —
+> hardening GHA-канала). Актуальный рунбук: §17.2. Разночтения старого текста
+> (FM_TRIP_MERGE_MAX_SEC=1800, /health 2.44.0) — НЕ использовать: 1800
+> порождал флип-флоп сплит-vs-merge (директива METHODOLOGY.md: 900).
+
 0. Сверить текущие биндинги: `GET /accounts/{acc}/workers/scripts/d1-gateway/settings`
    (брать значения оттуда; на 01.10: 13 биндингов — 6 plain_text, 5 secret, DB, KV).
 1. Собрать бандл: `esbuild cloudflare-worker/d1-gateway.js --bundle --format=esm --platform=neutral`
@@ -1155,3 +1161,80 @@ SESSION_SECRET/TURSO_AUTH_TOKEN пережили PUT). Расписания не
 Откат: PUT бандла v3 (артефакт CR-C) или v3.1 (коммит ba957f1) тем же
 методом; биндинги SESSION_GAP_MS/FM_TRIP_MERGE_MAX_SEC можно не снимать
 (код v3 их не читает) — снять при необходимости через settings PUT.
+
+## §17. 2026-10-03 (CR-J): кодревью топ-архитектора — hardening GHA-канала v3.3, фиксы логики поездок/сессий/zip/auth, CI артефактов
+
+**Директива юзера:** «теперь сделай кодревью как топ ит-архитектор и кодер
+и устрани мажорные косяки». Три параллельных ревью-агента (src/lib логика
+поездок 7/10; API/security 8.5/10; CI/ops 6/10) + личный аудит d1-gateway.
+Полные отчёты: tmp-scripts/cr-j/cr-j-{a,b,c}-report.md (песочница).
+
+### 17.1 Что исправлено (мажорные, все — код+деплой/CI)
+
+- **F-01/J-B3 (P0-паттерн):** хардкод прод-секрета шлюза в
+  scripts/repair-trips-n4.ts (мёртв после ротации 25.09, но паттерн) →
+  env-параметр; check-secrets.sh: паттерн №5 «голые hex ≥ 40 в исходниках»;
+  сканер подключён к CI. Прод-секрет GHA-канала ротирован при деплое v3.3
+  (см. 17.2 шаг 2) и переведён из plain_text (читался через GET /settings)
+  в secret_text.
+- **J-B3 (P1):** канальные привилегии шлюза — gatewaySecretChannel()
+  возвращает канал; GHA — read-only ПО УМОЛЧАНИЮ (бэкапу достаточно SELECT);
+  аварийный DML — временный биндинг GATEWAY_GHA_DML="true"; таблица User
+  (passwordHash/apiKey) — read-only на GHA-канале ВСЕГДА. PAT-компрометация
+  GitHub больше не даёт DML к аккаунтам прод-D1.
+- **J-a-1 (P1, монстро-поездки):** computeActiveTrip дегенеративный фолбэк
+  «span одним leg» при ВСЕХ moving-дырах ≥ splitSec удалён — пустые legs =
+  EMPTY (канон §4.11: движение в дырах не принадлежит поездке; прод-кейс
+  cc109d9b 03.10: 3 GPS-телепорта → монстр).
+- **J-a-2 (P1, рассинхрон метрик):** computeTripStats нормализует скорости
+  ПОСЕССИОННО (loadTripPointsBySession) — как канон trip-grouping N-5;
+  инвариант «инкрементальное ≡ полный пересчёт» восстановлен.
+- **J-a-3 (P1, data loss):** NaN endTime Trip инвертировал гвард «до окна —
+  чужая история» → тихое удаление исторических поездок. Теперь NaN —
+  неприкосновенен (fail-safe в сторону сохранности).
+- **J-a-4 (P2, квота):** assignTripOnSessionFinalize — только при реальном
+  переходе recording→completed (rowsAffected>0); дублирующие финализаторы
+  больше не гоняют полный recompute.
+- **J-a-8 (P2, «— км — мин»):** computeTripStats=null на пустом составе →
+  retireEmptyTrip (отцеп сессий + soft-delete, семантика F7) — мусорная
+  строка не висит вечно и не жгёт квоту tsw-ретраями.
+- **J-B1 (P1, zip-бомба):** import/zip — стриминговая распаковка
+  DecompressionStream("deflate-raw") с капом 96 МБ ДО выделения памяти
+  (прежде getData() раздувал весь entry, проверка была после OOM).
+- **J-B2 (P1):** абсолютный TTL сессий 7 сут (payload.fiat переносится
+  продлениями; украденная cookie больше не живёт вечно через sliding).
+- **F-02 (P1, деплой-дрейф):** wrangler.toml [vars] + живые
+  SESSION_GAP_MS=900000 / FM_TRIP_MERGE_MAX_SEC=900 — «wrangler deploy»
+  больше не откатывает фиксы CR-I молча.
+- **F-03 (P1):** CI: шаг «Cloudflare Worker bundle check» (esbuild → node
+  --check) — зелёный CI больше не пропускает битый деплой-артефакт.
+- **F-05/F-08 (P1/P2):** trip-heal.yml: dry_run default TRUE (клик ≠ живой
+  DELETE) + тормоз цепочки (≥3 из последних 6 прогонов провалены → стоп).
+- **F-06 (P1):** backup: drill-провал → exit 3 (прогон красный, уведомление
+  GitHub) + SLACK_WEBHOOK_URL передан в workflow (раньше алерт молчал).
+- **F-04 (P1):** рунбук §14.3 помечен SUPERSEDED (1800/2.44.0 откатили бы
+  прод) — актуальный ниже.
+- **Ложная находка M-5 закрыта:** «branches: ain]» в ci.yml — артефакт
+  отображения транспорта (байт-проверка: [main] с первого коммита); задокументировано правило байт-сверки "[m"-строк.
+
+### 17.2 Рунбук деплоя v3.3 (актуальный)
+
+0. Сверить биндинги: GET /accounts/b8e4eee2f19ba22f8d9ccce80691e719/workers/
+   scripts/d1-gateway/settings (ожидание: SESSION_GAP_MS=900000,
+   FM_TRIP_MERGE_MAX_SEC=900, GATEWAY_GHA_DML отсутствует).
+1. Бандл: npx esbuild cloudflare-worker/d1-gateway.js --bundle
+   --format=esm --platform=neutral (node --check обязателен; теперь и в CI).
+2. PUT воркера (multipart, keep_secrets=true; main_module
+   gateway-v3.3.js; compatibility_date 2026-09-01): plain-биндинги как в
+   wrangler.toml [vars] + DB + KV (id — в wrangler.toml) + биндинг
+   GHA_GATEWAY_SECRET как
+   {"type":"secret_text","text":"<НОВОЕ значение>"} (ротация одновременно
+   с PUT репо-секретов D1_GATEWAY_SECRET и GHA_GATEWAY_SECRET — libsodium
+   sealed box). GATEWAY_GHA_DML НЕ задавать (аварийный DML — временно
+   через settings PUT, после операции снять).
+3. Расписания не трогать (*/1 + 0 3).
+4. Проверка: /health → 2.46.0; SELECT 1 новым GHA-секретом → 200;
+   INSERT/UPDATE новым GHA-секретом → 403 (read-only); старым
+   GHA-значением → 401; SELECT 1 основным секретом (приложение) → 200;
+   сайт /api/trips → 200; workflow_dispatch backup.yml → success (drill
+   ok). Откат: PUT бандла v3.2 (коммит 5304962) тем же методом.

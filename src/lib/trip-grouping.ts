@@ -385,10 +385,18 @@ export async function recomputeTripsForDevice(
       const parsed = JSON.parse(String(r.sessionIds ?? "[]"));
       if (Array.isArray(parsed)) ids = parsed.map(String);
     } catch { /* битый JSON — treated as empty */ }
+    // v3.3 (CR-J, ревью J-a-3): битая ISO-строка → NaN. Прежний код пускал NaN
+    // дальше: матчинг Math.abs(NaN - x) <= MATCH_MS = false (никогда не матчится),
+    // а гвард «до окна — чужая история» NaN < windowStart = false (НЕ защищает)
+    // → историческая поездка с битым endTime тихо УДАЛЯЛАСЬ (+ Session.tripId=NULL).
+    // Теперь NaN маркируется явно и такие строки НЕПРИКОСНОВЕННЫ для удаления
+    // (окно определить нельзя — data loss запрещён); матчиться они всё равно не
+    // могут. Чинить битые строки — рунбук/SQL-скрипт, не пересчёт.
+    const endTimeMsRaw = r.endTime == null ? 0 : new Date(String(r.endTime)).getTime();
     existing.push({
       id: String(r.id),
       startTimeMs: new Date(String(r.startTime)).getTime(),
-      endTimeMs: r.endTime == null ? 0 : new Date(String(r.endTime)).getTime(),
+      endTimeMs: Number.isFinite(endTimeMsRaw) ? endTimeMsRaw : Number.NaN,
       sessionIds: ids,
       sessionCount: Number(r.sessionCount ?? 0),
     });
@@ -500,7 +508,9 @@ export async function recomputeTripsForDevice(
   const deletedIds: string[] = [];
   for (const e of existing) {
     if (matchedExisting.has(e.id)) continue;
-    if (e.endTimeMs < windowStart) continue; // до окна — чужая история
+    // v3.3 (CR-J, J-a-3): NaN endTime (битая строка) — окно неопределимо →
+    // НЕ удаляем (fail-safe в сторону сохранности данных, не потери).
+    if (!Number.isFinite(e.endTimeMs) || e.endTimeMs < windowStart) continue; // до окна/битая дата — чужая история
     deletedIds.push(e.id);
   }
   for (const id of deletedIds) {

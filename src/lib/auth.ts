@@ -14,12 +14,22 @@ import { sessionCookieName, isProduction } from "./cookie-name";
 const COOKIE_NAME = sessionCookieName();
 const COOKIE_TTL_SEC = 86400; // 24 часа
 const RENEW_THRESHOLD_SEC = 3600; // обновляем если до exp < 1 часа
+// v3.3 (CR-J, ревью J-B2): АБСОЛЮТНЫЙ потолок жизни сессии (7 суток от ПЕРВОЙ
+// выдачи). Проблема: stateless HMAC-cookie + sliding-renewal в /api/auth/me —
+// украденная cookie продлевается бесконечно, пока вор живёт и пароль не меняется
+// (pwdFp F29 отзывает только при смене пароля). Теперь payload несёт fiat
+// (first-issued-at), продление ПЕРЕНОСИТ его из старой cookie — абсолютный
+// срок не сбрасывается. По истечении — 401, нужен честный логин. Cookie БЕЗ fiat
+// (до v3.3) — fiat = iat (им не больше суток от ревью).
+const SESSION_ABSOLUTE_TTL_SEC = 7 * 86400;
 
 // Multi-user cookie payload: either legacy owner OR per-user.
 interface OwnerPayload {
   sub: "owner";
   iat: number;
   exp: number;
+  // v3.3 (CR-J, J-B2): время ПЕРВОЙ выдачи цепочки продлений (абсолютный TTL).
+  fiat?: number;
   // v2.38.2 (ревью F29): отпечаток пароля владельца — см. pwdFingerprint().
   pwdFp: string;
 }
@@ -29,6 +39,8 @@ interface UserPayload {
   role: string;
   iat: number;
   exp: number;
+  // v3.3 (CR-J, J-B2): время ПЕРВОЙ выдачи цепочки продлений (абсолютный TTL).
+  fiat?: number;
   // v2.38.2 (ревью F29): отпечаток passwordHash пользователя — см. pwdFingerprint().
   pwdFp: string;
 }
@@ -125,7 +137,7 @@ export function clearSessionCookie(response: NextResponse): void {
 }
 
 // === Legacy single-user cookie issue ===
-export async function issueSessionCookie(): Promise<{
+export async function issueSessionCookie(firstIssuedAt?: number): Promise<{
   sessionId: string;
   expiresAt: string;
   cookieValue: string;
@@ -135,6 +147,8 @@ export async function issueSessionCookie(): Promise<{
     sub: "owner",
     iat: now,
     exp: now + COOKIE_TTL_SEC,
+    // v3.3 (CR-J, J-B2): fiat переживает продления — абсолютный TTL от первой выдачи
+    fiat: firstIssuedAt ?? now,
     // v2.38.2 (ревью F29): отпечаток LOGIN_PASSWORD — смена пароля владельца
     // инвалидирует все owner-cookie (проверяется в verifySessionCookieFromRequest)
     pwdFp: await pwdFingerprint("owner", env().LOGIN_PASSWORD),
@@ -151,7 +165,7 @@ export async function issueSessionCookie(): Promise<{
 }
 
 // === Multi-user cookie issue ===
-export async function issueUserCookie(user: UserRow): Promise<{
+export async function issueUserCookie(user: UserRow, firstIssuedAt?: number): Promise<{
   sessionId: string;
   expiresAt: string;
   cookieValue: string;
@@ -164,6 +178,8 @@ export async function issueUserCookie(user: UserRow): Promise<{
     role: user.role,
     iat: now,
     exp: now + COOKIE_TTL_SEC,
+    // v3.3 (CR-J, J-B2): fiat переживает продления — абсолютный TTL от первой выдачи
+    fiat: firstIssuedAt ?? now,
     // v2.38.2 (ревью F29): отпечаток passwordHash на момент ВЫДАЧИ; при каждой
     // проверке пересчитывается по свежей строке User — смена пароля/сброс
     // админом убивает все ранее выданные cookie этого пользователя.
@@ -205,6 +221,12 @@ export async function verifySessionCookieFromRequest(
 
   const now = Math.floor(Date.now() / 1000);
   if (payload.exp < now) return { ok: false };
+
+  // v3.3 (CR-J, ревью J-B2): абсолютный потолок жизни сессии — от ПЕРВОЙ выдачи
+  // (fiat), а не от последнего продления. Украденная cookie больше не живёт
+  // бесконечно через sliding-renewal: максимум 7 суток с момента логина.
+  const fiat = typeof payload.fiat === "number" && payload.fiat > 0 ? payload.fiat : payload.iat;
+  if (now - fiat > SESSION_ABSOLUTE_TTL_SEC) return { ok: false };
 
   const needsRenewal = payload.exp - now < RENEW_THRESHOLD_SEC;
 

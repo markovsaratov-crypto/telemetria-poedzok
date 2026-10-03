@@ -59,6 +59,12 @@ jobs:
           INGEST_TOKEN: ${{ secrets.INGEST_TOKEN }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          # v3.3 (CR-J, ревью F-06): webhook раньше НЕ передавался из workflow —
+          # провал drill'а шёл в Slack «best-effort», которого не было: единственный
+          # автоматический сигнал о невосстановимом бэкапе молчал. Секрет
+          # SLACK_WEBHOOK_URL в репо опционален (не задан → алерты только в
+          # журнал/аудит, exit 3 всё равно роняет прогон).
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           WORKER_ID: backup-gha-01
         run: bun scripts/backup-remote.ts
 

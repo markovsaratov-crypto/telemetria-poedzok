@@ -38,6 +38,84 @@ function findCol(headers: string[], names: string[]): number {
   return -1;
 }
 
+// v3.3 (CR-J, ревью J-B1): zip-бомба — КАП ВО ВРЕМЯ РАСПАКОВКИ, не после.
+// Прежний код верил declared entry.header.size (контроль ОТПРАВИТЕЛЯ) и
+// проверял фактическую длину ТОЛЬКО после entry.getData() — а getData()
+// уже раздул весь entry в память: архив 1 КБ с заявленным size=1 и реальным
+// inflate-потоком в ГБ убивал изолейт воркера OOM'ом до всякой проверки.
+// Теперь ZIP-метод 8 (deflate) распаковывается СТРИМОМ DecompressionStream
+// ("deflate-raw" — Web Streams, есть и в workerd, и в Node ≥18, и в Bun) со
+// счётчиком байт: превышение капа → reader.cancel() + честный 400. Метод 0
+// (stored) — прямой slice с той же проверкой. Прочие методы/повреждённая
+// структура — fallback на getData() (легаси-путь с пост-проверкой; такие
+// архивы создаёт не SensorLogger и не атакующий — нестандартный метод выбирает
+// упаковщик, а не отправитель вредоносного payload).
+const ENTRY_DECOMPRESS_CAP_BYTES = 96 * 1024 * 1024; // 96 МБ — потолок честного Location.csv (~1,5 млн точек); в раме воркера (128 МБ) живёт и парс
+
+class ZipBombError extends Error {
+  constructor(capBytes: number) {
+    super(`ZIP entry exceeds decompression cap (${capBytes} bytes) — zip-bomb protection`);
+    this.name = "ZipBombError";
+  }
+}
+
+/** Минимальный структурный тип entry (без зависимости от экспортов типов
+ * adm-zip): локальный заголовок (offset/method/compressedSize) + легаси-путь. */
+type CappedZipEntry = {
+  header: { offset: number; method: number; compressedSize: number };
+  getData(): Buffer;
+};
+
+async function inflateEntryCapped(fileBuffer: Buffer, entry: CappedZipEntry, capBytes: number): Promise<Buffer> {
+  const method = entry.header.method;
+  if (method !== 8 && method !== 0) {
+    return entry.getData(); // редкий метод (bzip2 и т.п.) — легаси-путь
+  }
+  // Локальный заголовок ZIP: 30 байт фикс; nameLen(26,2 LE) + extraLen(28,2 LE).
+  const localOff = entry.header.offset;
+  if (!Number.isInteger(localOff) || localOff < 0 || localOff + 30 > fileBuffer.length) {
+    return entry.getData(); // повреждённая структура — пусть adm-zip сам решает
+  }
+  const nameLen = fileBuffer.readUInt16LE(localOff + 26);
+  const extraLen = fileBuffer.readUInt16LE(localOff + 28);
+  const dataStart = localOff + 30 + nameLen + extraLen;
+  const compSize = entry.header.compressedSize;
+  if (!Number.isInteger(compSize) || compSize < 0 || dataStart + compSize > fileBuffer.length) {
+    return entry.getData();
+  }
+  const raw = fileBuffer.subarray(dataStart, dataStart + compSize);
+  if (method === 0) {
+    // stored: данные лежат как есть — проверка ДО копирования
+    if (raw.length > capBytes) throw new ZipBombError(capBytes);
+    return Buffer.from(raw);
+  }
+  // deflate-raw: стрим с счётчиком
+  const ds = new DecompressionStream("deflate-raw");
+  const writer = ds.writable.getWriter();
+  const reader = ds.readable.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  // TS-strictness BufferSource (Buffer<ArrayBufferLike> vs ArrayBufferView<ArrayBuffer>):
+  // at runtime Buffer is a full-fledged BufferSource; we don't make a compSize copy.
+  const pump = writer.write(raw as unknown as BufferSource).then(() => writer.close()).catch(() => undefined);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > capBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new ZipBombError(capBytes);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    await pump;
+    try { writer.releaseLock(); } catch { /* закрыт/ошибка — не важно */ }
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c)));
+}
+
 export async function POST(request: NextRequest) {
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
   try {
@@ -91,28 +169,29 @@ export async function POST(request: NextRequest) {
     }
 
     // Find Location.csv and Metadata.csv
-    // v2.18.0 (P1): проверка ФАКТИЧЕСКОГО распакованного размера. Заявленный
-    // header.size контролируется отправителем независимо от inflate-потока —
-    // zip-бомба с крошечным заявленным размером проходила декомпрессию без
-    // ограничений. getData() уже возвращает готовый Buffer — сверяем его длину.
+    // v2.18.0 (P1) + v3.3 (CR-J, J-B1): проверка ФАКТИЧЕСКОГО распакованного
+    // размера ТЕПЕРЬ ВО ВРЕМЯ распаковки (inflateEntryCapped): заявленный
+    // header.size — контроль отправителя и ловился только ПОСЛЕ полного
+    // разжатия в память. Катастрофа (zip-бомба) отсекается стримом по капу.
     let locationCsv = "";
     let metadataCsv = "";
-    for (const entry of entries) {
-      const lower = entry.entryName.toLowerCase();
-      if (lower === "location.csv" || (lower.startsWith("location") && lower.endsWith(".csv"))) {
-        const data = entry.getData();
-        if (data.length > MAX_UNCOMPRESSED_BYTES) {
-          return json({ error: "ZIP entry too large after decompression (zip-bomb protection)" }, 400, { "X-Request-Id": requestId });
+    try {
+      for (const entry of entries) {
+        const lower = entry.entryName.toLowerCase();
+        if (lower === "location.csv" || (lower.startsWith("location") && lower.endsWith(".csv"))) {
+          const data = await inflateEntryCapped(fileBuffer, entry, ENTRY_DECOMPRESS_CAP_BYTES);
+          locationCsv = data.toString("utf8");
         }
-        locationCsv = data.toString("utf8");
-      }
-      if (lower === "metadata.csv" || (lower.startsWith("metadata") && lower.endsWith(".csv"))) {
-        const data = entry.getData();
-        if (data.length > 1024 * 1024) {
-          return json({ error: "Metadata.csv too large after decompression" }, 400, { "X-Request-Id": requestId });
+        if (lower === "metadata.csv" || (lower.startsWith("metadata") && lower.endsWith(".csv"))) {
+          const data = await inflateEntryCapped(fileBuffer, entry, 1024 * 1024);
+          metadataCsv = data.toString("utf8");
         }
-        metadataCsv = data.toString("utf8");
       }
+    } catch (err) {
+      if (err instanceof ZipBombError) {
+        return json({ error: "ZIP entry too large after decompression (zip-bomb protection)" }, 400, { "X-Request-Id": requestId });
+      }
+      throw err;
     }
 
     if (!locationCsv) {

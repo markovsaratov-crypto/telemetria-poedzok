@@ -156,7 +156,7 @@ const pairs = await env.DB.prepare(
 
 ## 6. ДЕПЛОЙ-ИНСТРУКЦИЯ (следующему агенту; прод сейчас НЕ тронут)
 
-Контексты: аккаунт CF `b8e4eee2f19ba22f8d9ccce80691e719`; CF API-токен в песочнице `.cloudflare/dns-token.txt` ([REDACTED:CF_TOKEN]; права Workers Scripts/KV/Schedules — D1 REST закрыт, не нужен); воркер `d1-gateway`; БД D1 `9dec0a90-7d38-46ae-9921-29eb83706b3d`; KV `be49735094b14ad3a41e053c4b1cd308`; GitHub PAT для репо-секретов — из карточки задачи ([REDACTED:GITHUB_PAT], только в askpass/заголовке, НЕ на диск). Артефакт: `/home/z/my-project/download/telemat-cr/gateway-v3.js`.
+Контексты: аккаунт CF `b8e4eee2f19ba22f8d9ccce80691e719`; CF API-токен в песочнице `.cloudflare/dns-token.txt` ([REDACTED:CF_TOKEN]; права Workers Scripts/KV/Schedules — D1 REST закрыт, не нужен); воркер `d1-gateway`; БД D1 `9dec0a90-7d38-46ae-9921-29eb83706b3d`; KV `be49735094b14ad3a41e053c4b1cd308`; GitHub PAT для репо-секретов — из карточки задачи ([REDACTED:GITHUB_PAT], только в askpass/заголовке, НЕ на диск). Артефакт: `/home/z/my-project/download/telemat-cr/gateway-v3.js`. <!-- # public-placeholder: публичные ID аккаунта/БД/KV/DNS, не секреты -->
 
 ### Шаг 0. Прекомпьютер-проверка (read-only)
 ```bash

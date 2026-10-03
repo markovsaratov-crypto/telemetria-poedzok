@@ -16,8 +16,8 @@ import {
 import { deriveIngestToken as deriveIngestTokenApp, INGEST_TOKEN_RE } from "../src/lib/token-check";
 
 const NOW = Date.parse("2026-09-20T12:00:00Z");
-const SECRET = "ca94627b90fa31c7c6faecf715b09d62809b11ce10e79d78";
-const API_KEY = "037d2343956dd5dd598fa6ef7569bbc15a216e6415136219";
+const SECRET = "ca94627b90fa31c7c6faecf715b09d62809b11ce10e79d78"; // # public-placeholder — тест-вектор HMAC, не секрет
+const API_KEY = "037d2343956dd5dd598fa6ef7569bbc15a216e6415136219"; // # public-placeholder — тест-вектор HMAC, не секрет
 
 describe("§C P2: it_-токен — паритет edge-порта с приложением", () => {
   it("deriveItToken ≡ token-check.ts deriveIngestToken (тот же HMAC)", async () => {

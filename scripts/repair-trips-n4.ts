@@ -6,8 +6,17 @@ import { computeSessionStats } from "../src/lib/session-stats";
 import type { MethodologyPoint } from "../src/lib/active-trip";
 import type { SessionStatsResult } from "../src/lib/session-stats";
 
-const GW = "https://d1-gateway.markov-saratov.workers.dev";
-const GS = "abf5c5a6a43347d9cde1e40805d139eaccd950c923f72de6";
+const GW = process.env.D1_GATEWAY_URL || "https://d1-gateway.markov-saratov.workers.dev";
+// v3.3 (CR-J, ревью F-01): секрет шлюза ТОЛЬКО из окружения. Прежний хардкод
+// (48 hex) прожил в публичном репо с 20.09 по 25.09 — живой канал DML к
+// прод-D1 в открытом доступе (мёртв после ротации 25.09, но паттерн —
+// «константа в коде» — устранён: повтор невозможен, сканер check-secrets.sh
+// теперь ловит голые hex-константы в исходниках и подключён к CI).
+const GS = process.env.GATEWAY_SECRET || process.env.D1_GATEWAY_SECRET || "";
+if (!GS) {
+  console.error("Отсутствует GATEWAY_SECRET (или D1_GATEWAY_SECRET) — задайте в окружении. Значения — рунбук ротации docs/SECURITY-ROTATION.md.");
+  process.exit(1);
+}
 
 async function query(sql: string, args: unknown[] = []) {
   const res = await fetch(`${GW}/query`, {

@@ -407,7 +407,24 @@ export function computeActiveTrip(
       ? keptCandidates
       : rawLegs.length > 0
         ? [rawLegs.reduce((a, b) => (b.endTime - b.startTime > a.endTime - a.startTime ? b : a))]
-        : [{ startTime: activeStartTs, endTime: activeEndTs, idleSec: 0 }]; // degenerate: span одним leg
+        : []; // v3.3 (CR-J, J-a-1): дыры ≥ splitSec — НЕ поездки, легаси-фолбэк «span одним leg» удалён
+
+  // v3.3 (CR-J, ревью J-a-1): прежний дегенеративный fallback фабриковал ОДИН
+  // leg на весь активный span, когда rawLegs пуст — т.е. когда КАЖДЫЙ
+  // moving-интервал записи сам был дырой ≥ splitSec (полностью деградировавший
+  // логгер: блипы ≥ 15 мин; прод-кейс 03.10 cc109d9b — 135/137 точек в одной
+  // точке + 3 GPS-телепорта). Это прямое нарушение канона §4.11/§4.6а («дыра
+  // ≥ 900 c — граница при любой природе: точки по краям дыры — разные поездки»):
+  // монстро-поездка на весь span с дистанцией, интегрирующей телепорты, и
+  // activeDuration == span. Канонный ответ: движение в дырах не принадлежит
+  // НИ ОДНОЙ поездке → активной части нет (как при отсутствии moving вовсе —
+  // ветка EMPTY выше). trip-grouping guard `legs.length === 0` отработает как
+  // для «нет движения»: поездка из одних дыр не создаётся; inActiveLegs для
+  // пустых legs вернёт false (hasActiveTrip=false) — энергия/события дыр
+  // больше не приписываются монстру.
+  if (finalRaw.length === 0) {
+    return { ...EMPTY_ACTIVE_TRIP };
+  }
 
   const legs: ActiveTripLeg[] = finalRaw.map((l) => ({
     startTime: l.startTime,

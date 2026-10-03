@@ -74,6 +74,21 @@ $suspicious"
   fi
 fi
 
+# --- 5. v3.3 (CR-J, ревью F-01): ГОЛЫЕ длинные hex-константы в ИСХОДНИКАХ ---
+# Инцидент-мотивация: const GS = "<48 hex>" в scripts/repair-trips-n4.ts — имя
+# переменной не содержит KEY/SECRET/TOKEN/PASSWORD → паттерн №4 слеп. Секрету
+# всё равно, как его назвали. Сканируем код (*.ts/*.js/*.tsx/*.mjs/*.sh/*.yml/
+# *.yaml/*.json/*.jsonc — НЕ *.md: там легитимные sha256-чексуммы релизов) на
+# hex-раны ≥ 40 без дефисов (UUID/ULID с дефисами не матчатся; KV-id 32 hex —
+# ниже порога). Исключения: маркер # public-placeholder в конце строки.
+SRC_GLOB=(':!bun.lock' ':!package-lock.json' ':!bun.lockb' ':!*.md')
+bare_hex=$(git grep -I -n -E '(^|[^0-9a-fA-F-])[0-9a-fA-F]{40,}($|[^0-9a-fA-F-])' -- '*.ts' '*.js' '*.tsx' '*.mjs' '*.sh' '*.yml' '*.yaml' '*.json' '*.jsonc' "${SRC_GLOB[@]}" 2>/dev/null | grep -v '# *public-placeholder' || true)
+if [ -n "$bare_hex" ]; then
+  say_fail "голые hex-константы >= 40 символов в исходниках (секрет в коде? если безопасное
+значение — маркер # public-placeholder в конец строки):
+$bare_hex"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "—" >&2
   echo "Ротация скомпрометированных секретов: docs/SECURITY-ROTATION.md" >&2

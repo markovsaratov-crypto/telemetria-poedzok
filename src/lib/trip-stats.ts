@@ -34,6 +34,7 @@ import { inc } from "./metrics";
 import { getTtlCache } from "./ttl-cache";
 import { computeSessionStats, composeRoute, type RoutePlanFact, type FullSessionStatsPayload, type SessionStatsResult } from "./session-stats";
 import { getCorpusEcoBaselines } from "./eco-corpus";
+import { normalizeSessionSpeeds } from "./kpi"; // v3.3 (CR-J, J-a-2): посессионная B-4-нормализация — как в trip-grouping
 import type { EcoScoreBaselines } from "./metrics-methodology";
 import type { MethodologyPoint } from "./active-trip";
 
@@ -164,6 +165,21 @@ export async function loadTripById(tripId: string): Promise<TripRow | null> {
 
 /** Конкатенированный поток точек поездки (asc), чанками параллельно. */
 export async function loadTripPoints(sessionIds: string[]): Promise<MethodologyPoint[]> {
+  const groups = await loadTripPointsBySession(sessionIds);
+  return groups.flat();
+}
+
+/** v3.3 (CR-J, ревью J-a-2): точки состава, СГРУППИРОВАННЫЕ ПО ЗАПИСЯМ.
+ * Возвращает массив групп (каждая — точки одной сессии asc по timestamp,
+ * группы упорядочены по первой точке). Нужно для посессионной B-4-нормализации
+ * скоростей в computeTripStats — критерий «глобальной несогласованности»
+ * (медиана поля speed < 0,4×геометрии) — свойство ЗАПИСИ, а не склейки:
+ * trip-grouping.ts нормализует ТОЧНО так же (v2.40.7 N-5). Прежний единый
+ * поток лишал битую запись (кейс 920ff881: мусорное speed при честной
+ * геометрии) шанса на пересчёт — честные соседи по склейке разбавляли медиану,
+ * хвост становился idle, дистанция/activeDuration поездки занижались относительно
+ * канона (инвариант «инкрементальное вливание ≡ полный пересчёт» нарушался). */
+export async function loadTripPointsBySession(sessionIds: string[]): Promise<MethodologyPoint[][]> {
   if (sessionIds.length === 0) return [];
   const CHUNK = 8;
   const chunks: string[][] = [];
@@ -172,16 +188,22 @@ export async function loadTripPoints(sessionIds: string[]): Promise<MethodologyP
     chunks.map((chunk) => {
       const ph = chunk.map(() => "?").join(", ");
       return libsql.execute({
-        sql: `SELECT lat, lon, speed, altitude, accuracy, bearing, timestamp
+        sql: `SELECT sessionId, lat, lon, speed, altitude, accuracy, bearing, timestamp
               FROM GpsPoint WHERE sessionId IN (${ph}) ORDER BY timestamp ASC`,
         args: chunk,
       });
     })
   );
-  const out: MethodologyPoint[] = [];
+  const bySession = new Map<string, MethodologyPoint[]>();
   for (const res of results) {
     for (const r of res.rows as Record<string, unknown>[]) {
-      out.push({
+      const sid = String(r.sessionId);
+      let arr = bySession.get(sid);
+      if (!arr) {
+        arr = [];
+        bySession.set(sid, arr);
+      }
+      arr.push({
         lat: Number(r.lat),
         lon: Number(r.lon),
         speed: r.speed == null ? null : Number(r.speed),
@@ -192,8 +214,9 @@ export async function loadTripPoints(sessionIds: string[]): Promise<MethodologyP
       });
     }
   }
-  out.sort((a, b) => a.timestamp - b.timestamp);
-  return out;
+  const groups = [...bySession.values()];
+  groups.sort((a, b) => (a[0]?.timestamp ?? 0) - (b[0]?.timestamp ?? 0));
+  return groups;
 }
 
 export interface TripStatsPayload {
@@ -222,6 +245,36 @@ export interface TripStatsPayload {
 }
 
 /**
+ * v3.3 (CR-J, ревью J-a-8): ретир мусорной поездки БЕЗ точек. Семантика =
+ * движок fmRetire шлюза (F7): отцепить сессии (tripId → NULL — иначе dangling,
+ * RC-C) + мягко удалить строку (deletedAt — обратимо). Идемпотентен
+ * (WHERE deletedAt IS NULL), ошибки не роняют вызывающий расчёт (non-fatal).
+ * Вызывается из computeTripStats, когда состав не даёт ни одной точки —
+ * раньше такая строка висела «— км — мин» вечно, а tsw-прогрев ретраил её
+ * каждые 10 минут, сжигая квоту D1.
+ */
+async function retireEmptyTrip(tripId: string): Promise<void> {
+  const now = new Date().toISOString();
+  try {
+    await libsql.execute({
+      sql: `UPDATE Session SET tripId = NULL, updatedAt = ? WHERE tripId = ?`,
+      args: [now, tripId],
+    });
+    await libsql.execute({
+      sql: `UPDATE Trip SET deletedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL`,
+      args: [now, now, tripId],
+    });
+    inc("trip_retired_empty_total", "Empty trip retired (no points in composition/slice)", 1);
+    logger.warn("trip retired: no points in composition/slice", { tripId });
+  } catch (err) {
+    logger.warn("empty-trip retire failed (non-fatal)", {
+      tripId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
  * Полный расчёт статистики поездки — тот же конвейер, что у записи
  * (computeSessionStats), на конкатенированном потоке точек. План-факт — из
  * поездкового TrafficJob. Кэш пишется в Trip.* (null-поля означают «не
@@ -247,8 +300,27 @@ export async function computeTripStats(
   }
   inc("trip_stats_cache_miss_total", "Trip stats recomputed (fingerprint/baselines changed or cold)", 1);
 
-  const allPoints = await loadTripPoints(trip.sessionIds);
-  if (allPoints.length === 0) return null;
+  const pointGroups = await loadTripPointsBySession(trip.sessionIds);
+  if (pointGroups.length === 0 || pointGroups.every((g) => g.length === 0)) {
+    // v3.3 (CR-J, ревью J-a-8): поездка БЕЗ точек (состав удалён/мягко удалён)
+    // — мусорная строка: ретирим её (deletedAt — обратимо, семантика движка
+    // fmRetire шлюза), чтобы она не висела «— км — мин» вечно и tsw-прогрев не
+    // ретраил её каждые 10 мин, сжигая квоту D1.
+    await retireEmptyTrip(trip.id);
+    return null;
+  }
+  // v3.3 (CR-J, J-a-2): нормализация ПОСЕССИОННО — как в trip-grouping
+  // (computeTripsFromPoints v2.40.7 N-5): критерий несогласованности — свойство
+  // записи, а не склейки. Конкатенация нормализованных рядов снова сортируется.
+  const allPoints: MethodologyPoint[] = [];
+  for (const g of pointGroups) {
+    if (g.length >= 2) {
+      allPoints.push(...normalizeSessionSpeeds(g));
+    } else {
+      allPoints.push(...g);
+    }
+  }
+  allPoints.sort((a, b) => a.timestamp - b.timestamp);
 
   const spanStartMs = new Date(trip.spanStart).getTime();
   const spanEndMs = trip.spanEnd
@@ -266,7 +338,12 @@ export async function computeTripStats(
   const points = allPoints.filter(
     (p) => p.timestamp >= spanStartMs && p.timestamp <= spanEndMs
   );
-  if (points.length === 0) return null;
+  if (points.length === 0) {
+    // v3.3 (CR-J, J-a-8): окно среза пусто (span не покрывает точки) — та же
+    // мусорная строка, ретирим (обратимо) вместо вечного null-цикла прогрева.
+    await retireEmptyTrip(trip.id);
+    return null;
+  }
 
   const result: SessionStatsResult = computeSessionStats(
     {

@@ -1,7 +1,25 @@
 # CI: проверки качества на каждый push в main и на каждый PR.
-# Деплой НЕ из этого workflow: Render Blueprint авто-деплоит push в main
-# (render.yaml autoDeploy). CI = вторая линия: видим сломанный main сразу
-# (типы/линт/тесты), а не по ошибке рантайма на проде.
+# Деплой НЕ из этого workflow (рунбук docs/OPERATIONS.md §14.3: d1-gateway —
+# PUT бандла через Workers API; сайт — opennextjs-build по §16). CI = вторая
+# линия: видим сломанный main сразу (типы/линт/тесты/секреты/воркер), а не по
+# ошибке рантайма на проде.
+#
+# v3.3 (CR-J, кодревью топ-архитектора):
+#  • + ШАГ «Secrets scan» (scripts/check-secrets.sh — теперь и голые
+#    hex-константы ≥40 в исходниках; инцидент F-01: прод-секрет шлюза в
+#    публичном репо 20.09–25.09, сканер не был подключён к CI).
+#  • + ШАГ «Cloudflare Worker bundle check»: единственный код в критическом
+#    пути прода (d1-gateway: инжест + кроны + FM-движки с DELETE) теперь
+#    бандлится esbuild'ом и проходит node --check — зелёный CI больше не
+#    пропускает синтаксически битый деплой-артефакт (F-03).
+#  • npm install → npm ci (воспроизводимость сборки), timeout-minutes 15,
+#    concurrency: main — queue (полный прогон), PR — отмена устаревших.
+#  • УРОК ТРАНСПОРТА (из ревью): вывод инструментов отображает пару "[m"
+#    с артефактом "ain]" — с первого дня репо в ci.yml ЗДЕСЬ стоит
+#    branches: [main] (байт-верифицировано ord-кодами 91,109,97,105,110,93
+#    и в рабочем дереве, и в коммите 5304962). Триггер push работает.
+#    Правило: строки с "["-последовательностями сверять байтами (python
+#    ord), не глазами.
 name: CI
 
 on:
@@ -9,17 +27,34 @@ on:
     branches: [main]
   pull_request:
 
+# v3.3 (CR-J): не ронять идущий прогон main новым push (queue), в PR —
+# устаревшие прогоны отменять.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
 jobs:
   checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
+      - name: Install dependencies (npm ci — lockfile-точно)
+        run: npm ci --no-audit --no-fund
+      - name: Secrets scan (env-файлы, токен-паттерны, голые hex-константы)
+        run: bash scripts/check-secrets.sh
+      - name: Cloudflare Worker bundle check (esbuild + node --check)
+        run: |
+          npx esbuild cloudflare-worker/d1-gateway.js --bundle --format=esm --platform=neutral --outfile=/tmp/gateway-bundle.js
+          node --check /tmp/gateway-bundle.js
+          echo "gateway bundle OK: $(wc -c < /tmp/gateway-bundle.js) bytes"
       - name: Prisma generate (типы клиента, без БД)
         run: npx prisma generate
       - name: Typecheck (tsc --noEmit)

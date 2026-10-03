@@ -29,7 +29,7 @@ on:
       dry_run:
         description: "Только показать план (без записей в БД)"
         type: boolean
-        default: false
+        default: true # v3.3 (CR-J, ревью F-08): дефолт dry-run — случайный клик «Run workflow» больше не запускает живой DELETE; для боевого прогона снять галку осознанно
       deep:
         description: "Глубокая чистка (окно сирот 30 дней вместо 2)"
         type: boolean
@@ -68,12 +68,27 @@ jobs:
           HEAL_DEEP: ${{ inputs.deep == true && 'true' || 'false' }}
         run: bun scripts/trip-heal.ts
 
-      - name: Chain dispatch (самоцепочка ~5 мин, CR-H)
-        if: ${{ !cancelled() && inputs.chain == true }} # CR-I: цепочка переживает сбой шага heal (кейс 13:09 03.10 — транзиентный сокет убил цепочку)
+      # v3.3 (CR-J, ревью F-05): ТОРМОЗ ЦЕПОЧКИ. Прежний chain-шаг (!cancelled)
+      # диспетчеризовал следующий прогон даже после ПРОВАЛА heal → систематический
+      # сбой (например, GHA-канал шлюза стал read-only v3.3) крутил бы цикл
+      # каждые 5 мин СУТКАМИ (~288 failing-прогонов, квота D1/минуты GHA). Теперь:
+      # перед диспетчеризацией считаем последние 6 прогонов этого workflow через
+      # GitHub API; ≥3 подряд failure/conclusion != success → НЕ диспетчеризуем,
+      # предупреждаем (рестарт — ручной workflow_dispatch chain=true).
+      - name: Chain dispatch (самоцепочка ~5 мин, CR-H; с тормозом при серии сбоев — v3.3 CR-J)
+        if: ${{ !cancelled() && inputs.chain == true }}
         env:
           GH_PAT: ${{ secrets.HEAL_DISPATCH_PAT }}
         run: |
-          echo "chain mode: sleep 240s, then dispatch next run"
+          echo "chain mode: brake-check, sleep 240s, then dispatch next run"
+          fails=$(curl -s -H "Authorization: Bearer $GH_PAT" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/markovsaratov-crypto/telemetria-poedzok/actions/workflows/trip-heal.yml/runs?per_page=6" \
+            | jq -r '[.workflow_runs[].conclusion] | .[0:6] | map(select(. != null and . != "success" and . != "skipped" and . != "cancelled")) | length')
+          echo "последние 6 прогонов: неуспешных = $fails"
+          if [ "${fails:-0}" -ge 3 ]; then
+            echo "::warning::chain BRAKE: $fails из последних 6 прогонов провалены — цепочка останавливается (не выжигаем квоту). Рестарт после починки: workflow_dispatch chain=true"
+            exit 0
+          fi
           sleep 240
           code=$(curl -s -o /tmp/d.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer $GH_PAT" \

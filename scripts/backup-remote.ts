@@ -21,6 +21,16 @@ try {
   const r = await backupToGitHub(process.env.WORKER_ID);
   console.log("=== БЭКАП ГОТОВ ===");
   console.log(JSON.stringify({ backupId: r.backupId, releaseUrl: r.releaseUrl, assetSize: r.assetSize, checksum: r.checksum, fileSize: r.fileSize, tableCounts: r.tableCounts, drill: r.drill, elapsedSec: Math.round((Date.now() - t0) / 1000) }, null, 2));
+  // v3.3 (CR-J, ревью F-06): drill-провал — НЕ «зелёный» прогон. Прежний код
+  // глотал drill.ok=false (github-backup возвращает результат, не бросает) —
+  // workflow уходил в success при НЕВОССТАНОВИМОЙ durable-копии (обнаружилось
+  // бы только при живом restore). Exit 3 = отдельный код для «дамп есть, drill
+  // провален»: GitHub шлёт уведомление о провале scheduled-ранов, ночные
+  // алерты читаются людьми.
+  if (r.drill && r.drill.ok !== true) {
+    console.error("READ-BACK DRILL ПРОВАЛЕН: durable-копия НЕ проверена как восстановимая:", JSON.stringify(r.drill));
+    process.exit(3);
+  }
 } catch (err) {
   console.error("БЭКАП ПРОВАЛЕН:", err instanceof Error ? err.message : String(err));
   process.exit(2);

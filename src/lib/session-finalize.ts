@@ -80,7 +80,17 @@ export async function finalizeSession(sessionId: string): Promise<void> {
   });
   await ensureTrafficJob(sessionId);
   // v2.26.0 (ТЗ §7): поездки — под флагом (expand-фаза ТЗ §13); non-fatal.
-  await assignTripOnSessionFinalize(sessionId);
+  // v3.3 (CR-J, ревью J-a-4): назначение — ТОЛЬКО при реальном переходе
+  // recording→completed (rowsAffected>0). Прежний безусловный вызов гонял
+  // ПОЛНЫЙ recomputeTripsForDevice каждым дублирующим финализатором
+  // (гонки cron %5 × жнец × инжест: победитель уже назначил, проигравшие
+  // пересчитывают ту же цепочку устройства зря — квота D1 + нагрузка на HOT-пути).
+  // Born-completed-сессии (ZIP/CSV-импорт, phone-канал) сюда НЕ попадают:
+  // импорт-роуты зовут assignTripOnSessionFinalize напрямую, phone-канал
+  // усыновляет adopt-движок шлюза — покрытие не сужается.
+  if ((closed.rowsAffected ?? 0) > 0) {
+    await assignTripOnSessionFinalize(sessionId);
+  }
   // v2.27.0: прогрев кэша — только при РЕАЛЬНОМ переходе (rowsAffected>0),
   // чтобы повторные финализаторы (cron/жнец/ингест гонка) не грели зря
   if ((closed.rowsAffected ?? 0) > 0) {

@@ -62,6 +62,18 @@ EDGE_INGEST_MAX_BYTES = "1048576"
 APP_ORIGIN = "https://poedzok.fun"
 # §T-DELTA: HTTP-endpoint Turso (libSQL over HTTP v2/pipeline — мигратор дельты)
 TURSO_URL = "https://tele-markovsaratov-crypto.aws-ap-south-1.turso.io"
+# v3.2+ (CR-I, РЕВЬЮ F-02/CR-J): ЖИВЫЕ прод-биндинги продублированы в конфиг —
+# раньше они существовали ТОЛЬКО через Workers API (PUT деплоя), и `wrangler
+# deploy` из этого файла молча откатывал оба дорогих фикса к дефолтам кода:
+#   SESSION_GAP_MS=900000 — склейка фоновых сердцебиений телефона (5 мин) в
+#   ОДНУ запись вместо фабрики сирот (RC2: дефолт 60 c < интервала фона).
+#   FM_TRIP_MERGE_MAX_SEC=900 — политика склейки по METHODOLOGY.md §4.11
+#   (merge-окно == split-порог = стабильный фикс-поинт; 1800 давал флип-флоп
+#   «слил → re-split → куски снова»).
+# ВНИМАНИЕ: значения здесь = значениям живого /settings воркера; при ротации
+# менять ВЕЗДЕ синхронно (этот файл + PUT /settings + docs/OPERATIONS.md §14.3).
+SESSION_GAP_MS = "900000"
+FM_TRIP_MERGE_MAX_SEC = "900"
 
 # Секреты (задаются ОБНОВЛЁННЫМИ значениями при ротации — Workers API или
 # `wrangler secret put`): GATEWAY_SECRET, INGEST_TOKEN, CRON_SECRET (§B5:
@@ -69,15 +81,22 @@ TURSO_URL = "https://tele-markovsaratov-crypto.aws-ap-south-1.turso.io"
 # JWT базы Turso — только на время миграции дельты, отозвать после статуса
 # done через /admin/turso-migrate/status).
 
-# v3 (CR-C F0): ВТОРОЙ секрет шлюза — GHA_GATEWAY_SECRET (plain_text-биндинг).
+# v3 (CR-C F0): ВТОРОЙ секрет шлюза — GHA_GATEWAY_SECRET.
 # Канал GitHub Actions (бэкап 03:30 UTC): workflow backup.yml шлёт заголовок
 # x-gateway-secret со значением репо-секрета D1_GATEWAY_SECRET, а код шлюза
 # принимает ЛЮБОЙ из GATEWAY_SECRET | GHA_GATEWAY_SECRET (оба constant-time;
-# не задан/пуст → вторая проверка пропускается — см. gatewaySecretOk в
+# не задан/пуст → вторая проверка пропускается — см. gatewaySecretChannel в
 # d1-gateway.js). ЗНАЧЕНИЕ В РЕПО НЕ ХРАНИТСЯ: генерируется при деплое
 # (например 43 символа base62: openssl rand -base64 32 | tr -dc 'A-Za-z0-9')
-# и подставляется ЯВНЫМ plain_text-биндингом в PUT /workers/scripts/
-# d1-gateway (Workers API), синхронно с PUT репо-секрета D1_GATEWAY_SECRET
+# и подставляется ЯВНЫМ биндингом при PUT /workers/scripts/d1-gateway
+# (Workers API), синхронно с PUT репо-секрета D1_GATEWAY_SECRET
 # (libsodium sealed box, рецепт — docs/OPERATIONS.md §13). Пример для
 # локального wrangler-деплоя (не для прода — там API-метод):
 #   GHA_GATEWAY_SECRET = "<сгенерировать при деплое — см. §13>"
+#
+# v3.3 (CR-J): GHA_GATEWAY_SECRET деплоится биндингом secret_text (был
+# plain_text — читался из GET /settings любым токеном с правом чтения
+# настроек воркера). Канальные привилегии: GHA — read-only по умолчанию;
+# аварийный DML — временный биндинг GATEWAY_GHA_DML="true" (рунбук §14.3),
+# таблица User на GHA-канале read-only ВСЕГДА (см. ghaUserDmlViolation).
+# GATEWAY_GHA_DML здесь НЕ задан (= «выключен» — fail-closed).

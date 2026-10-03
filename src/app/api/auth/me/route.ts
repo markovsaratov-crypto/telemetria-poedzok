@@ -25,7 +25,14 @@ export async function GET(request: NextRequest) {
   // Multi-user: sliding renewal re-issues user cookie
   if ("userId" in session.payload && session.user) {
     if (session.needsRenewal) {
-      const renewed = await issueUserCookie(session.user);
+      // v3.3 (CR-J, J-B2): fiat (первая выдача) ПЕРЕНОСИТСЯ в продлённую cookie —
+      // абсолютный TTL не сбрасывается продлением (см. SESSION_ABSOLUTE_TTL_SEC)
+      const renewed = await issueUserCookie(
+        session.user,
+        typeof session.payload.fiat === "number" && session.payload.fiat > 0
+          ? session.payload.fiat
+          : session.payload.iat
+      );
       const response = NextResponse.json(
         {
           authenticated: true,
@@ -63,7 +70,12 @@ export async function GET(request: NextRequest) {
 
   // Legacy owner session
   if (session.needsRenewal) {
-    const renewed = await issueSessionCookie();
+    // v3.3 (CR-J, J-B2): fiat переносится — абсолютный TTL не сбрасывается
+    const renewed = await issueSessionCookie(
+      typeof session.payload.fiat === "number" && session.payload.fiat > 0
+        ? session.payload.fiat
+        : session.payload.iat
+    );
     const response = NextResponse.json(
       { authenticated: true, sessionId: renewed.sessionId, expiresAt: renewed.expiresAt, renewed: true },
       { status: 200, headers: { "X-Request-Id": requestId } }

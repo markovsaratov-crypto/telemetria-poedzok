@@ -7,7 +7,7 @@
 
 ## 0. Метод доступа к прод-данным (важно для верификации после фикса)
 
-- CF API-токен `[REDACTED:CF_API_TOKEN]` **валиден** (verify → active), аккаунт `b8e4eee2f19ba22f8d9ccce80691e719` доступен, НО **D1 REST API токену закрыт** (`GET /d1/database` → 401 auth error; `POST /d1/database/{id}/query` → 403 code 7403) — токен имеет права Workers Scripts / KV / Schedules, но не D1.
+- CF API-токен `[REDACTED:CF_API_TOKEN]` **валиден** (verify → active), аккаунт `b8e4eee2f19ba22f8d9ccce80691e719` доступен, НО **D1 REST API токену закрыт** (`GET /d1/database` → 401 auth error; `POST /d1/database/{id}/query` → 403 code 7403) — токен имеет права Workers Scripts / KV / Schedules, но не D1. <!-- # public-placeholder: публичные ID аккаунта/БД/KV/DNS, не секреты -->
 - ID БД **telemetria = `9dec0a90-7d38-46ae-9921-29eb83706b3d`** (извлечён из биндингов воркера: `GET /accounts/{acc}/workers/scripts/d1-gateway/settings`).
 - SQL выполнялся через **уже существующий** в проде воркер `telemat-metrics-fix` (создан 09-29 16:08 не прошедшими раундами, НЕ мной; биндинг D1 = та же БД): `GET https://telemat-metrics-fix.markov-saratov.workers.dev/q?sql=…` с заголовком `x-audit-key: [REDACTED:AUDIT_KEY]` (ключ зашит в коде воркера, доступен через `GET /accounts/{acc}/workers/scripts/telemat-metrics-fix`). Все запросы — строго SELECT (проверяется по meta.changed_db=false).
 - KV читался через CF API: namespace шлюза = `be49735094b14ad3a41e053c4b1cd308` (title `telemetria-kvcache-probe`).

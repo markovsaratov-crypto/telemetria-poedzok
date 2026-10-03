@@ -16,9 +16,14 @@
 # инструмент/страховку — движки переедут в воркер.
 name: trip-heal
 
+# CR-I (03.10, деплой d1-gateway v3.2): крон ОТКЛЮЧЁН — движки лечения
+# (retire F7 / softDelete F10 / adopt F6 / merge F8=900 / tsw-прогрев 10 мин)
+# переехали в воркер и тикают каждую минуту. workflow_dispatch — ручной
+# инструмент/страховка (dry-run доступен). Самоцепочка chain=true — для
+# аварийного временного каданса, если воркер-движки лягут.
 on:
-  schedule:
-    - cron: "*/5 * * * *" # каждые 5 минут (джиттер GHA возможен — не критично)
+  # schedule:
+  #   - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -56,7 +61,7 @@ jobs:
         env:
           D1_GATEWAY_URL: https://d1-gateway.markov-saratov.workers.dev
           D1_GATEWAY_SECRET: ${{ secrets.D1_GATEWAY_SECRET }}
-          TRIP_MERGE_MAX_SEC: "1800" # окно слияния «один выезд со стоянкой до 30 минут»
+          TRIP_MERGE_MAX_SEC: "900" # CR-I: единый порог по METHODOLOGY.md (= TRIP_SPLIT_SEC; 1800 давало флип-флоп сплит-vs-merge)
           HEAL_TZ: Europe/Saratov
           APP_ORIGIN: https://poedzok.fun
           HEAL_DRY_RUN: ${{ inputs.dry_run == true && 'true' || 'false' }}
@@ -64,7 +69,7 @@ jobs:
         run: bun scripts/trip-heal.ts
 
       - name: Chain dispatch (самоцепочка ~5 мин, CR-H)
-        if: ${{ inputs.chain == true }}
+        if: ${{ !cancelled() && inputs.chain == true }} # CR-I: цепочка переживает сбой шага heal (кейс 13:09 03.10 — транзиентный сокет убил цепочку)
         env:
           GH_PAT: ${{ secrets.HEAL_DISPATCH_PAT }}
         run: |

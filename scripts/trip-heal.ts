@@ -65,7 +65,10 @@ export {}; // ES-модуль (top-level await)
 // ——— конфиг из окружения ———
 const GW_URL = process.env.D1_GATEWAY_URL ?? "";
 const GW_SECRET = process.env.D1_GATEWAY_SECRET ?? "";
-const MERGE_MAX_SEC = Number(process.env.TRIP_MERGE_MAX_SEC) > 0 ? Number(process.env.TRIP_MERGE_MAX_SEC) : 1800;
+// v2 (CR-I, 03.10): дефолт 900 c = TRIP_SPLIT_SEC — ЕДИНЫЙ порог по METHODOLOGY.md
+// (§4.11/§4.11а: пауза >= 900 c — граница поездки). Окно 1800 (прошлый раунд)
+// давало флип-флоп: мост клеил <= 30 мин, приложение тут же рвало по 900 c.
+const MERGE_MAX_SEC = Number(process.env.TRIP_MERGE_MAX_SEC) > 0 ? Number(process.env.TRIP_MERGE_MAX_SEC) : 900;
 const MERGE_MAX_MS = MERGE_MAX_SEC * 1000;
 const TZ = process.env.HEAL_TZ ?? "Europe/Saratov";
 const APP_ORIGIN = (process.env.APP_ORIGIN ?? "https://poedzok.fun").replace(/\/+$/, "");

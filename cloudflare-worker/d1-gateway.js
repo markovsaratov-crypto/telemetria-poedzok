@@ -53,6 +53,30 @@
 //     данных через /query|/batch — после деплоя v3.1 его cron отключить.
 //  Мелочи: пустые catch {} → console.warn с контекстом; /health version 2.44.0.
 //
+// ─── v3.2 (CR-I, 2026-10-03 «хватит ломаться»: деплой по рунбуку §14.3 + политика склейки по METHODOLOGY.md) ───
+//  F10 fmSoftDeleteStandingOrphans: порт шага 2 GHA-моста (бой 01-03.10) —
+//     осиротевшие completed-сессии БЕЗ ДВИЖЕНИЯ (maxSpeed < 2 м/с И
+//     (bbox < 250 м ИЛИ bbox/длительность < 1,4 м/с — кейс GPS-дрейфа
+//     f53153d4)) → Session.deletedAt (мягко, обратимо; FM-роллап и
+//     приложение исключают deletedAt — счётчик «записей» не дышит мусором).
+//     Дискриминатор — ТОЛЬКО геометрия: поле speed мусорит (N-5).
+//     После остановки моста мусор выметает воркер (≤20/тик на %5-минуте,
+//     окно 2 суток, pointCount ≤ 3000; гиганты — движку adopt по-прежнему).
+//  tsw-окно: spanEnd старше 6 ЧАСОВ → 10 МИНУТ (вслед за боевой практикой
+//     моста): свежая поездка получает метрики ≤ ~15 мин, а не «— км — мин»
+//     до 6 ч (логическая ошибка вебморды, RC-D). TTL KV-маркера fm:tsw:
+//     6 ч → 900 с (сбойный прогрев ретраится через 15 мин, а не голодает).
+//  ПОЛИТИКА СКЛЕЙКИ — ЕДИНЫЙ ПОРОГ ПО METHODOLOGY.md (§4.11/§4.11а):
+//     пауза ≥ 900 с (TRIP_SPLIT_SEC, инвариант env-проверки приложения) =
+//     ГРАНИЦА поездки; < 900 с = внутри поездки. Деплой-биндинг
+//     FM_TRIP_MERGE_MAX_SEC=900: движок клеит ТОЛЬКО недосклейки < 900 с
+//     (то, что канон считает одной поездкой) и НИКОГДА не создаёт поездку
+//     с внутренней стоянкой ≥ 900 с, которую recompute приложения тут же
+//     разрежет обратно (флип-флоп «слил → разорвало → куски снова» —
+//     устранён конструктивно: merge-окно == split-порог = стабильный
+//     фикс-поинт). Биндинг SESSION_GAP_MS=900000 (RC2) не меняется.
+//  Мелочи: /health version 2.45.0.
+//
 // Эндпоинты:
 //   GET  /health                          → {ok, gateway:"d1", db:"bound"}
 //   POST /query   {sql, params?}          → {rows, rowsAffected, meta}
@@ -1714,6 +1738,62 @@ async function fmRetireStaticTrips(env, now, out) {
   }
 }
 
+// ——— v3.2 (CR-I F10): fmSoftDeleteStandingOrphans — санитайзер мусорных сирот ———
+// Порт шага 2 GHA-моста trip-heal.ts (боевой режим 01-03.10). RC2-хвост:
+// даже с SESSION_GAP_MS=900000 одиночные сердцебиения через >15 мин тишины
+// рождают 1-точечные completed-сироты — движок adopt их игнорирует
+// (pointCount < 3), а счётчик «записей» FM-роллапа их видит (deletedAt
+// IS NULL). Чистим мягко: стационарная сирота → Session.deletedAt (точки
+// НЕ трогаем — восстановимо снятием deletedAt). Движущаяся сирота НЕ
+// трогается — её усыновит fmAdoptOrphans (гейт движения F6).
+// Дискриминатор стоянки — геометрия (speed-поле непригодно, N-5):
+//   maxSpeed < 2 м/с И (bbox < 250 м ИЛИ bbox/длительность < 1,4 м/с)
+// ( GPS-дрейф на стоянке даёт bbox 250-400 м, но скорость смещения < 5 км/ч —
+//   кейс f53153d4; реальная езда даёт либо maxSpeed ≥ 2, либо км-масштаб ).
+// ≤20 кандидатов/тик (свежие первыми), окно 2 суток, pointCount ≤ 3000.
+async function fmSoftDeleteStandingOrphans(env, now, out) {
+  const sinceIso = new Date(now - 2 * 86400000).toISOString();
+  const orphans = await env.DB.prepare(
+    `SELECT id, deviceId, startTime, endTime, pointCount FROM Session
+      WHERE tripId IS NULL AND status = 'completed' AND deletedAt IS NULL AND startTime > ?
+      ORDER BY startTime DESC LIMIT 20`
+  ).bind(sinceIso).all();
+  for (const s of orphans.results ?? []) {
+    const sid = String(s.id);
+    const pc = Number(s.pointCount ?? 0);
+    if (pc <= 0 || pc > 3000) continue; // пустые/гиганты — не наш мусор
+    const m = await env.DB.prepare(
+      `SELECT COUNT(*) AS n, MAX(speed) AS maxSpeed, MIN(lat) AS minLat, MAX(lat) AS maxLat, MIN(lon) AS minLon, MAX(lon) AS maxLon
+         FROM GpsPoint WHERE sessionId = ?`
+    ).bind(sid).first();
+    const n = Number(m && m.n) || 0;
+    if (n === 0) continue; // нет точек — оставляем (не наш мусор)
+    const maxSpeed = m.maxSpeed == null ? null : Number(m.maxSpeed);
+    const minLat = Number(m.minLat);
+    const maxLat = Number(m.maxLat);
+    const minLon = Number(m.minLon);
+    const maxLon = Number(m.maxLon);
+    const latSpanM = Math.abs(maxLat - minLat) * 111320;
+    const midLat = (maxLat + minLat) / 2;
+    const lonSpanM = Math.abs(maxLon - minLon) * 111320 * Math.cos((midLat * Math.PI) / 180);
+    const speedStill = maxSpeed == null || maxSpeed < 2.0; // < 7,2 км/ч
+    const bboxMaxM = Math.max(latSpanM, lonSpanM);
+    const durSec = Math.max(
+      Math.abs(Date.parse(String(s.endTime ?? s.startTime)) - Date.parse(String(s.startTime))) / 1000,
+      60
+    );
+    const rateStill = bboxMaxM / durSec < 1.4; // < 5 км/ч — пешеход/дрейф
+    if (speedStill && (bboxMaxM < 250 || rateStill)) {
+      const nowIso = new Date(now).toISOString();
+      await env.DB.prepare(
+        `UPDATE Session SET deletedAt = ?, updatedAt = ? WHERE id = ? AND deletedAt IS NULL`
+      ).bind(nowIso, nowIso, sid).run();
+      console.log(JSON.stringify({ t: "fm:softDelete", sessionId: sid, deviceId: String(s.deviceId), points: pc, bboxM: Math.round(bboxMaxM) }));
+      out.softDeleted = (out.softDeleted ?? 0) + 1;
+    }
+  }
+}
+
 /** Тик FM-движка — вызывается из scheduled() на минутном триггере (до джобов).
  *  Каждый шаг в своём try/catch: сбой одного не роняет остальные.
  *  Возвращает счётчики для структурного лога "fm engine tick". */
@@ -1724,7 +1804,7 @@ async function fmEngineTick(env) {
   const todayKey = rollupDayKey(now, zone);
   const yesterdayKey = rollupDayKey(now - 86400000, zone);
   const kv = env.KV;
-  const out = { todayRows: 0, froze: 0, refresh7d: false, tsw: null, backupReaped: 0, adopted: 0, merged: 0, retired: 0, silentAudits: 0 }; // v3.1: +retired/silentAudits
+  const out = { todayRows: 0, froze: 0, refresh7d: false, tsw: null, backupReaped: 0, adopted: 0, merged: 0, retired: 0, silentAudits: 0, softDeleted: 0 }; // v3.2: +softDeleted
   // 1) backfill-once (идемпотентен по KV-маркеру)
   try {
     await fmBackfillOnce(env, zone, yesterdayKey);
@@ -1796,6 +1876,11 @@ async function fmEngineTick(env) {
       console.log(JSON.stringify({ level: "warn", msg: "fm retire failed", error: String((e && e.message) || e) }));
     }
     try {
+      await fmSoftDeleteStandingOrphans(env, now, out); // v3.2 F10: мусорные сироты — до adopt (мусор наружу, движущиеся — adopt'у)
+    } catch (e) {
+      console.log(JSON.stringify({ level: "warn", msg: "fm softDelete standing orphans failed", error: String((e && e.message) || e) }));
+    }
+    try {
       await fmAdoptOrphans(env, now, out);
     } catch (e) {
       console.log(JSON.stringify({ level: "warn", msg: "fm adopt failed", error: String((e && e.message) || e) }));
@@ -1843,15 +1928,18 @@ async function fmEngineTick(env) {
       console.log(JSON.stringify({ level: "warn", msg: "fm device-silence audit failed", error: String((e && e.message) || e) }));
     }
     try {
+      // v3.2 (CR-I): окно tsw 10 минут (было 6 ч — свежие поездки висели
+      // «— км — мин» до 6 ч; боевая практика моста — 10 мин) + TTL маркера
+      // 900 с (сбой ретраится через 15 мин, а не голодает 6 ч).
       const t = await env.DB.prepare(
-        "SELECT id, userId FROM Trip WHERE deletedAt IS NULL AND statsComputedAt IS NULL AND status = 'completed' AND spanEnd < ? ORDER BY spanStart ASC LIMIT 9" // v3.1 (CR-G): 9 кандидатов — 6ч-KV-ключи старейших не должны блокировать хвост (голова очереди)
-      ).bind(new Date(now - 21600000).toISOString()).all();
+        "SELECT id, userId FROM Trip WHERE deletedAt IS NULL AND statsComputedAt IS NULL AND status = 'completed' AND spanEnd < ? ORDER BY spanStart ASC LIMIT 9" // v3.1 (CR-G): 9 кандидатов — хвост очереди не голодает
+      ).bind(new Date(now - 600000).toISOString()).all();
       for (const tr of t.results ?? []) {
         const id = String(tr.id);
         const key = "fm:tsw:" + id;
         const last = kv ? await kv.get(key).catch(() => null) : null;
         if (last) continue;
-        if (kv) await kv.put(key, new Date(now).toISOString(), { expirationTtl: 21600 });
+        if (kv) await kv.put(key, new Date(now).toISOString(), { expirationTtl: 900 });
         const uid = tr.userId == null ? null : String(tr.userId);
         let apiKey = null;
         if (uid) {
@@ -1950,7 +2038,7 @@ const worker = {
       // v2.42.0: + TripCalc в ALLOWED_TABLES + CREATE_TRIPCALC_RE.
       // v3 (CR-C): gateway v3 — двойной секрет + схлопывание кронов + FM +
       // adopt/merge (полный список — шапка файла / docs/OPERATIONS.md §13).
-      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.44.0" });
+      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.45.0" });
     }
 
     // v2.39.1 (§B1): edge-инжест — ДО гейта X-Gateway-Secret: канал имеет

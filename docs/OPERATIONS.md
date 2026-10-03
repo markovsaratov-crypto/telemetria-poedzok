@@ -1217,7 +1217,9 @@ SESSION_SECRET/TURSO_AUTH_TOKEN пережили PUT). Расписания не
 - **Ложная находка M-5 закрыта:** «branches: ain]» в ci.yml — артефакт
   отображения транспорта (байт-проверка: [main] с первого коммита); задокументировано правило байт-сверки "[m"-строк.
 
-### 17.2 Рунбук деплоя v3.3 (актуальный)
+### 17.2 Рунбук деплоя v3.3/v3.4 (актуальный; v3.4 — живой фикс 16:24 UTC:
+GHA-DML allowlist BackupJob/AuditLog — ночной бэкап пишет их первым делом,
+v3.3 read-only убил прогон 37136737540)
 
 0. Сверить биндинги: GET /accounts/b8e4eee2f19ba22f8d9ccce80691e719/workers/
    scripts/d1-gateway/settings (ожидание: SESSION_GAP_MS=900000,
@@ -1225,16 +1227,17 @@ SESSION_SECRET/TURSO_AUTH_TOKEN пережили PUT). Расписания не
 1. Бандл: npx esbuild cloudflare-worker/d1-gateway.js --bundle
    --format=esm --platform=neutral (node --check обязателен; теперь и в CI).
 2. PUT воркера (multipart, keep_secrets=true; main_module
-   gateway-v3.3.js; compatibility_date 2026-09-01): plain-биндинги как в
-   wrangler.toml [vars] + DB + KV (id — в wrangler.toml) + биндинг
-   GHA_GATEWAY_SECRET как
+   gateway-v3.4.js; compatibility_date 2026-09-01): plain-биндинги как в
+   wrangler.toml [vars] + DB 9dec0a90-7d38-46ae-9921-29eb83706b3d + KV
+   (id KV — см. wrangler.toml) + биндинг GHA_GATEWAY_SECRET 
    {"type":"secret_text","text":"<НОВОЕ значение>"} (ротация одновременно
    с PUT репо-секретов D1_GATEWAY_SECRET и GHA_GATEWAY_SECRET — libsodium
    sealed box). GATEWAY_GHA_DML НЕ задавать (аварийный DML — временно
    через settings PUT, после операции снять).
 3. Расписания не трогать (*/1 + 0 3).
-4. Проверка: /health → 2.46.0; SELECT 1 новым GHA-секретом → 200;
-   INSERT/UPDATE новым GHA-секретом → 403 (read-only); старым
-   GHA-значением → 401; SELECT 1 основным секретом (приложение) → 200;
-   сайт /api/trips → 200; workflow_dispatch backup.yml → success (drill
-   ok). Откат: PUT бандла v3.2 (коммит 5304962) тем же методом.
+4. Проверка: /health → 2.47.0; SELECT 1 новым GHA-секретом → 200;
+   INSERT INTO Session новым GHA-секретом → 403 (allowlist); INSERT INTO
+   BackupJob → 200 (бэкап-конвейер); INSERT INTO User → 403 (навсегда);
+   старым GHA-значением → 401; SELECT 1 основным секретом (приложение) →
+   200; сайт /api/trips → 200; workflow_dispatch backup.yml → success
+   (drill ok). Откат: PUT бандла v3.2 (коммит 5304962) тем же методом.

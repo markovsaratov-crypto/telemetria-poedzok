@@ -42,12 +42,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+      # v3.4 (CR-J): установка — BUN по bun.lock (lockfile-точно; как backup.yml).
+      # npm ci падал: package-lock.json в репо РАССИНХРОНИЗИРОВАН с package.json
+      # (@opennextjs/cloudflare, wrangler, esbuild ставились через bun — живёт
+      # bun.lock; npm-lock стух). setup-node оставлен: npx-тулинг (tsc/eslint/
+      # vitest/prisma/esbuild) идёт под Node 22, node_modules от bun совместим.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-      - name: Install dependencies (npm ci — lockfile-точно)
-        run: npm ci --no-audit --no-fund
+      - name: Install dependencies (bun — lockfile-точно)
+        run: bun install --frozen-lockfile
       - name: Secrets scan (env-файлы, токен-паттерны, голые hex-константы)
         run: bash scripts/check-secrets.sh
       - name: Cloudflare Worker bundle check (esbuild + node --check)

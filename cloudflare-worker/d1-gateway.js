@@ -79,17 +79,20 @@
 //
 // ─── v3.3 (CR-J, 2026-10-03 кодревью топ-архитектора — hardening GHA-канала) ───
 //  J-B3 Канальные привилегии: gatewaySecretChannel() возвращает "main"|"gha"
-//     вместо bool. GHA-канал (репо-секреты GitHub) — read-only ПО УМОЛЧАНИЮ
-//     (SELECT+PRAGMA): бэкапу 03:30 UTC больше ничего не нужно, мост
-//     trip-heal остановлен (CR-I). Аварийный DML — ЯВНЫЙ биндинг
-//     GATEWAY_GHA_DML="true" (рунбук §14.3: включить → прогнать → выключить).
-//     Таблица User (passwordHash/apiKey) — read-only на GHA-канале ВСЕГДА,
-//     даже при включённом флаге: PAT-компрометация GitHub больше не даёт
-//     канал модификации аккаунтов прод-D1. Main-канал (приложение) — без
-//     изменений: полный вайтлист, как в v3.2.
-//  Мелочи: /health version 2.46.0; GHA_GATEWAY_SECRET деплоится теперь
-//     биндингом secret_text (был plain_text — читался из /settings любым
-//     токеном с правом чтения настроек воркера).
+//     вместо bool. GHA-канал (репо-секреты GitHub) — read-only с хирургическим
+//     исключением (см. v3.4): паттерн PAT-компрометации больше не даёт канал
+//     полного DML к прод-D1. Main-канал (приложение) — без изменений.
+//  Мелочи: GHA_GATEWAY_SECRET деплоится биндингом secret_text (был plain_text
+//     — читался из /settings любым токеном с правом чтения настроек воркера).
+//
+// ─── v3.4 (CR-J, фикс живого прогона 16:24 UTC) ───
+//  Ночной бэкап GHA делает ПЕРВЫМ делом INSERT INTO BackupJob (+UPDATE статусов
+//  + INSERT AuditLog) — v3.3 read-only его убил (backup run 37136737540,
+//  «forbidden», 0.2 с от старта). GHA-DML теперь ALLOWLIST: BackupJob/AuditLog
+//  (операционные таблицы бэкап-конвейера) — можно; ВСЁ остальное (Session/Trip/
+//  GpsPoint/TrafficJob/User/…) — только при GATEWAY_GHA_DML="true" (аварийный
+//  ручной heal); User — НИКОГДА (даже при флаге). SELECT/PRAGMA — как было.
+//  /health version 2.47.0.
 //
 // Эндпоинты:
 //   GET  /health                          → {ok, gateway:"d1", db:"bound"}
@@ -343,26 +346,43 @@ function isReadOnly(env) {
   return env.GATEWAY_READ_ONLY === "true" || env.GATEWAY_READ_ONLY === "1";
 }
 
-// v3.3 (CR-J, ревью J-B3): GHA-канал — read-only ПО УМОЛЧАНИЮ. Аварийный DML
-// (ручной trip-heal / repair-скрипты) включается ЯВНЫМ биндингом
-// GATEWAY_GHA_DML="true" на время операции и выключается обратно (рунбук
-// §14.3). Fail-closed: не задан/мусор → только SELECT+PRAGMA.
+// v3.3 (CR-J, J-B3): GHA-канал — ПО УМОЛЧАНИЮ read-only, НО с хирургическим
+// исключением: операционные таблицы бэкап-конвейера (BackupJob — статус/рекон
+// джоба, AuditLog — аудит операций) пишутся ЛЕГИТИМНО ночным бэкапом GHA
+// (backupToGitHub: db.backupJob.create() ПЕРВОЕ действие — v3.3 read-only
+// сломал ночной конвейер, найдено живым прогоном 03.10 16:24 UTC).
+// Пользовательские данные (User/Session/Trip/GpsPoint/TrafficJob/…) —
+// read-only на GHA-канале ВСЕГДА: PAT-компрометация GitHub не даёт запись
+// в телеметрию и аккаунты. Аварийный DML полного спектра (ручной trip-heal:
+// UPDATE Session/Trip) — временный биндинг GATEWAY_GHA_DML="true"
+// (рунбук §14.3/§17.2: включить → прогнать → выключить); таблица User
+// заблокирована ДАЖЕ при включённом флаге.
+const GHA_DML_TABLES = new Set(["backupjob", "auditlog"]);
+
 function isGhaDmlEnabled(env) {
   return env.GATEWAY_GHA_DML === "true" || env.GATEWAY_GHA_DML === "1";
 }
 
-// v3.3 (CR-J, J-B3): таблица User (passwordHash/apiKey) — НИКОГДА не пишется
-// через GHA-канал, даже при GATEWAY_GHA_DML=true. Возвращает причину отказа
-// или null (разрешено). Для main-канала не вызывается (приложение легитимно
-// пишет User: регистрация/логин/ротация apiKey).
-function ghaUserDmlViolation(sql) {
+// v3.4 (CR-J): DML-проверка GHA-канала. Возвращает причину отказа или null.
+// — SELECT/PRAGMA: не проверяются здесь (validateStatement уже пропустил);
+// — INSERT/UPDATE/DELETE: таблица ∈ GHA_DML_TABLES (бэкап-конвейер) → OK;
+// — иначе: только при GATEWAY_GHA_DML=true (аварийный режим) — и НИКОГДА User.
+function ghaDmlViolation(sql, env) {
   const clean = stripSqlComments(String(sql).replace(/;\s*$/, "")).trim();
   const verbMatch = clean.match(/^([A-Za-z]+)/);
   if (!verbMatch) return null;
   const verb = verbMatch[1].toUpperCase();
   if (verb !== "INSERT" && verb !== "UPDATE" && verb !== "DELETE") return null;
   const tables = extractTableNames(clean);
-  if (tables.has("user")) return "gha channel: User table is read-only (passwordHash/apiKey are out of scope)";
+  if (tables.size === 0) return null;
+  for (const t of tables) {
+    if (t === "user") {
+      return "gha channel: User table is read-only (passwordHash/apiKey are out of scope)";
+    }
+    if (!GHA_DML_TABLES.has(t) && !isGhaDmlEnabled(env)) {
+      return `gha channel read-only: DML on ${t} requires GATEWAY_GHA_DML (emergency runbook 17.2; BackupJob/AuditLog allowed for nightly backup)`;
+    }
+  }
   return null;
 }
 
@@ -2087,7 +2107,7 @@ const worker = {
       // v2.42.0: + TripCalc в ALLOWED_TABLES + CREATE_TRIPCALC_RE.
       // v3 (CR-C): gateway v3 — двойной секрет + схлопывание кронов + FM +
       // adopt/merge (полный список — шапка файла / docs/OPERATIONS.md §13).
-      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.46.0" });
+      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.47.0" });
     }
 
     // v2.39.1 (§B1): edge-инжест — ДО гейта X-Gateway-Secret: канал имеет
@@ -2131,14 +2151,13 @@ const worker = {
     // v3 (CR-C F0): принимается ЛЮБОЙ из двух секретов — основной
     // GATEWAY_SECRET (приложение/рунбук) ИЛИ GHA_GATEWAY_SECRET (GitHub
     // Actions бэкап — ротируется независимо; не задан → проверка пропускается).
-    // v3.3 (CR-J, J-B3): гейт определяет КАНАЛ — GHA по умолчанию read-only
-    // (SELECT+PRAGMA), User-DML на нём заблокирован навсегда; флаг
-    // GATEWAY_GHA_DML — аварийный DML без User (рунбук §14.3).
+    // v3.4 (CR-J): гейт определяет КАНАЛ — GHA: SELECT/PRAGMA + DML только на
+    // BackupJob/AuditLog (ночной бэкап); остальной DML — GATEWAY_GHA_DML;
+    // User — read-only навсегда. Main-канал — полный вайтлист (как v3.2).
     const channel = await gatewaySecretChannel(env, secret);
     if (channel == null) {
       return json({ error: "unauthorized" }, 401);
     }
-    const ghaReadOnly = channel === "gha" && !isGhaDmlEnabled(env);
 
     // v2.38.1 (ревью F1): лимит тела — предчек по content-length (дёшево, до
     // чтения) и фактический по байтам стрима (readBodyLimited ниже).
@@ -2183,13 +2202,13 @@ const worker = {
         const { sql, params } = body ?? {};
         if (typeof sql !== "string" || sql.length === 0) return json({ error: "sql required" }, 400);
         // v2.38.1 (ревью F1): вайтлист операций ДО prepare/exec.
-        // v3.3 (CR-J, J-B3): read-only = глобальный флаг ИЛИ GHA-канал без
-        // аварийного DML-флага; User-DML на GHA — блок всегда.
-        const violation = validateStatement(sql, isReadOnly(env) || ghaReadOnly);
+        // v3.4 (CR-J): GATEWAY_READ_ONLY — только глобальный флаг; привилегии
+        // GHA-канала — хирургические (ghaDmlViolation ниже).
+        const violation = validateStatement(sql, isReadOnly(env));
         if (violation) return json({ error: "forbidden", reason: violation }, 403);
         if (channel === "gha") {
-          const userViolation = ghaUserDmlViolation(sql);
-          if (userViolation) return json({ error: "forbidden", reason: userViolation }, 403);
+          const ghaViolation = ghaDmlViolation(sql, env);
+          if (ghaViolation) return json({ error: "forbidden", reason: ghaViolation }, 403);
         }
         // v2.42.3-FM (CR-C v3): перехватчики FM-движка — ПОСЛЕ валидации, ДО
         // D1: CPU-пожиратели приложения (heal 1970-01-01, fallback-скан
@@ -2256,9 +2275,9 @@ const worker = {
         // v2.38.1 (ревью F1): вайтлист операций — ВСЕ стейтменты батча ДО
         // построения prepare-объектов (атомарный batch не начинает исполняться)
         // v2.38.2 (ревью F33): + read-only флаг (один вызов isReadOnly на батч)
-        // v3.3 (CR-J, J-B3): read-only = глобальный флаг ИЛИ GHA-канал без
-        // аварийного DML-флага; User-DML на GHA — блок всегда.
-        const batchReadOnly = isReadOnly(env) || ghaReadOnly;
+        // v3.4 (CR-J): GATEWAY_READ_ONLY — только глобальный флаг; привилегии
+        // GHA-канала — хирургические (ghaDmlViolation ниже, по каждому стейтменту).
+        const batchReadOnly = isReadOnly(env);
         for (const s of statements) {
           if (typeof s?.sql !== "string" || s.sql.length === 0) {
             return json({ error: "each statement requires non-empty sql" }, 400);
@@ -2268,8 +2287,8 @@ const worker = {
             return json({ error: "forbidden", reason: violation }, 403);
           }
           if (channel === "gha") {
-            const userViolation = ghaUserDmlViolation(s.sql);
-            if (userViolation) return json({ error: "forbidden", reason: userViolation }, 403);
+            const ghaViolation = ghaDmlViolation(s.sql, env);
+            if (ghaViolation) return json({ error: "forbidden", reason: ghaViolation }, 403);
           }
         }
         const stmts = statements.map((s) => {

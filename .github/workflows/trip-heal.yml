@@ -29,6 +29,10 @@ on:
         description: "Глубокая чистка (окно сирот 30 дней вместо 2)"
         type: boolean
         default: false
+      chain:
+        description: "Самоцепочка: по завершении подождать и диспетчеризовать следующий прогон (каденс ~5 мин без деградировавшего GHA-cron; CR-H)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -40,7 +44,7 @@ concurrency:
 jobs:
   heal:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
 
@@ -58,3 +62,20 @@ jobs:
           HEAL_DRY_RUN: ${{ inputs.dry_run == true && 'true' || 'false' }}
           HEAL_DEEP: ${{ inputs.deep == true && 'true' || 'false' }}
         run: bun scripts/trip-heal.ts
+
+      - name: Chain dispatch (самоцепочка ~5 мин, CR-H)
+        if: ${{ inputs.chain == true }}
+        env:
+          GH_PAT: ${{ secrets.HEAL_DISPATCH_PAT }}
+        run: |
+          echo "chain mode: sleep 240s, then dispatch next run"
+          sleep 240
+          code=$(curl -s -o /tmp/d.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GH_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/markovsaratov-crypto/telemetria-poedzok/actions/workflows/trip-heal.yml/dispatches" \
+            -d '{"ref":"main","inputs":{"chain":true}}')
+          echo "dispatch -> HTTP $code"
+          cat /tmp/d.json || true
+          if [ "$code" != "204" ]; then echo "::warning::chain dispatch failed ($code) — цепочка прервётся; рестарт: workflow_dispatch с chain=true"; fi

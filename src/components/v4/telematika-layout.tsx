@@ -25,9 +25,10 @@ import {
 } from "lucide-react";
 import { useV4Tipbox, bindTips } from "./use-v4-tipbox";
 import { type PeriodKey } from "@/lib/v4-utils";
-import { useSessions, useSessionsStatsBatch, useReverseGeocode, type SessionsQuery } from "@/lib/hooks";
+import { useSessionsStatsBatch, useReverseGeocode, type SessionsQuery } from "@/lib/hooks";
+import { useTrips } from "@/lib/trip-hooks";
 import { fmtMonthShort } from "@/lib/format";
-import type { SessionListItem } from "@/lib/api-client";
+import type { SessionListItem, TripListItem } from "@/lib/api-client";
 import { useTheme } from "next-themes";
 import { toast } from "sonner";
 import { api } from "@/lib/api-client";
@@ -43,6 +44,26 @@ export type Period = PeriodKey;
 // GET /api/sessions и два независимых 30с-поллинга (app-root использует
 // те же параметры — его вызов также попадает в общий кэш-ключ).
 export const SESSIONS_LIST_QUERY: SessionsQuery = { limit: 50, minPoints: 10 };
+
+// v2.43.0 (CR-L, порт чанк-патча telemat-fix-a1 R1/R2 в исходник): пункт
+// dropdown «Аналитики» = ПОЕЗДКА из /api/trips (псевдо-запись с id "t:<tripId>").
+// Дропдаун синхронен вкладке «Поездки» (один источник /api/trips, один queryKey);
+// транспортные фрагменты-записи остаются ВНУТРИ поездок и больше не засоряют
+// селектор (было: 240 сессий-осколков против 39 поездок, обрезка по limit:50
+// прятала старые поездки). sessionIds — для агрегата «Аналитики» (R3/R4 в
+// v4-hooks/analytics-view) и прогрева статов (R2).
+interface TripFilterItem {
+  id: string; // "t:<tripId>"
+  deviceId: string;
+  deviceName?: string | null;
+  startTime: string; // trip.spanStart
+  endTime?: string | null;
+  endLat?: number | null;
+  endLon?: number | null;
+  pointCount?: number | null;
+  sessionCount: number;
+  sessionIds: string[];
+}
 
 interface LayoutProps {
   tab: V4Tab;
@@ -117,7 +138,15 @@ function useIsMac(): boolean {
 
 // v2.12.0 (Q3): подпись поездки в фильтре — адрес конечной точки
 // (идентификация по месту назначения), fallback — имя устройства.
-function TripFilterLabel({ session, bold = false }: { session: SessionListItem; bold?: boolean }) {
+// v2.43.0 (CR-L): структурный тип — подходит и для записей, и для псевдо-записей
+// поездок (TripFilterItem) без приведения типов.
+function TripFilterLabel({
+  session,
+  bold = false,
+}: {
+  session: Pick<SessionListItem, "endLat" | "endLon" | "deviceName" | "deviceId">;
+  bold?: boolean;
+}) {
   const dest = useReverseGeocode(session.endLat ?? null, session.endLon ?? null);
   const destShort = dest.data?.short ?? null;
   if (destShort != null) {
@@ -172,22 +201,39 @@ export function TelematikaLayout(props: LayoutProps) {
   const kbdCmd = isMac ? "⌘K" : "Ctrl K";
   const kbdSearch = isMac ? "⌘⇧F" : "Ctrl+Shift+F";
 
-  // Live sessions list for trip-filter dropdown.
-  // v2.36.0 (кейс 15.09 «блипы»): minPoints 10 — микро-фрагменты деградировавшего
-  // логгера (1–3 точки: iOS будил приложение раз в 6–10 мин) не несут аналитики
-  // и мусорили селектор девятью пунктами за день; их данные живут в составе
-  // поездок (вкладка «Поездки», §4.6а METHODOLOGY). Период-агрегат и счётчики
-  // продолжают видеть все записи (без фильтра) — статистика не теряется.
-  // v2.38.2 · F83: параметры — из константы SESSIONS_LIST_QUERY (общий queryKey
-  // с analytics-view и app-root: один HTTP-запрос и один 30с-поллинг).
-  const sessions = useSessions(SESSIONS_LIST_QUERY);
-  const sessionsList = sessions.data?.sessions ?? [];
+  // v2.43.0 (CR-L, R1): список пунктов dropdown — ПОЕЗДКИ (/api/trips, тот же
+  // queryKey, что вкладка «Поездки»: один запрос/кэш/смарт-опрос 60с). Псевдо-
+  // запись наследует поля адресной идентификации (endLat/endLon → reverse
+  // geocode), span поездки и sessionIds для агрегата «Аналитики».
+  const trips = useTrips({ limit: 50 });
+  const tripsList: TripFilterItem[] = React.useMemo(
+    () =>
+      (trips.data?.trips ?? [])
+        .filter((t): t is TripListItem => !!t && typeof t.id === "string")
+        .map((t) => ({
+          id: `t:${t.id}`,
+          deviceId: t.deviceId,
+          deviceName: null,
+          startTime: t.spanStart,
+          endTime: t.spanEnd,
+          endLat: t.endLat,
+          endLon: t.endLon,
+          pointCount: t.pointCountActual,
+          sessionCount: Number(t.sessionCount) || 0,
+          sessionIds: Array.isArray(t.sessionIds) ? t.sessionIds : [],
+        })),
+    [trips.data]
+  );
 
-  // v2.17.2 (батч-статс): префетч статов всех записей на КОРНЕ лейаута —
-  // любая вкладка прогревает один GET /api/stats/batch в фоне; клик в
-  // «Поездки» после загрузки любой вкладки = мгновенный рендер из кэша
-  // (тот же queryKey ["stats-batch", idsKey], что и в TripsView — дедуп).
-  useSessionsStatsBatch(sessionsList.map((s) => s.id));
+  // v2.43.0 (CR-L, R2): прогрев статов — по ПЕРВОЙ записи каждой поездки
+  // (реальный session UUID из sessionIds). Тот же ключ ["stats-batch", ids],
+  // что агрегат «Аналитики»: выбор поездки в dropdown → статы уже в кэше,
+  // агрегат стартует без холодного шторма поштучных запросов.
+  useSessionsStatsBatch(
+    tripsList
+      .map((p) => p.sessionIds[0] ?? "")
+      .filter((v) => v.length > 0)
+  );
 
   React.useEffect(() => setMounted(true), []);
 
@@ -271,20 +317,20 @@ export function TelematikaLayout(props: LayoutProps) {
   }
 
   const selectedSession = React.useMemo(
-    () => sessionsList.find((s) => s.id === selectedSessionId) ?? null,
-    [sessionsList, selectedSessionId]
+    () => tripsList.find((s) => s.id === selectedSessionId) ?? null,
+    [tripsList, selectedSessionId]
   );
 
   const filteredSessions = React.useMemo(() => {
-    if (!tripFilterQuery) return sessionsList;
+    if (!tripFilterQuery) return tripsList;
     const q = tripFilterQuery.toLowerCase();
-    return sessionsList.filter((s) => {
+    return tripsList.filter((s) => {
       const label = fmtSessionLabel(s.startTime);
       const dev = (s.deviceName || s.deviceId || "").toLowerCase();
       const rel = relativeLabel(s.startTime).toLowerCase();
       return label.toLowerCase().includes(q) || dev.includes(q) || rel.includes(q);
     });
-  }, [sessionsList, tripFilterQuery]);
+  }, [tripsList, tripFilterQuery]);
 
   // Active-tab title indicator — word next to tabs.
   const activeTabLabel = TABS.find((t) => t.id === tab)?.label ?? "";
@@ -430,7 +476,7 @@ export function TelematikaLayout(props: LayoutProps) {
                   setTripFilterOpen((v) => !v);
                   setTripFilterQuery("");
                 }}
-                title="Выбрать конкретную запись"
+                title="Выбрать конкретную поездку"
               >
                 {selectedSession ? (
                   <>
@@ -439,15 +485,15 @@ export function TelematikaLayout(props: LayoutProps) {
                       {fmtSessionLabel(selectedSession.startTime)}
                     </span>
                   </>
-                ) : sessions.isLoading ? (
+                ) : trips.isLoading ? (
                   <span>Загрузка…</span>
-                ) : sessionsList.length === 0 ? (
-                  <span>Нет записей</span>
+                ) : tripsList.length === 0 ? (
+                  <span>Нет поездок</span>
                 ) : (
-                  /* v2.31.0 (MAJ-11): фильтр листает ЗАПИСИ (сессии) — слово «поездка»
-                      осталось за вкладкой «Поездки» (серверные Trip, 15-мин склейка);
-                      раньше одно слово значило две сущности с разными цифрами */
-                  <span>Все записи · период</span>
+                  /* v2.43.0 (CR-L, R5): dropdown листает ПОЕЗДКИ — терминология
+                      единственная на обеих вкладках («запись» = транспортный
+                      фрагмент внутри поездки, в селекторе не встречается) */
+                  <span>Все поездки · период</span>
                 )}
                 <ChevronDown className="chev h-3 w-3" />
               </button>
@@ -471,7 +517,7 @@ export function TelematikaLayout(props: LayoutProps) {
                       }}
                     >
                       <span>
-                        <b>Все записи периода</b>
+                        <b>Все поездки периода</b>
                         <br />
                         <span className="mono">агрегат за выбранный период</span>
                       </span>
@@ -479,7 +525,7 @@ export function TelematikaLayout(props: LayoutProps) {
                     </button>
                     {filteredSessions.length === 0 ? (
                       <div className="trip-filter-empty">
-                        {sessionsList.length === 0 ? "Список записей пуст" : "Ничего не найдено"}
+                        {tripsList.length === 0 ? "Список поездок пуст" : "Ничего не найдено"}
                       </div>
                     ) : (
                       filteredSessions.map((s) => (
@@ -498,7 +544,19 @@ export function TelematikaLayout(props: LayoutProps) {
                             <br />
                             <span className="mono">{fmtSessionLabel(s.startTime)}</span>
                           </span>
-                          <span className="mono">{relativeLabel(s.startTime)}</span>
+                          {/* v2.43.0 (CR-L, R7): бейдж «×N записей» у мультифрагментных
+                              поездок — видно, что в поездке несколько кусков записи;
+                              одиночные — как раньше, относительное время */}
+                          <span className="mono">
+                            {s.sessionCount > 1
+                              ? `×${s.sessionCount} ${
+                                  [2, 3, 4].includes(s.sessionCount % 10) &&
+                                  ![12, 13, 14].includes(s.sessionCount % 100)
+                                    ? "записи"
+                                    : "записей"
+                                }`
+                              : relativeLabel(s.startTime)}
+                          </span>
                         </button>
                       ))
                     )}

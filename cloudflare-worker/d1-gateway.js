@@ -193,6 +193,13 @@ const ALLOWED_TABLES = new Set(
     // warm/бэкфилл и retention-purge (DELETE). До СВОЕГО деплоя все SQL к
     // ней = 403 — приложение консервативно живёт на пути v2.41.0.
     "TripCalc",
+    // v2.42.1-fix (27.09.2026, возвращён в v3.5 04.10.2026 — потерян при
+    // пересборке v3 из исходников): служебная таблица блокировок экспорта —
+    // worker-runtime.ts pollExportJobs()/reclaimStuckExportJobs() (F9,
+    // v2.38.1). Без неё каждый worker-tick ловил 403 «forbidden table:
+    // _exportjoblock» («export poll failed» в логах), ExportJob застревал
+    // в pending навсегда, экспорт больших сессий зависал.
+    "_ExportJobLock",
   ].map((t) => t.toLowerCase())
 );
 
@@ -213,6 +220,8 @@ const CREATE_STATSROLLUP_RE = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?StatsRoll
 // тот же паттерн _AlertState/StatsRollup; ретрай каждые 10 мин, чтобы
 // таблица поднялась сразу после ЭТОГО деплоя шлюза без ресайкла Render).
 const CREATE_TRIPCALC_RE = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?TripCalc"?\s*\(/i;
+// v2.42.1-fix: см. комментарий в ALLOWED_TABLES (_ExportJobLock).
+const CREATE_EXPORTLOCK_RE = /^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+"?_ExportJobLock"?\s*\(/i;
 // v2.38.2 (ревью F50): идемпотентные индексы ensure-on-boot. Приложение
 // создаёт Session_userId_startTime_idx лениво при первом списковом запросе
 // (db.ts, fire-and-forget). IF NOT EXISTS = no-op на существующем индексе;
@@ -435,6 +444,7 @@ function validateStatement(sql, readOnly) {
     if (CREATE_ALERTSTATE_RE.test(clean)) return null;
     if (CREATE_STATSROLLUP_RE.test(clean)) return null;
     if (CREATE_TRIPCALC_RE.test(clean)) return null;
+    if (CREATE_EXPORTLOCK_RE.test(clean)) return null;
     // v2.38.2 (F50): CREATE [UNIQUE] INDEX IF NOT EXISTS <idx> ON <allowed-table>
     const idxMatch = clean.match(CREATE_INDEX_RE);
     if (idxMatch && ALLOWED_TABLES.has(idxMatch[3].toLowerCase())) return null;

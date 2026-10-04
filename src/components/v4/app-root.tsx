@@ -11,7 +11,8 @@ import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, setUnauthorizedHandler } from "@/lib/api-client";
-import { useAuth, useSessions } from "@/lib/hooks";
+import { useAuth } from "@/lib/hooks";
+import { useTrips } from "@/lib/trip-hooks";
 import { LoginForm } from "@/components/login-form";
 import { CommandPalette } from "@/components/command-palette";
 import { ShortcutsHelp } from "@/components/shortcuts-help";
@@ -32,14 +33,15 @@ export function AppRoot() {
   const [helpOpen, setHelpOpen] = React.useState(false);
   const [searchOpen, setSearchOpen] = React.useState(false);
 
-  // Fetch sessions list (used for auto-select on first mount).
-  // v2.36.0 (кейс 15.09 «блипы»): minPoints 10 — автоселект открывает последнюю
-  // ПОЛНОЦЕННУЮ запись; без фильтра новейшей сессией оказывался микро-фрагмент
-  // логгера (1–3 точки) и «Аналитика» встречала владельца пустой карточкой
-  // «0 сек · 1 точка». Тот же queryKey, что у layout — один HTTP-запрос.
-  const sessions = useSessions({ limit: 50, minPoints: 10 });
+  // v2.43.0 (CR-L, порт telemat-fix-a1): автоселект — последняя ПОЕЗДКА (id
+  // "t:<tripId>"). «Аналитика» встречает владельца целой последней поездкой
+  // (агрегат по её записям), дропдаун и вкладка «Поездки» показывают тот же
+  // объект — синхрон с первой секунды. Раньше выбиралась последняя запись-
+  // фрагмент: после включения серверной склейки это был «кусочек» (2 мин из
+  // 30-минутной поездки). Тот же queryKey, что вкладка «Поездки» — один запрос.
+  const trips = useTrips({ limit: 50 });
 
-  // v2.10.0 R1: Auto-select first session on first mount (when sessions loaded and nothing selected).
+  // v2.10.0 R1: Auto-select first trip on first mount (when trips loaded and nothing selected).
   const autoSelectedRef = React.useRef(false);
   React.useEffect(() => {
     if (autoSelectedRef.current) return;
@@ -47,12 +49,12 @@ export function AppRoot() {
       autoSelectedRef.current = true;
       return;
     }
-    const first = sessions.data?.sessions?.[0];
-    if (first && first.status === "completed") {
+    const first = trips.data?.trips?.[0];
+    if (first) {
       autoSelectedRef.current = true;
-      setSelectedSessionId(first.id);
+      setSelectedSessionId(`t:${first.id}`);
     }
-  }, [sessions.data, selectedSessionId]);
+  }, [trips.data, selectedSessionId]);
 
   React.useEffect(() => {
     setUnauthorizedHandler(() => {

@@ -602,7 +602,13 @@ function aggregateTrack(items: TrackResponse[]): TrackResponse {
 
 // usePeriodStats — агрегат всех поездок выбранного периода.
 // Возвращает { data: PeriodAggregate | null, trips, isLoading, isError }.
-export function usePeriodStats(period: PeriodKey) {
+// v2.43.0 (CR-L, порт чанк-патча telemat-fix-a1 R3/R4 в исходник): опциональный
+// sessionId вида "t:<tripId>" (выбор поездки в dropdown «Аналитики») — агрегат
+// считается по sessionIds ВЫБРАННОЙ поездки тем же механизмом (батчи
+// stats/events/track + склейка), что и период-агрегат; счётчик поездок = 1.
+// Обычный session UUID сюда не передаётся — одиночная запись остаётся за
+// режимом конкретной записи в analytics-view.
+export function usePeriodStats(period: PeriodKey, sessionId?: string | null) {
   const sessions = useSessions({ limit: 50 });
   // v2.26.0 (ТЗ §11): счётчик ПОЕЗДОК — из /api/trips (spanStart в периоде);
   // записи — транспортные фрагменты. Пока поездки не заведены (expand-фаза:
@@ -611,9 +617,25 @@ export function usePeriodStats(period: PeriodKey) {
   // счётчик шапки Аналитики = числу карточек вкладки.
   const tripsQ = useTrips({ limit: 50 });
   const qc = useQueryClient();
+  // v2.43.0 (CR-L): режим выбранной поездки — до прилёта /api/trips trip=null
+  // и агрегат честно считается как период; когда список прилетает, idsKey
+  // меняется на sessionIds поездки — агрегат перезапускается уже по поездке.
+  const tripSelId =
+    typeof sessionId === "string" && sessionId.startsWith("t:") ? sessionId.slice(2) : null;
+  const trip = useMemo(
+    () => (tripSelId ? (tripsQ.data?.trips ?? []).find((t) => t.id === tripSelId) ?? null : null),
+    [tripsQ.data, tripSelId]
+  );
   const list = sessions.data?.sessions ?? [];
   const inPeriod = useMemo(() => sessionsInPeriod(list, period), [list, period]);
-  const ids = useMemo(() => inPeriod.map((s) => s.id), [inPeriod]);
+  // v2.43.0 (CR-L): ids — sessionIds выбранной поездки (кэп 50 как у периода),
+  // иначе — записи периода.
+  const ids = useMemo(() => {
+    if (trip) {
+      return (Array.isArray(trip.sessionIds) ? trip.sessionIds : []).slice(0, MAX_PERIOD_SESSIONS);
+    }
+    return inPeriod.map((s) => s.id);
+  }, [trip, inPeriod]);
   const idsKey = ids.join(",");
   const periodFromMs = periodStartMs(period);
   const tripsInPeriod = useMemo(() => {
@@ -631,7 +653,12 @@ export function usePeriodStats(period: PeriodKey) {
       );
     }).length;
   }, [tripsQ.data, periodFromMs]);
-  const tripsCount = tripsInPeriod > 0 || (tripsQ.data?.trips?.length ?? 0) > 0 ? tripsInPeriod : inPeriod.length;
+  // v2.43.0 (CR-L): выбранная поездка — ровно 1 поездка в шапке агрегата.
+  const tripsCount = trip
+    ? 1
+    : tripsInPeriod > 0 || (tripsQ.data?.trips?.length ?? 0) > 0
+      ? tripsInPeriod
+      : inPeriod.length;
 
   const agg = useQuery<PeriodAggregate | null>({
     queryKey: ["v4", "period-aggregate", period, idsKey],
@@ -685,12 +712,21 @@ export function usePeriodStats(period: PeriodKey) {
       const okEvents = (eventsBatch.events ?? []).filter(Boolean);
       const okTracks = (trackBatch.tracks ?? []).filter((t) => t && (t.points?.length ?? 0) > 0);
       if (!okStats.length) return null;
-      const chrono = [...inPeriod.slice(0, MAX_PERIOD_SESSIONS)].sort(
-        (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
-      );
-      const rangeStart = chrono[0]?.startTime ?? new Date().toISOString();
-      const rangeEnd =
-        chrono[chrono.length - 1]?.endTime ?? chrono[chrono.length - 1]?.startTime ?? rangeStart;
+      // v2.43.0 (CR-L): диапазон агрегата — спан выбранной поездки; в период-режиме
+      // — хронология первой/последней записи периода (как было).
+      let rangeStart: string;
+      let rangeEnd: string;
+      if (trip) {
+        rangeStart = trip.spanStart;
+        rangeEnd = trip.spanEnd ?? trip.spanStart;
+      } else {
+        const chrono = [...inPeriod.slice(0, MAX_PERIOD_SESSIONS)].sort(
+          (a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
+        );
+        rangeStart = chrono[0]?.startTime ?? new Date().toISOString();
+        rangeEnd =
+          chrono[chrono.length - 1]?.endTime ?? chrono[chrono.length - 1]?.startTime ?? rangeStart;
+      }
       return {
         stats: aggregateStats(okStats, `period:${period}:${okStats.length}`),
         events: aggregateEvents(okEvents),

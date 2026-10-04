@@ -25,7 +25,7 @@ import {
   heatColor,
   type PeriodKey,
 } from "@/lib/v4-utils";
-import { fmtSecShort, fmtSecFull, fmtDurMin, fmtNumber, fmtNum, fmtDistKm, pluralRu } from "@/lib/format";
+import { fmtSecShort, fmtSecFull, fmtDurMin, fmtNumber, fmtNum, fmtDistKm, pluralRu, fmtMonthShort } from "@/lib/format";
 import {
   useSessionStats,
   useRouteComparison,
@@ -43,6 +43,7 @@ import {
   type RouteTrendData,
 } from "@/lib/hooks";
 import { useV4Track, useV4Events, usePeriodStats, useSpeedRecord, type PeriodAggregate } from "@/lib/v4-hooks";
+import { useTrips } from "@/lib/trip-hooks";
 // v2.38.2 · F75: ?screen= при запуске (PWA-ярлык «Все поездки» → /m?screen=trips)
 import { useLaunchScreen } from "@/hooks/use-launch-screen";
 import type { TrackResponse, EventsResponse } from "@/lib/api-client";
@@ -89,14 +90,39 @@ interface Props {
   sessionId: string | null;
 }
 
+// v2.43.0 (CR-L, порт telemat-fix-a1): выбор ПОЕЗДКИ в dropdown «Аналитики» —
+// id вида "t:<tripId>" (псевдо-запись из /api/trips). Агрегат по sessionIds
+// поездки считается тем же механизмом, что период-агрегат.
+function isTripSelection(sessionId: string | null): boolean {
+  return typeof sessionId === "string" && sessionId.startsWith("t:");
+}
+
+// «ДД МЕС ЧЧ:ММ» — заголовок карточки агрегата при выбранной поездке (R6).
+function fmtTripSpanLabel(startTime: string): string {
+  try {
+    const d = new Date(startTime);
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mo = fmtMonthShort(d.getMonth());
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${dd} ${mo} ${hh}:${mm}`;
+  } catch {
+    return String(startTime);
+  }
+}
+
 export function AnalyticsView({ period, sessionId }: Props) {
   // v2.10.0 R1+R2 + v2.10.1: live API hooks для ВСЕХ 11 блоков.
   // 01 KPI, 02 Score, 03 Speed, 04 PlanFact, 05 Map, 06 Behavior, 07 Traffic,
   // 08 Geo, 09 Heavy, 10 Routes, 11 Quality — все используют live API.
-  const stats = useSessionStats(sessionId);
-  const track = useV4Track(sessionId);
-  const events = useV4Events(sessionId);
-  const comparison = useRouteComparison(sessionId); // v2.10.1: для блока 04
+  // v2.43.0 (CR-L): в режиме выбранной поездки одиночные запросы записи
+  // отключены — агрегат по sessionIds поездки питает все блоки.
+  const tripMode = isTripSelection(sessionId);
+  const singleId = tripMode ? null : sessionId;
+  const stats = useSessionStats(singleId);
+  const track = useV4Track(singleId);
+  const events = useV4Events(singleId);
+  const comparison = useRouteComparison(singleId); // v2.10.1: для блока 04
   // v2.12.0 (D-8): блоки 09/10 уважают выбранный период (?period= на сервере)
   const groups = useRouteGroups(period);
   const heavy = useHeavySegments(period);
@@ -111,9 +137,20 @@ export function AnalyticsView({ period, sessionId }: Props) {
   const sessions = useSessions(SESSIONS_LIST_QUERY);
 
   // v2.10.2: период-режим — метрики по ВСЕМ поездкам выбранного периода.
-  // Активен, когда конкретная поездка не выбрана (клик по period-pill).
-  // Выбор конкретной поездки в dropdown → только её данные (режим ниже).
-  const periodAgg = usePeriodStats(period);
+  // Активен, когда конкретная поездка не выбрана (клик по period-pill) ИЛИ
+  // выбрана поездка из dropdown ("t:<tripId>") — тогда агрегат по ЕЁ
+  // sessionIds (v2.43.0 CR-L: синхрон со вкладкой «Поездки» — куски-фрагменты
+  // записи больше не появляются в «Аналитике» отдельными карточками).
+  // Выбор конкретной записи (обычный UUID) → только её данные (режим ниже).
+  const periodAgg = usePeriodStats(period, sessionId);
+  // v2.43.0 (CR-L): метаданные выбранной поездки — из общего кэша /api/trips
+  // (тот же queryKey, что dropdown и вкладка «Поездки» — без лишнего запроса).
+  const tripsQ = useTrips({ limit: 50 });
+  const selectedTrip = React.useMemo(() => {
+    if (!tripMode || !sessionId) return null;
+    const tid = sessionId.slice(2);
+    return tripsQ.data?.trips.find((t) => t.id === tid) ?? null;
+  }, [tripMode, sessionId, tripsQ.data]);
   // v2.13.0 (Ф1): §4.5 MaxSpeedAllTime — один запрос на приложение (кэш 5 мин)
   const speedRecord = useSpeedRecord();
   const record = speedRecord.data
@@ -143,15 +180,17 @@ export function AnalyticsView({ period, sessionId }: Props) {
     return () => mo.disconnect();
   }, []);
 
-  // === Период-режим: все метрики по поездкам за выбранный период ===
-  if (!sessionId) {
+  // === Период-режим / режим выбранной поездки: метрики по агрегату ===
+  if (!sessionId || tripMode) {
     const agg = periodAgg.data;
 
     if (periodAgg.isLoading) {
       return (
         <div ref={rootRef}>
           <div className="card" style={{ padding: "28px 20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
-            Считаем метрики за период «{PERIOD_LABELS[period]}»…
+            {tripMode
+              ? "Считаем метрики поездки…"
+              : `Считаем метрики за период «${PERIOD_LABELS[period]}»…`}
           </div>
         </div>
       );
@@ -161,7 +200,9 @@ export function AnalyticsView({ period, sessionId }: Props) {
       return (
         <div ref={rootRef}>
           <div className="card" style={{ padding: "28px 20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
-            Не удалось загрузить метрики за период. Обновите страницу или нажмите ⟳ в панели сверху.
+            {tripMode
+              ? "Не удалось загрузить метрики поездки. Обновите страницу или нажмите ⟳ в панели сверху."
+              : "Не удалось загрузить метрики за период. Обновите страницу или нажмите ⟳ в панели сверху."}
           </div>
           <HeavySegmentsBlock data={heavy.data} isLoading={heavy.isLoading} />
           <RoutesBlock groups={groups.data} />
@@ -173,11 +214,16 @@ export function AnalyticsView({ period, sessionId }: Props) {
       return (
         <div ref={rootRef}>
           <div className="card" style={{ padding: "28px 20px", textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
-            За период «{PERIOD_LABELS[period]}» поездок нет.
-            <br />
-            {/* v2.31.0 (MAJ-11): фильтр листает ЗАПИСИ (сессии) — честное слово,
-                «поездка» остаётся за вкладкой «Поездки» (серверные Trip) */}
-            Выберите другой период или конкретную запись в фильтре «Все записи · период».
+            {tripMode
+              ? "Поездка ещё собирается: записей с посчитанными метриками нет. Обновите страницу или нажмите ⟳ в панели сверху."
+              : `За период «${PERIOD_LABELS[period]}» поездок нет.`}
+            {!tripMode && (
+              <>
+                <br />
+                {/* v2.43.0 (CR-L): dropdown листает ПОЕЗДКИ — слово «запись» здесь больше не встречается */}
+                Выберите другой период или конкретную поездку в фильтре «Все поездки · период».
+              </>
+            )}
           </div>
           <HeavySegmentsBlock data={heavy.data} isLoading={heavy.isLoading} />
           <RoutesBlock groups={groups.data} />
@@ -185,10 +231,10 @@ export function AnalyticsView({ period, sessionId }: Props) {
       );
     }
 
-    // Блоки 01–08 и 11 — агрегат периода; 09/10 — агрегаты по routeHash-группам.
+    // Блоки 01–08 и 11 — агрегат периода/поездки; 09/10 — агрегаты по routeHash-группам.
     return (
       <div ref={rootRef}>
-        <PeriodHeader agg={agg} period={period} />
+        <PeriodHeader agg={agg} period={period} tripSelectedAt={selectedTrip?.spanStart ?? null} />
         <KpiBlock stats={agg.stats} period={period} record={record} aggregated />
         <DrivingScoreBlock stats={agg.stats} events={agg.events} aggregated />
         <SpeedProfileBlock stats={agg.stats} aggregated />
@@ -261,7 +307,18 @@ const PERIOD_LABELS: Record<PeriodKey, string> = {
 };
 
 // Шапка периода (период-режим, v2.10.2): N поездок + диапазон дат + сводный таймлайн.
-function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey }) {
+// v2.43.0 (CR-L, R5/R6): режим выбранной поездки — ярлык «поездка», заголовок
+// «ДД МЕС ЧЧ:ММ» вместо названия периода, счётчик «1 поездка · N записей».
+function PeriodHeader({
+  agg,
+  period,
+  tripSelectedAt,
+}: {
+  agg: PeriodAggregate;
+  period: PeriodKey;
+  tripSelectedAt?: string | null;
+}) {
+  const tripTitle = tripSelectedAt ? fmtTripSpanLabel(tripSelectedAt) : null;
   const totalMin = secToMin(agg.stats.duration);
   // FIX-C1: «в поездках» — Σ активных длительностей (§4.11), а не Σ MovingTime:
   // светофоры и пробки внутри поездок — часть поездки, а не «не-поездка».
@@ -301,9 +358,9 @@ function PeriodHeader({ agg, period }: { agg: PeriodAggregate; period: PeriodKey
   return (
     <div className="session">
       <div className="session-top">
-        <span className="s-lab">период</span>
+        <span className="s-lab">{tripTitle ? "поездка" : "период"}</span>
         <b>
-          {PERIOD_LABELS[period]} · {fmt(d1)}–{fmt(d2)}
+          {tripTitle ?? PERIOD_LABELS[period]} · {fmt(d1)}–{fmt(d2)}
         </b>
         <span>
           {fmtNumber(agg.trips)} {tripsWord}

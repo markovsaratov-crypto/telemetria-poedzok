@@ -1,7 +1,8 @@
 // src/lib/trip-hooks.ts — v2.26.0 (ТЗ «Поездка не рвётся», §10/§11): React Query
 // хуки ПОЕЗДОК. Зеркалируют паттерн записей (hooks.ts / v2.17.0 батч-статс):
 //   useTrips()            — лёгкий список /api/trips (кэш-агрегаты карточек);
-//   useTripsStatsBatch()  — полные статы ≤50 поездок ОДНИМ /api/trips/batch,
+//   useTripsStatsBatch()  — полные статы поездок батчем /api/trips/batch
+//                           (чанки по 8 — субреквест-лимит CF, v2.43.1),
 //                           ответ сеется в per-trip кэш ["trip-stats", id];
 //   useTripStats(id)      — полная статистика поездки (раскрытая карточка).
 // TRIP_ENABLED=false → список пуст (disabled: true), UI переключается на
@@ -37,9 +38,30 @@ export function useTrips(params?: { limit?: number }) {
   });
 }
 
+// v2.43.1 (CR-M, субреквест-фикс): ЧАНКИ ПО 8 ПОЕЗДОК на HTTP-запрос.
+// Один запрос на все 39+ поездок убивал инвокацию CF Worker: каждая поездка —
+// это loadTripById + точки сессий + UPDATE Trip ≈ 2–4 сабреквеста к D1-шлюзу,
+// лимит Cloudflare — 50 сабреквестов НА INVOCATION → 39 поездок ≈ 100+ →
+// «Too many subrequests» → HTTP 500 → сводка вкладки «Поездки» вечно
+// «считаем сводку…». Чанк 8 ≈ 26–37 сабреквестов — безопасный запас; parity
+// с паттерном fetchSessionsStatsBatch→chunks (записи, v2.17.0). Сервер
+// по-прежнему принимает ≤50 id (BATCH_MAX_IDS) — чанкирование только клиент.
+export const TRIPS_BATCH_MAX_IDS = 8;
+
 export async function fetchTripsStatsBatch(ids: string[]): Promise<TripsBatchResponse> {
-  if (ids.length === 0) return { stats: [], missing: [] };
-  return api.get<TripsBatchResponse>("/api/trips/batch", { ids: ids.join(",") });
+  const uniq = Array.from(new Set(ids.filter(Boolean)));
+  if (uniq.length === 0) return { stats: [], missing: [] };
+  const chunks: string[][] = [];
+  for (let i = 0; i < uniq.length; i += TRIPS_BATCH_MAX_IDS) {
+    chunks.push(uniq.slice(i, i + TRIPS_BATCH_MAX_IDS));
+  }
+  const parts = await Promise.all(
+    chunks.map((c) => api.get<TripsBatchResponse>("/api/trips/batch", { ids: c.join(",") }))
+  );
+  return {
+    stats: parts.flatMap((p) => p.stats ?? []),
+    missing: parts.flatMap((p) => p.missing ?? []),
+  };
 }
 
 /** Сеяние батч-ответа в per-trip кэш (паттерн seedSessionsStatsFromBatch). */

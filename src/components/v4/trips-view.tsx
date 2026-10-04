@@ -1556,7 +1556,11 @@ function TripSummaryServer({ trips }: { trips: import("@/lib/api-client").TripLi
     }
   }
   const avgEco = ecoW > 0 ? Math.max(0, Math.min(100, Math.round(ecoWSum / ecoW))) : null;
-  const computing = stats.length < trips.length;
+  // v2.43.1 (CR-M): missing (невидимые/удалённые поездки) тоже «учтены» —
+  // иначе сводка навечно висела в «считаем сводку…», если хоть одна поездка
+  // списка недоступна батчу (изоляция скоупа, retire-движок шлюза).
+  const accounted = stats.length + (batch.data?.missing?.length ?? 0);
+  const computing = accounted < trips.length;
 
   return (
     <div className="card tsum">

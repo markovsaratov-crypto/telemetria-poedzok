@@ -22,14 +22,6 @@
   "compatibility_flags": ["nodejs_compat"],
   "account_id": "b8e4eee2f19ba22f8d9ccce80691e719",
   "workers_dev": true,
-  // v2.44.0 (CR-G A8 «exceededResources»): явный CPU-потолок 30 с. Дефолт
-  // аккаунта (10 с) резал пиковые минуты: тик-кроны + TrafficJob-роутинг +
-  // полный пересчёт батча поездок на холодной вкладке = 803 ошибок/24 ч
-  // (22,3% трафика, Error 1102 + отравленные изоляты). 30 с — максимум paid-
-  // плана без спец-одобрения; штормы ЗАВЕРШАЮТСЯ, а не умирают на 10-й секунде.
-  "limits": {
-    "cpu_ms": 30000
-  },
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"

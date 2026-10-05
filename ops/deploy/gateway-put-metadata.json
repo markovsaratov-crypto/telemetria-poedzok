@@ -2,6 +2,9 @@
   "main_module": "d1-gateway.js",
   "compatibility_date": "2026-09-01",
   "keep_secrets": true,
+  "limits": {
+    "cpu_ms": 30000
+  },
   "bindings": [
     { "type": "plain_text", "name": "APP_ORIGIN", "text": "https://poedzok.fun" },
     { "type": "plain_text", "name": "EDGE_INGEST_MAX_BYTES", "text": "1048576" },

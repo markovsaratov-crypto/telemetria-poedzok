@@ -94,6 +94,27 @@
 //  ручной heal); User — НИКОГДА (даже при флаге). SELECT/PRAGMA — как было.
 //  /health version 2.47.0.
 //
+// ─── v3.6 (CR-G-finish, 2026-10-05 «доделывай аудит»: durable-фиксы A1/A8) ───
+//  A1-DURABLE fmDayAudit + флаг fm:dirtyScan: удаления/восстановления юзера
+//     (UPDATE Session SET deletedAt…) в /query|/batch ставят KV-флаг — day-
+//     audit на СЛЕДУЮЩЕМ тике пересчитывает замороженные суточные строки
+//     (до сих пор дрейф лечился разовым реконсайлом: удаления старше 7-днев-
+//     ного окна refresh7d оставляли призраков в KPI — прод-кейс 01-02.10:
+//     +9703 точки/+10,7%). Гарантия — каждые 10 минут (импорт в старый день,
+//     внутренние мутации движка, любой другой источник дрейфа). Сверка — по
+//     ТОЧНОЙ методологии fmComputeDays (тот же rollupDayKey/TZ, тот же мап-
+//     пинг userId): несовпадение = реальный дрейф, а не артефакт ключа.
+//     Прунинг: день без живого состава юзера → его StatsRollup-строка
+//     удаляется (зомби-дни 09-03 больше невозможны конструктивно).
+//  A6/A7-РЕСИНК fm:resync:statsv3: после деплоя приложения ≥ 2.44.0 (проверка
+//     GET /health — безопасен при любом порядке деплоев) — одноразово NULL-ит
+//     statsComputedAt всех финальных поездок; прогрев tsw пересчитает их
+//     новым кодом (MaxSpeed: гео-корроборация спайк-поездов + гео-фоллбек
+//     для NULL-speed; 9 поездок/тик, ~30 мин на весь парк).
+//  A8 limits.cpu_ms=30000 в PUT-метаданных (был дефолт аккаунта 10 с —
+//     exceededResources в пиковые минуты).
+//  /health version 2.48.0.
+//
 // Эндпоинты:
 //   GET  /health                          → {ok, gateway:"d1", db:"bound"}
 //   POST /query   {sql, params?}          → {rows, rowsAffected, meta}
@@ -1422,6 +1443,120 @@ async function fmWriteDayRows(env, rows) {
   return rows.length;
 }
 
+// ——— v3.6 (CR-G A1-durable): day-audit замороженных дней ———
+
+/** Пересчёт ОДНОГО rollup-дня из живых сессий (методология fmComputeDays)
+ *  + прунинг строк userId, исчезнувших из состава дня (все сессии юзера
+ *  удалены → его строка дня не остаётся призраком). Возвращает кол-во строк. */
+async function fmRecomputeDay(env, zone, day) {
+  const fromMs = Date.parse(day + "T00:00:00Z") - 64800000;
+  const toMs = Date.parse(fmNextDayKey(day) + "T00:00:00Z") + 64800000;
+  const rows = fmComputeDays(await fmSessionsInRange(env, fromMs, toMs), day, day, zone);
+  await fmWriteDayRows(env, rows);
+  if (rows.length > 0) {
+    const keep = rows.map((r) => r.userId);
+    const ph = keep.map(() => "?").join(", ");
+    await env.DB.prepare(`DELETE FROM StatsRollup WHERE day = ? AND userId NOT IN (${ph})`).bind(day, ...keep).run();
+  } else {
+    await env.DB.prepare("DELETE FROM StatsRollup WHERE day = ?").bind(day).run();
+  }
+  return rows.length;
+}
+
+/** Day-audit: живые суточные счётчики против StatsRollup; грязные дни —
+ *  на пересчёт. Дёшево: 2 запроса (~сессии + ~25 Rollup-строк), без GpsPoint
+ *  и без JSON-парсинга. Группировка — В JS тем же rollupDayKey(ts, zone),
+ *  что fmComputeDays (SQL substr дал бы UTC-день ≠ локальный день rollup —
+ *  ложные несовпадения в вечерних сессиях). МАСШТАБ: выборка всех живых
+ *  сессий (~сотни строк сегодня) растёт линейно с историей — при десятках
+ *  тысяч записей перевести на инкрементальные окна (day-audit уже имеет
+ *  флаг-триггер для этого).
+ *  ВНИМАНИЕ: дистанции/длительности замороженных дней НЕ сверяются — это
+ *  архитектура заморозки (история вычислена один раз); reconcilится только
+ *  состав и счётчики (сессии/точки), которые видит KPI. */
+async function fmDayAudit(env, zone, todayKey) {
+  const live = await env.DB.prepare(
+    "SELECT startTime, userId, pointCount FROM Session WHERE deletedAt IS NULL"
+  ).all();
+  const liveMap = new Map(); // "day|uid" → {day, c, p}
+  for (const s of live.results ?? []) {
+    const ts = Date.parse(String(s.startTime));
+    if (!Number.isFinite(ts)) continue;
+    const day = rollupDayKey(ts, zone);
+    const uid = s.userId == null ? "" : String(s.userId);
+    const k = day + "|" + uid;
+    let d = liveMap.get(k);
+    if (!d) {
+      d = { day, c: 0, p: 0 };
+      liveMap.set(k, d);
+    }
+    d.c += 1;
+    d.p += Number(s.pointCount ?? 0);
+  }
+  const roll = await env.DB.prepare(
+    "SELECT day, COALESCE(userId, '') AS uid, sessions AS c, points AS p FROM StatsRollup"
+  ).all();
+  const rollMap = new Map(); // "day|uid" → {day, c, p}
+  for (const r of roll.results ?? []) {
+    if (typeof r.day !== "string") continue;
+    rollMap.set(r.day + "|" + String(r.uid), { day: r.day, c: Number(r.c), p: Number(r.p) });
+  }
+  const dirtyDays = new Set();
+  for (const [k, l] of liveMap) {
+    if (l.day >= todayKey) continue; // «сегодня» живёт в минутном пересчёте (шаг 2)
+    const rr = rollMap.get(k);
+    if (!rr || rr.c !== l.c || rr.p !== l.p) dirtyDays.add(l.day);
+  }
+  for (const [k, rr] of rollMap) {
+    if (rr.day >= todayKey) continue;
+    if (!liveMap.has(k)) dirtyDays.add(rr.day); // исчезнувший состав/юзер/зомби-строка
+  }
+  let rows = 0;
+  for (const day of dirtyDays) {
+    rows += await fmRecomputeDay(env, zone, day);
+  }
+  if (dirtyDays.size > 0) {
+    console.log(JSON.stringify({ level: "info", msg: "fm day-audit: dirty days reconciled", days: [...dirtyDays], rows }));
+  }
+  return { days: liveMap.size, dirty: dirtyDays.size, rows };
+}
+
+/** SQL-паттерн мутации СОСТАВА Session (soft-delete/restore/hard-delete) —
+ *  триггер флага fm:dirtyScan. deletedAt ищется ТОЛЬКО в SET-ветке (WHERE-
+ *  упоминания — например tripId-обновки сегментации — не триггерят). INSERT
+ *  НЕ триггерит: ингест создаёт только сегодняшние сессии (день живёт в
+ *  минутном пересчёте), а редкий импорт в старый день ловит гарантийный
+ *  10-минутный аудит. */
+function fmSessionMutationSql(sql) {
+  if (typeof sql !== "string") return false;
+  const s = sql.replace(/\s+/g, " ").trim();
+  if (/^UPDATE Session SET /i.test(s)) {
+    const setPart = s.split(/\bWHERE\b/i)[0];
+    return /(^|[\s,(])deletedAt([\s=,]|$)/i.test(setPart);
+  }
+  return /^DELETE FROM Session\b/i.test(s);
+}
+
+/** Постановка флага грязного day-audit (KV, TTL 2 ч — флаг не гниёт). */
+async function fmMarkDirtyScan(env) {
+  try {
+    if (env.KV) await env.KV.put("fm:dirtyScan", new Date().toISOString(), { expirationTtl: 7200 });
+  } catch (e) {
+    console.warn(JSON.stringify({ level: "warn", msg: "fm dirtyScan flag put failed", error: String((e && e.message) || e) }));
+  }
+}
+
+/** Сравнение семвер-строк приложения («2.43.1» ≥ «2.44.0»?) — гейт ресинка. */
+function fmAppVersionAtLeast(ver, min) {
+  const a = String(ver).split(".").map((x) => parseInt(x, 10) || 0);
+  const b = String(min).split(".").map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d !== 0) return d > 0;
+  }
+  return true;
+}
+
 /** Разовый бэкфилл всей истории + чистка мусорных StatsRollup-строк.
  *  KV-маркер fm:backfill:v1 — идемпотентность (повтор = no-op). */
 async function fmBackfillOnce(env, zone, yesterdayKey) {
@@ -1883,7 +2018,7 @@ async function fmEngineTick(env) {
   const todayKey = rollupDayKey(now, zone);
   const yesterdayKey = rollupDayKey(now - 86400000, zone);
   const kv = env.KV;
-  const out = { todayRows: 0, froze: 0, refresh7d: false, tsw: null, backupReaped: 0, adopted: 0, merged: 0, retired: 0, silentAudits: 0, softDeleted: 0 }; // v3.2: +softDeleted
+  const out = { todayRows: 0, froze: 0, refresh7d: false, tsw: null, backupReaped: 0, adopted: 0, merged: 0, retired: 0, silentAudits: 0, softDeleted: 0, dayAudit: null, resyncStatsV3: null }; // v3.6: +dayAudit/+resyncStatsV3
   // 1) backfill-once (идемпотентен по KV-маркеру)
   try {
     await fmBackfillOnce(env, zone, yesterdayKey);
@@ -1938,6 +2073,23 @@ async function fmEngineTick(env) {
     } catch (e) {
       console.log(JSON.stringify({ level: "warn", msg: "fm refresh7d step failed", error: String((e && e.message) || e) }));
     }
+  }
+  // 4b) v3.6 (CR-G A1-durable): day-audit — реконсайл ЗАМОРОЖЕННЫХ дней.
+  // Живые суточные счётчики (только Session, без GpsPoint-сканов и без
+  // парсинга statsCache) против StatsRollup; несовпавшие дни пересчитываются
+  // и прунятся от исчезнувших составов. Триггеры: флаг fm:dirtyScan (ставится
+  // /query|/batch сразу после Session-мутаций состава — удаления юзера видны
+  // в KPI ≤ минуты) + гарантия каждые 10 минут (импорт в старый день,
+  // внутренние мутации движка, любые прочие источники дрейфа). День «сегодня»
+  // исключён — его строка и так пересчитывается каждую минуту (шаг 2).
+  try {
+    const flagged = kv ? await kv.get("fm:dirtyScan").catch(() => null) : null;
+    if (flagged || new Date(now).getUTCMinutes() % 10 === 0) {
+      out.dayAudit = await fmDayAudit(env, zone, todayKey);
+      if (flagged && kv) await kv.delete("fm:dirtyScan").catch(() => {});
+    }
+  } catch (e) {
+    console.log(JSON.stringify({ level: "warn", msg: "fm day-audit step failed", error: String((e && e.message) || e) }));
   }
   // 5) раз в 5 минут: рекон BackupJob → adopt (F2) → merge (F3) → прогрев tsw
   if (new Date(now).getUTCMinutes() % 5 === 0) {
@@ -2005,6 +2157,40 @@ async function fmEngineTick(env) {
       }
     } catch (e) {
       console.log(JSON.stringify({ level: "warn", msg: "fm device-silence audit failed", error: String((e && e.message) || e) }));
+    }
+    // v3.6 (CR-G A6/A7): ОДНОРАЗОВЫЙ ресинк метрик поездок на методологию
+    // v2.44.0 (MaxSpeed: геометрическая корроборация спайк-поездов + гео-
+    // фоллбек для NULL-speed). Безопасен при ЛЮБОМ порядке деплоев: шаг ждёт
+    // приложение версии ≥ 2.44.0 (GET /health), только тогда NULL-ит
+    // statsComputedAt всех финальных поездок — прогрев tsw ниже пересчитает
+    // их НОВЫМ кодом (9 поездок/тик, ~30 мин на весь парк). KV-маркер
+    // fm:resync:statsv3 — идемпотентность.
+    try {
+      if (kv && env.APP_ORIGIN && !(await kv.get("fm:resync:statsv3").catch(() => null))) {
+        const ctrl = new AbortController();
+        const tm = setTimeout(() => ctrl.abort(), 10000);
+        let ver = null;
+        try {
+          const r = await fetch(env.APP_ORIGIN + "/health", { signal: ctrl.signal });
+          if (r.ok) {
+            const hv = await r.json().catch(() => null);
+            ver = hv && typeof hv.version === "string" ? hv.version : null;
+          }
+        } finally {
+          clearTimeout(tm);
+        }
+        if (ver && fmAppVersionAtLeast(ver, "2.44.0")) {
+          const u = await env.DB.prepare(
+            "UPDATE Trip SET statsComputedAt = NULL WHERE statsComputedAt IS NOT NULL AND deletedAt IS NULL"
+          ).run();
+          const trips = Number(u.meta?.changes ?? 0);
+          await kv.put("fm:resync:statsv3", JSON.stringify({ at: new Date(now).toISOString(), appVersion: ver, trips }));
+          out.resyncStatsV3 = { appVersion: ver, trips };
+          console.log(JSON.stringify({ level: "info", msg: "fm resync statsv3: trips queued for recompute", appVersion: ver, trips }));
+        }
+      }
+    } catch (e) {
+      console.log(JSON.stringify({ level: "warn", msg: "fm resync statsv3 step failed", error: String((e && e.message) || e) }));
     }
     try {
       // v3.2 (CR-I): окно tsw 10 минут (было 6 ч — свежие поездки висели
@@ -2117,7 +2303,7 @@ const worker = {
       // v2.42.0: + TripCalc в ALLOWED_TABLES + CREATE_TRIPCALC_RE.
       // v3 (CR-C): gateway v3 — двойной секрет + схлопывание кронов + FM +
       // adopt/merge (полный список — шапка файла / docs/OPERATIONS.md §13).
-      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.47.0" });
+      return json({ ok: true, gateway: "d1", db: env.DB ? "bound" : "missing-binding", version: "2.48.0" });
     }
 
     // v2.39.1 (§B1): edge-инжест — ДО гейта X-Gateway-Secret: канал имеет
@@ -2230,6 +2416,14 @@ const worker = {
         const res = await stmt.all();
         // v2.40.9 (Pack C §P1-a): учёт расхода в бюджет-метр дня
         budgetTrack(res.meta?.rows_read ?? 0, res.meta?.rows_written ?? 0);
+        // v3.6 (CR-G A1-durable): Session-мутация состава (soft-delete/restore/
+        // hard-delete) → флаг fm:dirtyScan — day-audit на следующем тике
+        // пересчитает ЗАМОРОЖЕННЫЕ суточные строки (удаления старше 7-дневного
+        // окна refresh7d больше не оставляют призраков в KPI — дрейф закрыт
+        // конструктивно, а не разовым реконсайлом).
+        if (FM_ENABLED && fmSessionMutationSql(sql) && ctx && ctx.waitUntil) {
+          ctx.waitUntil(fmMarkDirtyScan(env));
+        }
         if (ctx && ctx.waitUntil) ctx.waitUntil(flushBudgetPending({}));
         return json({
           rows: bigintSafe(res.results ?? []),
@@ -2314,6 +2508,11 @@ const worker = {
         for (const r of results) {
           budgetTrack(r.meta?.rows_read ?? 0, r.meta?.rows_written ?? 0);
         }
+        // v3.6 (CR-G A1-durable): Session-мутации в составе атомарного батча
+        // (DELETE /api/trips/[id] шлёт сессии+поездку одним /batch)
+        if (FM_ENABLED && ctx && ctx.waitUntil && statements.some((s) => fmSessionMutationSql(s.sql))) {
+          ctx.waitUntil(fmMarkDirtyScan(env));
+        }
         if (ctx && ctx.waitUntil) ctx.waitUntil(flushBudgetPending({}));
         return json(results.map((r) => ({
           rows: bigintSafe(r.results ?? []),
@@ -2369,7 +2568,7 @@ const worker = {
     if (jobs.includes("tick")) {
       try {
         const fmOut = await fmEngineTick(env);
-        console.log(JSON.stringify({ level: "info", msg: "fm engine tick", today: fmOut.todayRows, froze: fmOut.froze, refresh7d: fmOut.refresh7d, tsw: fmOut.tsw, backupReaped: fmOut.backupReaped, adopted: fmOut.adopted, merged: fmOut.merged, retired: fmOut.retired, silentAudits: fmOut.silentAudits })); // v3.1
+        console.log(JSON.stringify({ level: "info", msg: "fm engine tick", today: fmOut.todayRows, froze: fmOut.froze, refresh7d: fmOut.refresh7d, tsw: fmOut.tsw, backupReaped: fmOut.backupReaped, adopted: fmOut.adopted, merged: fmOut.merged, retired: fmOut.retired, silentAudits: fmOut.silentAudits, dayAudit: fmOut.dayAudit, resyncStatsV3: fmOut.resyncStatsV3 })); // v3.6: +dayAudit/+resyncStatsV3
       } catch (e) {
         console.log(JSON.stringify({ level: "warn", msg: "fm engine tick failed", error: String((e && e.message) || e) }));
       }

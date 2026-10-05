@@ -69,6 +69,12 @@ export const MAX_TRUSTED_ACCURACY_M = 100;
 export interface SpeedPoint {
   speed?: number | null;
   accuracy?: number | null;
+  // v2.44.0 (CR-G A6/A7): опциональная геометрия для корроборации MaxSpeed —
+  // все живые вызовы (session-stats/share/trip-stats) передают полные точки;
+  // интерфейс остаётся структурно совместимым со старыми вызовами.
+  lat?: number | null;
+  lon?: number | null;
+  timestamp?: number | null;
 }
 
 export function isUsableSpeedPoint(p: SpeedPoint): boolean {
@@ -184,17 +190,61 @@ export function rejectSpeedOutliersByDisplacement<P extends NormalizablePoint>(p
 
 /** MaxSpeed (§4.4) с фильтром выбросов. Нет пригодных точек → null.
  *  v2.12.0 (D-6): поверх статических границ (правдоподобие/точность) — 3-точечная
- *  медиана: одиночный GPS-спайк больше не становится «максимальной скоростью». */
+ *  медиана: одиночный GPS-спайк больше не становится «максимальной скоростью».
+ *  v2.44.0 (CR-G A6): ГЕОМЕТРИЧЕСКАЯ КОРРОБОРАЦИЯ. Прод-кейс 22.09 (01ff4ede,
+ *  городская 9,1 км): спайк-ПОЕЗД скорости — 8+ сек подряд 45–48 м/с — выживает
+ *  и медиану-3 (соседи-спайки), и кап 200 км/ч, и rejectSpeedOutliers (позиция
+ *  в мультипате сместилась синхронно) → «Макс 173 км/ч» на городской поездке.
+ *  Правило честности: заявленная скорость обязана ПОДТВЕРЖДАТЬСЯ перемещением —
+ *  MaxSpeed не выше, чем max(геометрия плотных интервалов) × допуск. Реальный
+ *  пик на трассе (позиция идёт 46 м/с) подтверждается и остаётся; спайк-поезд без
+ *  геометрии под собой — клампится к подтверждённому потолку.
+ *  (CR-G A7): у записей без поля speed (импорт 59583bd0: 14,5 км реальных,
+ *  «Макс 0») — геометрический максимум вместо нуля. */
+export const MAX_SPEED_CORROB_TOLERANCE = 1.25; // хорда vs дуга (повороты), джиттер фикс-точек
+export const MAX_SPEED_CORROB_ABS_MS = 2; // м/с — абсолютный люк GPS-перемещения
+const MAX_SPEED_CORROB_MAX_DT_SEC = 3; // корроборация только плотными интервалами (разреженные — средняя, не мгновенная)
+
+interface GeoSpeedMax {
+  raw: number; // честный геометрический максимум (фоллбек A7)
+  cap: number; // потолок корроборации (кламп A6)
+}
+
+function geoSpeedMax(points: SpeedPoint[]): GeoSpeedMax | null {
+  // Геометрия нужна ВСЮ: дырка в ряду создаёт ложный «провал» потолка —
+  // кламп по неполной геометрии недостоверен → корроборация отключается.
+  for (const p of points) {
+    if (p.lat == null || p.lon == null || p.timestamp == null) return null;
+  }
+  let raw: number | null = null;
+  for (let i = 1; i < points.length; i++) {
+    const dt = ((points[i].timestamp as number) - (points[i - 1].timestamp as number)) / 1000; // сек
+    if (dt < 0.5 || dt > MAX_SPEED_CORROB_MAX_DT_SEC) continue; // разреженный/нулевой интервал не корроборирует
+    // телепорт-интервал (jump/dt > 200 км/ч) в потолок не попадает: см. plausibleIntervalM
+    const v = plausibleIntervalM(
+      points[i - 1].lat as number, points[i - 1].lon as number,
+      points[i].lat as number, points[i].lon as number, dt
+    ) / dt;
+    if (!Number.isFinite(v)) continue;
+    if (raw == null || v > raw) raw = v;
+  }
+  if (raw == null) return null;
+  return { raw, cap: raw * MAX_SPEED_CORROB_TOLERANCE + MAX_SPEED_CORROB_ABS_MS };
+}
+
 export function maxSpeedMs(points: SpeedPoint[]): number | null {
   const smoothed = medianSmooth3(
     points.map((p) => (isUsableSpeedPoint(p) ? (p.speed as number) : null))
   );
-  let max: number | null = null;
+  let maxRecorded: number | null = null;
   for (const v of smoothed) {
     if (v == null) continue;
-    if (max == null || v > max) max = v;
+    if (maxRecorded == null || v > maxRecorded) maxRecorded = v;
   }
-  return max;
+  const geo = geoSpeedMax(points);
+  if (maxRecorded == null) return geo ? geo.raw : null; // A7: speed NULL → геометрия вместо 0
+  if (geo == null) return maxRecorded; // геометрии нет — прежняя семантика
+  return Math.min(maxRecorded, geo.cap); // A6: спайк-поезд клампится к подтверждённому
 }
 
 /**

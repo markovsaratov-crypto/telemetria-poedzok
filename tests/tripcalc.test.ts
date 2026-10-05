@@ -183,7 +183,7 @@ describe("«Вариант 1» §3 buildTripCalcUpserts — COALESCE-мердж 
     expect(stmts).toHaveLength(1);
     // метрики-ветка несёт ТОЛЬКО свой штамп (args: 4=statsV, 8..13 — метрики)
     const args = stmts[0].args as unknown[];
-    expect(args[4]).toBe(2); // statsCacheV
+    expect(args[4]).toBe(3); // statsCacheV (v2.44.0/CR-G: конвейер stats v3 — корроборация MaxSpeed)
     expect(args[8]).toBe(118_200); // distanceM
     expect(args[13]).toBe(1_776_480); // teleportDistanceM
     expect(args[14]).toBeNull(); // eventsJson — не поле этой ветки

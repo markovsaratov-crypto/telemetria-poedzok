@@ -33,7 +33,11 @@ export type SessionCacheField = "stats" | "events" | "track";
 
 /** Текущие версии конвейеров трёх кэш-полей сессии (см. историю выше). */
 export const CACHE_PIPELINE_VERSIONS: Record<SessionCacheField, number> = {
-  stats: 2,
+  // stats: 3 = v2.44.0 (CR-G A6/A7): MaxSpeed — геометрическая корроборация
+  //        (спайк-поезда скорости клампятся к подтверждённому геометрией
+  //        потолку) + гео-фоллбек для записей без поля speed; sparse-гейт
+  //        детектора движения (A3) шевелит movingTime/gapTime фантомных окон.
+  stats: 3,
   events: 1,
   track: 2,
 };

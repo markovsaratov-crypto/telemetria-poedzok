@@ -162,8 +162,30 @@ export function computeMovingTime(points: MethodologyPoint[]): MotionResult {
       // session-stats), gapTime оставался 0 при километрах разрывов. Телепорт ≠
       // движение: интервал честно становится gap. Легитимные блипы §4.6а
       // (90 м–3,4 км с дырами 6–10 мин = 0,2–9 м/с) — проходят как раньше.
-      if (jump >= e.SPARSE_MOVE_MIN_M && !isTeleportInterval(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon, dt)) {
-        intervals.push({ dt, v: jump / dt, isGap: false, isSparse: true });
+      //
+      // v2.44.0 (CR-G A3 «фантомные поездки»): sparse-ветка — единственный путь
+      // детектора движения БЕЗ гейта скорости/точности, и парковочный GPS-шум
+      // ходил именно им. Прод-кейс 22.09 (фантом d3c7f22d): 50 стационарных
+      // сессий в помещении, скорость всех точек ≤ 2 км/ч, НО шумовые прыжки
+      // 75–300 м через дыры 30–60 с = jump/dt 3–7 м/с > MOVING_START →
+      // «движение» → фантомная «поездка» 8,5 км из чистого шума. Гейты:
+      //   • КОНТРАДИКЦИЯ УСТРОЙСТВА: средняя по дыре (jump/dt) противоречит
+      //     скорости в точке прибытия (устройство говорит «стоим», геометрия
+      //     «мчим») → шум, gap. Настоящий блип (прогулка 90 м–3,4 км: темп
+      //     ≥1,4 м/с в точке прибытия) противоречия не даёт: jump/dt согласован
+      //     с темпом прогулки.
+      //   • ПОЛ АКУРАСНОСТИ: jump должен превышать не только SPARSE_MOVE_MIN_M,
+      //     но и 2× заявленный радиус точности (в помещении accuracy 50–100 м
+      //     → прыжки до 200 м — это дрейф, а не перемещение).
+      const arrivalSpeed = points[i].speed;
+      const sparseV = jump / dt;
+      const deviceContradicts =
+        arrivalSpeed != null && arrivalSpeed >= 0 && sparseV > arrivalSpeed * 5 + 1;
+      const arrivalAcc = points[i].accuracy;
+      const sparseNoiseFloor =
+        arrivalAcc != null ? Math.max(e.SPARSE_MOVE_MIN_M, arrivalAcc * 2) : e.SPARSE_MOVE_MIN_M;
+      if (jump >= sparseNoiseFloor && !deviceContradicts && !isTeleportInterval(points[i - 1].lat, points[i - 1].lon, points[i].lat, points[i].lon, dt)) {
+        intervals.push({ dt, v: sparseV, isGap: false, isSparse: true });
       } else {
         intervals.push({ dt, v: 0, isGap: true, isSparse: false });
       }
